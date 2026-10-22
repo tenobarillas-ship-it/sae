@@ -31,7 +31,17 @@ local currentSettings = {
     AutoCatchButterfly = false,
     AutoWispQuest = false,
     TargetAreas = { ["All"] = true },
-    MinRarity = "All"
+    MinRarity = "All",
+    AutoHalloweenSteal = false,
+    AutoCandyCane = false,
+    TaskPriorities = {
+        "Auto Steal",
+        "Halloween Steal",
+        "Candy Cane Farm",
+        "Bloom Event",
+        "Auto Upgrades",
+        "Auto Treadmill"
+    }
 }
 
 local function saveStuff()
@@ -50,7 +60,9 @@ local function loadStuff()
                 for k, v in pairs(decoded) do
                     if k == "TargetAreas" and type(v) == "table" then
                         currentSettings.TargetAreas = v
-                                        elseif type(v) == "table" and type(currentSettings[k]) == "table" then
+                                        elseif k == "TaskPriorities" and type(v) == "table" then
+                        currentSettings.TaskPriorities = v
+                    elseif type(v) == "table" and type(currentSettings[k]) == "table" then
                         for k2, v2 in pairs(v) do currentSettings[k][k2] = v2 end
                     else
                         currentSettings[k] = v
@@ -81,6 +93,8 @@ getgenv().config.autoUpgradeBase = currentSettings.AutoUpgradeBase
 getgenv().config.autoClaimMastery = currentSettings.AutoClaimMastery
 getgenv().config.autoCatchButterfly = currentSettings.AutoCatchButterfly
 getgenv().config.autoWispQuest = currentSettings.AutoWispQuest
+getgenv().config.autoHalloweenSteal = currentSettings.AutoHalloweenSteal
+getgenv().config.autoCandyCane = currentSettings.AutoCandyCane
 
 local State = {
     currentStealSession = 0,
@@ -958,29 +972,511 @@ function BloomManager:ProcessWisps(isStealActive, hasEgg)
     end
 end
 
+
+-- ==============================================================================
+-- [ HALLOWEEN DIMENSION - PORTAL & TRANSITION CONTROLLER ]
+-- ==============================================================================
+local HalloweenPortalManager = {}
+local HALLOWEEN_DIM_CENTER = Vector3.new(-5808, -200, -7376)
+local HALLOWEEN_RADIUS = 2500
+
+function HalloweenPortalManager.IsInHalloweenDimension()
+    if LocalPlayer:GetAttribute("InHalloweenDimension") == true then
+        return true
+    end
+    local _, root = getAliveRig()
+    if root then
+        local dist = (root.Position - HALLOWEEN_DIM_CENTER).Magnitude
+        if dist <= HALLOWEEN_RADIUS then
+            return true
+        end
+    end
+    return false
+end
+
+function HalloweenPortalManager.EnterDimension(timeout)
+    timeout = timeout or 6.0
+    if HalloweenPortalManager.IsInHalloweenDimension() then
+        return true
+    end
+
+    local _, root, hum = getAliveRig()
+    if not root or not hum then return false end
+
+    local portalModel = Services.Workspace:FindFirstChild("HalloweenDimensionPortal", true)
+    local hitbox = portalModel and (portalModel:FindFirstChild("Hitbox") or portalModel:FindFirstChildWhichIsA("BasePart"))
+
+    if not hitbox then return false end
+
+    local deadline = os.clock() + timeout
+    while os.clock() < deadline do
+        if HalloweenPortalManager.IsInHalloweenDimension() then break end
+
+        local _, cRoot = getAliveRig()
+        if cRoot and hitbox and hitbox.Parent then
+            cRoot.CFrame = hitbox.CFrame
+            cRoot.AssemblyLinearVelocity = Vector3.zero
+            cRoot.AssemblyAngularVelocity = Vector3.zero
+
+            if typeof(firetouchinterest) == "function" then
+                pcall(firetouchinterest, cRoot, hitbox, 0)
+                task.wait(0.04)
+                pcall(firetouchinterest, cRoot, hitbox, 1)
+            end
+        end
+        task.wait(0.2)
+    end
+
+    task.wait(0.5)
+    return HalloweenPortalManager.IsInHalloweenDimension()
+end
+
+function HalloweenPortalManager.ExitDimension(timeout)
+    timeout = timeout or 6.0
+    if not HalloweenPortalManager.IsInHalloweenDimension() then
+        return true
+    end
+
+    local _, root, hum = getAliveRig()
+    if not root or not hum then return false end
+
+    local exitPart = nil
+    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    if dim then
+        local portalHome = dim:FindFirstChild("PortalHome", true)
+        if portalHome then
+            exitPart = portalHome:FindFirstChild("Portal") or portalHome:FindFirstChildWhichIsA("BasePart")
+        end
+        if not exitPart then
+            local questBuilding = dim:FindFirstChild("Quest Building", true)
+            if questBuilding then
+                exitPart = questBuilding:FindFirstChild("Portal") or questBuilding:FindFirstChildWhichIsA("BasePart")
+            end
+        end
+        if not exitPart then
+            for _, desc in ipairs(dim:GetDescendants()) do
+                if desc:IsA("BasePart") and desc.Name == "Portal" then
+                    exitPart = desc
+                    break
+                end
+            end
+        end
+    end
+
+    if not exitPart then return false end
+
+    local deadline = os.clock() + timeout
+    while os.clock() < deadline do
+        if not HalloweenPortalManager.IsInHalloweenDimension() then break end
+
+        local _, cRoot = getAliveRig()
+        if cRoot and exitPart and exitPart.Parent then
+            cRoot.CFrame = exitPart.CFrame
+            cRoot.AssemblyLinearVelocity = Vector3.zero
+            cRoot.AssemblyAngularVelocity = Vector3.zero
+
+            if typeof(firetouchinterest) == "function" then
+                pcall(firetouchinterest, cRoot, exitPart, 0)
+                task.wait(0.04)
+                pcall(firetouchinterest, cRoot, exitPart, 1)
+            end
+        end
+        task.wait(0.2)
+    end
+
+    task.wait(0.5)
+    return not HalloweenPortalManager.IsInHalloweenDimension()
+end
+
+-- ==============================================================================
+-- [ HALLOWEEN COMBAT MANAGER - MONSTER FARM & WEAPON SWAPPER ]
+-- ==============================================================================
+local HalloweenCombatManager = {
+    ToolIndex = 1,
+    LastSwapTime = 0,
+    IsHolding = false,
+    HoverHeight = 3.0,
+    SwapDelay = 0.08
+}
+
+function HalloweenCombatManager:GetWeaponList()
+    local weapons = {}
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+
+    local function scan(container)
+        if not container then return end
+        for _, item in ipairs(container:GetChildren()) do
+            if item:IsA("Tool") and string.find(string.lower(item.Name), "bat") then
+                table.insert(weapons, item)
+            end
+        end
+    end
+
+    scan(char)
+    scan(backpack)
+
+    if #weapons == 0 then
+        if char then
+            for _, item in ipairs(char:GetChildren()) do
+                if item:IsA("Tool") then table.insert(weapons, item) end
+            end
+        end
+        if backpack then
+            for _, item in ipairs(backpack:GetChildren()) do
+                if item:IsA("Tool") then table.insert(weapons, item) end
+            end
+        end
+    end
+    return weapons
+end
+
+function HalloweenCombatManager:GetClosestMonster()
+    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    local monstersFolder = dim and dim:FindFirstChild("Monsters") or Services.Workspace:FindFirstChild("Monsters", true)
+    if not monstersFolder then return nil end
+
+    local _, root = getAliveRig()
+    if not root then return nil end
+
+    local nearest = nil
+    local minDist = math.huge
+
+    for _, monster in ipairs(monstersFolder:GetChildren()) do
+        local mRoot = monster:FindFirstChild("HumanoidRootPart") or monster.PrimaryPart or monster:FindFirstChildWhichIsA("BasePart")
+        if mRoot then
+            local dist = (root.Position - mRoot.Position).Magnitude
+            if dist < minDist then
+                minDist = dist
+                nearest = monster
+            end
+        end
+    end
+    return nearest
+end
+
+function HalloweenCombatManager:Process()
+    if not getgenv().config.autoCandyCane then return end
+    if not HalloweenPortalManager.IsInHalloweenDimension() then
+        HalloweenPortalManager.EnterDimension(5.0)
+        return
+    end
+
+    local char, root, hum = getAliveRig()
+    if not char or not root or not hum then return end
+
+    local monster = self:GetClosestMonster()
+    if not monster or not monster.Parent then return end
+
+    local monsterPart = monster:FindFirstChild("HumanoidRootPart") or monster.PrimaryPart or monster:FindFirstChildWhichIsA("BasePart")
+    if not monsterPart then return end
+
+    local hoverPosition = monsterPart.Position + Vector3.new(0, self.HoverHeight, 0)
+    root.CFrame = CFrame.lookAt(hoverPosition, monsterPart.Position)
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+
+    if os.clock() - self.LastSwapTime >= self.SwapDelay then
+        self.LastSwapTime = os.clock()
+        local weapons = self:GetWeaponList()
+
+        if #weapons >= 2 then
+            self.ToolIndex = (self.ToolIndex % #weapons) + 1
+            local targetTool = weapons[self.ToolIndex]
+            if targetTool then
+                hum:EquipTool(targetTool)
+                pcall(function() targetTool:Activate() end)
+            end
+        elseif #weapons == 1 then
+            local singleTool = weapons[1]
+            if self.IsHolding or singleTool.Parent == char then
+                hum:UnequipTools()
+                self.IsHolding = false
+            else
+                hum:EquipTool(singleTool)
+                pcall(function() singleTool:Activate() end)
+                self.IsHolding = true
+            end
+        end
+
+        if typeof(firetouchinterest) == "function" then
+            local activeTool = char:FindFirstChildOfClass("Tool")
+            local handle = activeTool and (activeTool:FindFirstChild("Handle") or activeTool:FindFirstChildWhichIsA("BasePart"))
+            if handle and monsterPart then
+                pcall(firetouchinterest, handle, monsterPart, 0)
+                task.wait(0.01)
+                pcall(firetouchinterest, handle, monsterPart, 1)
+            end
+        end
+    end
+end
+
+-- ==============================================================================
+-- [ HALLOWEEN AUTO-STEAL MANAGER - DIRECT REMOTE & GATE TWEEN ]
+-- ==============================================================================
+local HalloweenStealManager = {
+    IsActive = false,
+    CurrentSession = 0,
+    CachedCarryRemote = nil,
+    CachedBarrier = nil,
+    GateEntrancePos = Vector3.new(-5811.0, -203.6, -7296.0),
+    InsideSafePadPos = Vector3.new(-5810.3, -200.1, -7342.9),
+    DeliveryDelay = 2.5,
+    GateCrossDuration = 0.35,
+    SecureTimeout = 3.5
+}
+
+function HalloweenStealManager:GetCarryRemote()
+    if self.CachedCarryRemote and self.CachedCarryRemote.Parent then
+        return self.CachedCarryRemote
+    end
+    local packages = Services.ReplicatedStorage:FindFirstChild("Packages")
+    local networking = packages and packages:FindFirstChild("Networking")
+    if networking then
+        local remote = networking:FindFirstChild("RF/HalloweenDimension/AskCarryEgg")
+        if remote then
+            self.CachedCarryRemote = remote
+            return remote
+        end
+    end
+    for _, desc in ipairs(Services.ReplicatedStorage:GetDescendants()) do
+        if desc:IsA("RemoteFunction") and desc.Name == "RF/HalloweenDimension/AskCarryEgg" then
+            self.CachedCarryRemote = desc
+            return desc
+        end
+    end
+    return nil
+end
+
+function HalloweenStealManager:GetBarrierPart()
+    if self.CachedBarrier and self.CachedBarrier.Parent then
+        return self.CachedBarrier
+    end
+    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    if dim then
+        local nightWall = dim:FindFirstChild("NightWall", true)
+        if nightWall then
+            local barrier = nightWall:FindFirstChild("Barrier") or nightWall:FindFirstChildWhichIsA("BasePart")
+            if barrier then
+                self.CachedBarrier = barrier
+                return barrier
+            end
+        end
+    end
+    return nil
+end
+
+function HalloweenStealManager:SelectTargetEgg()
+    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    local folder = dim and dim:FindFirstChild("WorldEggs")
+    if not folder then return nil end
+
+    local _, root = getAliveRig()
+    if not root then return nil end
+
+    local bestEgg = nil
+    local shortestDist = math.huge
+
+    for _, egg in ipairs(folder:GetChildren()) do
+        if egg:IsA("Model") or egg:IsA("BasePart") then
+            local pivot = egg:GetPivot().Position
+            local dist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(pivot.X, 0, pivot.Z)).Magnitude
+            if dist < shortestDist then
+                shortestDist = dist
+                bestEgg = egg
+            end
+        end
+    end
+    return bestEgg
+end
+
+function HalloweenStealManager:GrabEgg(targetEgg)
+    if not targetEgg or not targetEgg.Parent then return false end
+    local uid = targetEgg:GetAttribute("HalloweenEggUid") 
+             or targetEgg:GetAttribute("Uid") 
+             or targetEgg:GetAttribute("EggUid")
+
+    local carryRemote = self:GetCarryRemote()
+    if carryRemote and uid then
+        pcall(function() carryRemote:InvokeServer(tostring(uid)) end)
+    end
+
+    if isHoldingEgg() then return true end
+
+    local prompt = targetEgg:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt and prompt.Enabled then
+        prompt.RequiresLineOfSight = false
+        prompt.MaxActivationDistance = 30
+        prompt.HoldDuration = 0
+        if typeof(fireproximityprompt) == "function" then
+            fireproximityprompt(prompt, 0)
+        else
+            prompt:InputHoldBegin()
+            prompt:InputHoldEnd()
+        end
+    end
+
+    local deadline = os.clock() + 0.35
+    while os.clock() < deadline and not isHoldingEgg() do
+        Services.RunService.Heartbeat:Wait()
+    end
+    return isHoldingEgg()
+end
+
+function HalloweenStealManager:ExecuteDelivery(session)
+    local char, root, hum = getAliveRig()
+    if not root or not hum then return false end
+
+    ShieldManager:MuteUGI()
+
+    local barrier = self:GetBarrierPart()
+    local entrancePos = self.GateEntrancePos
+    local safePadPos = self.InsideSafePadPos
+
+    if barrier then
+        entrancePos = Vector3.new(barrier.Position.X, self.GateEntrancePos.Y, barrier.Position.Z + 14)
+        safePadPos = Vector3.new(barrier.Position.X, self.InsideSafePadPos.Y, barrier.Position.Z - 30)
+    end
+
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    root.CFrame = CFrame.new(entrancePos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
+
+    local waitStart = os.clock()
+    while os.clock() - waitStart < self.DeliveryDelay do
+        if session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or not isHoldingEgg() then
+            ShieldManager:UnmuteUGI()
+            return false
+        end
+        root.CFrame = CFrame.new(entrancePos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
+        root.AssemblyLinearVelocity = Vector3.zero
+        Services.RunService.Heartbeat:Wait()
+    end
+
+    hum.PlatformStand = true
+    local tweenInfo = TweenInfo.new(self.GateCrossDuration, Enum.EasingStyle.Linear)
+    local tween = Services.TweenService:Create(root, tweenInfo, {
+        CFrame = CFrame.new(safePadPos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
+    })
+    tween:Play()
+
+    if barrier and typeof(firetouchinterest) == "function" then
+        pcall(firetouchinterest, root, barrier, 0)
+        task.wait(0.02)
+        pcall(firetouchinterest, root, barrier, 1)
+    end
+
+    tween.Completed:Wait()
+    hum.PlatformStand = false
+    root.AssemblyLinearVelocity = Vector3.zero
+
+    local deadline = os.clock() + self.SecureTimeout
+    while os.clock() < deadline and isHoldingEgg() do
+        Services.RunService.Heartbeat:Wait()
+    end
+
+    ShieldManager:UnmuteUGI()
+    return not isHoldingEgg()
+end
+
+function HalloweenStealManager:Process()
+    if not getgenv().config.autoHalloweenSteal then return end
+    if self.IsActive then return end
+
+    if not HalloweenPortalManager.IsInHalloweenDimension() then
+        HalloweenPortalManager.EnterDimension(5.0)
+        return
+    end
+
+    local char, root, hum = getAliveRig()
+    if not char or not root or not hum then return end
+
+    self.IsActive = true
+    self.CurrentSession = self.CurrentSession + 1
+    local session = self.CurrentSession
+
+    if isHoldingEgg() then
+        self:ExecuteDelivery(session)
+    else
+        local targetEgg = self:SelectTargetEgg()
+        if targetEgg and targetEgg.Parent then
+            local eggPos = targetEgg:GetPivot().Position
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.CFrame = CFrame.new(Vector3.new(eggPos.X, eggPos.Y + 1.2, eggPos.Z))
+            task.wait(0.04)
+
+            local grabbed = self:GrabEgg(targetEgg)
+            if not grabbed then
+                task.wait(0.1)
+                grabbed = self:GrabEgg(targetEgg)
+            end
+
+            if (grabbed or isHoldingEgg()) and session == self.CurrentSession then
+                self:ExecuteDelivery(session)
+            end
+        end
+    end
+    self.IsActive = false
+end
+
 -- ==============================================================================
 -- [ TASK PRIORITY ARBITRATOR ]
 -- ==============================================================================
 local PriorityManager = {
-    Rankings = {
-        Steal = 1,
-        Bloom = 2,
-        Treadmill = 3
+    ActiveTask = nil,
+    List = {
+        "Auto Steal",
+        "Halloween Steal",
+        "Candy Cane Farm",
+        "Bloom Event",
+        "Auto Upgrades",
+        "Auto Treadmill"
     },
-    ActiveTask = nil
+    -- Maps internal worker names to display names
+    TaskAliases = {
+        ["Steal"] = "Auto Steal",
+        ["HalloweenSteal"] = "Halloween Steal",
+        ["CandyCane"] = "Candy Cane Farm",
+        ["Bloom"] = "Bloom Event",
+        ["Upgrades"] = "Auto Upgrades",
+        ["Treadmill"] = "Auto Treadmill"
+    }
 }
 
-function PriorityManager:CanRun(taskName)
-
-    local requestedRank = self.Rankings[taskName] or 99
-    
-    if taskName ~= "Steal" and isStealEnabled() and (isHoldingEgg() or State.isStealingActive) then
-        return false
+function PriorityManager:Initialize(savedPriorities)
+    if type(savedPriorities) == "table" and #savedPriorities > 0 then
+        local valid = {}
+        for _, name in ipairs(self.List) do valid[name] = true end
+        local newList = {}
+        for _, name in ipairs(savedPriorities) do
+            if valid[name] then
+                table.insert(newList, name)
+                valid[name] = nil
+            end
+        end
+        for _, name in ipairs(self.List) do
+            if valid[name] then table.insert(newList, name) end
+        end
+        self.List = newList
     end
-    
+end
+
+function PriorityManager:GetRank(taskName)
+    local resolved = self.TaskAliases[taskName] or taskName
+    for index, name in ipairs(self.List) do
+        if name == resolved then
+            return index
+        end
+    end
+    return 999
+end
+
+function PriorityManager:CanRun(taskName)
+    local myRank = self:GetRank(taskName)
+
     if self.ActiveTask and self.ActiveTask ~= taskName then
-        local currentRank = self.Rankings[self.ActiveTask] or 99
-        if requestedRank >= currentRank then
+        local currentRank = self:GetRank(self.ActiveTask)
+        if myRank > currentRank then
             return false
         end
     end
@@ -1000,6 +1496,28 @@ function PriorityManager:Release(taskName)
         self.ActiveTask = nil
     end
 end
+
+function PriorityManager:MoveUp(index, saveCallback)
+    if index > 1 then
+        local item = table.remove(self.List, index)
+        table.insert(self.List, index - 1, item)
+        if saveCallback then saveCallback(self.List) end
+        return true
+    end
+    return false
+end
+
+function PriorityManager:MoveDown(index, saveCallback)
+    if index < #self.List then
+        local item = table.remove(self.List, index)
+        table.insert(self.List, index + 1, item)
+        if saveCallback then saveCallback(self.List) end
+        return true
+    end
+    return false
+end
+
+PriorityManager:Initialize(currentSettings.TaskPriorities)
 
 -- ==============================================================================
 -- [ CENTRALIZED HEARTBEAT WORKER SCHEDULER (NON-OVERLAPPING) ]
@@ -1852,7 +2370,26 @@ end
 -- ==============================================================================
 -- [ WORKER SCHEDULER TASK REGISTRATIONS ]
 -- ==============================================================================
+WorkerScheduler:Register("HalloweenSteal", 0.25, function()
+    if not getgenv().config.autoHalloweenSteal then return end
+    if PriorityManager:CanRun("HalloweenSteal") then
+        PriorityManager:Claim("HalloweenSteal")
+        HalloweenStealManager:Process()
+        PriorityManager:Release("HalloweenSteal")
+    end
+end)
+
+WorkerScheduler:Register("CandyCaneFarm", 0.08, function()
+    if not getgenv().config.autoCandyCane then return end
+    if PriorityManager:CanRun("CandyCane") then
+        PriorityManager:Claim("CandyCane")
+        HalloweenCombatManager:Process()
+        PriorityManager:Release("CandyCane")
+    end
+end)
+
 WorkerScheduler:Register("AutoUpgrades", 6.0, function()
+    if not PriorityManager:CanRun("Upgrades") then return end
     if getgenv().config.autoUpgradeTreadmill then tryUpgradeTreadmill() end
     if getgenv().config.autoUpgradeBase then tryUpgradeBase() end
 end)
@@ -1873,7 +2410,13 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
 
     -- 1. Auto Steal & Steal Panel Execution
     local currentTargetEgg = nil
-    if isStealEnabled() and not State.isStealingActive and not isMapClosed() and PriorityManager:CanRun("Steal") then
+    local inHalloween = HalloweenPortalManager.IsInHalloweenDimension()
+    local hasHalloweenActive = (getgenv().config.autoHalloweenSteal or getgenv().config.autoCandyCane)
+    if not hasHalloweenActive and inHalloween and (getgenv().config.autoFarm or getgenv().config.autoTreadmill) then
+        HalloweenPortalManager.ExitDimension(5.0)
+    end
+
+    if isStealEnabled() and not State.isStealingActive and not isMapClosed() and not inHalloween and PriorityManager:CanRun("Steal") then
         currentTargetEgg = getBestEgg()
         if currentTargetEgg then
             local targetUid = currentTargetEgg.Uid
@@ -2405,6 +2948,124 @@ local farmLay = Instance.new("UIListLayout", farmPg)
 farmLay.Padding = UDim.new(0, 8)
 farmLay.SortOrder = Enum.SortOrder.LayoutOrder
 
+
+local priorityPg = Instance.new("Frame", pgsHold)
+priorityPg.Name = "PriorityPage"
+priorityPg.Size = UDim2.new(1, 0, 1, 0)
+priorityPg.BackgroundTransparency = 1
+priorityPg.Visible = false
+
+local priorityPad = Instance.new("UIPadding", priorityPg)
+priorityPad.PaddingTop = UDim.new(0, 8)
+priorityPad.PaddingBottom = UDim.new(0, 12)
+priorityPad.PaddingLeft = UDim.new(0, 6)
+priorityPad.PaddingRight = UDim.new(0, 8)
+
+local priorityScroll = Instance.new("ScrollingFrame", priorityPg)
+priorityScroll.Name = "PriorityScroll"
+priorityScroll.Size = UDim2.new(1, 0, 1, 0)
+priorityScroll.BackgroundTransparency = 1
+priorityScroll.BorderSizePixel = 0
+priorityScroll.ScrollBarThickness = 3
+priorityScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+priorityScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+
+local priorityLayout = Instance.new("UIListLayout", priorityScroll)
+priorityLayout.Padding = UDim.new(0, 8)
+priorityLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local function renderPriorityPanel()
+    for _, child in ipairs(priorityScroll:GetChildren()) do
+        if child:IsA("Frame") then child:Destroy() end
+    end
+
+    for index, taskName in ipairs(PriorityManager.List) do
+        local card = Instance.new("Frame", priorityScroll)
+        card.Size = UDim2.new(1, -4, 0, 48)
+        card.BackgroundColor3 = activeTheme and activeTheme.Card or Color3.fromRGB(20, 24, 34)
+        card.BorderSizePixel = 0
+        card.LayoutOrder = index
+        rndCorner(card, 8)
+
+        local cardStroke = Instance.new("UIStroke", card)
+        cardStroke.Color = (index == 1) and (activeTheme and activeTheme.Accent or Color3.fromRGB(255, 175, 40)) or (activeTheme and activeTheme.Stroke or Color3.fromRGB(50, 60, 80))
+        cardStroke.Thickness = (index == 1) and 1.5 or 1
+
+        local badge = Instance.new("TextLabel", card)
+        badge.Size = UDim2.new(0, 28, 0, 28)
+        badge.Position = UDim2.new(0, 10, 0.5, -14)
+        badge.BackgroundColor3 = (index == 1) and (activeTheme and activeTheme.Accent or Color3.fromRGB(255, 175, 40)) or Color3.fromRGB(35, 40, 55)
+        badge.TextColor3 = Color3.fromRGB(255, 255, 255)
+        badge.Font = Enum.Font.GothamBold
+        badge.TextSize = 12
+        badge.Text = "#" .. tostring(index)
+        rndCorner(badge, 6)
+
+        local title = Instance.new("TextLabel", card)
+        title.Size = UDim2.new(1, -120, 0, 20)
+        title.Position = UDim2.new(0, 46, 0, 6)
+        title.BackgroundTransparency = 1
+        title.Font = Enum.Font.GothamBold
+        title.TextSize = 12.5
+        title.TextColor3 = Color3.fromRGB(240, 245, 255)
+        title.TextXAlignment = Enum.TextXAlignment.Left
+        title.Text = taskName
+
+        local desc = Instance.new("TextLabel", card)
+        desc.Size = UDim2.new(1, -120, 0, 16)
+        desc.Position = UDim2.new(0, 46, 0, 26)
+        desc.BackgroundTransparency = 1
+        desc.Font = Enum.Font.Gotham
+        desc.TextSize = 9.5
+        desc.TextColor3 = (index == 1) and (activeTheme and activeTheme.Accent or Color3.fromRGB(255, 190, 60)) or Color3.fromRGB(160, 170, 190)
+        desc.TextXAlignment = Enum.TextXAlignment.Left
+        desc.Text = (index == 1 and "Highest Priority (Runs First)" or (index == #PriorityManager.List and "Lowest Priority (Idle Fallback)" or "Active Task Priority"))
+
+        local btnHolder = Instance.new("Frame", card)
+        btnHolder.Size = UDim2.new(0, 60, 0, 28)
+        btnHolder.Position = UDim2.new(1, -68, 0.5, -14)
+        btnHolder.BackgroundTransparency = 1
+
+        local upBtn = Instance.new("TextButton", btnHolder)
+        upBtn.Size = UDim2.new(0, 28, 0, 28)
+        upBtn.Position = UDim2.new(0, 0, 0, 0)
+        upBtn.BackgroundColor3 = (index > 1) and Color3.fromRGB(40, 45, 60) or Color3.fromRGB(25, 28, 35)
+        upBtn.TextColor3 = (index > 1) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(100, 105, 120)
+        upBtn.Font = Enum.Font.GothamBold
+        upBtn.TextSize = 11
+        upBtn.Text = "▲"
+        rndCorner(upBtn, 6)
+
+        local downBtn = Instance.new("TextButton", btnHolder)
+        downBtn.Size = UDim2.new(0, 28, 0, 28)
+        downBtn.Position = UDim2.new(0, 32, 0, 0)
+        downBtn.BackgroundColor3 = (index < #PriorityManager.List) and Color3.fromRGB(40, 45, 60) or Color3.fromRGB(25, 28, 35)
+        downBtn.TextColor3 = (index < #PriorityManager.List) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(100, 105, 120)
+        downBtn.Font = Enum.Font.GothamBold
+        downBtn.TextSize = 11
+        downBtn.Text = "▼"
+        rndCorner(downBtn, 6)
+
+        upBtn.MouseButton1Click:Connect(function()
+            if PriorityManager:MoveUp(index, function(newList)
+                currentSettings.TaskPriorities = newList
+                saveStuff()
+            end) then
+                renderPriorityPanel()
+            end
+        end)
+
+        downBtn.MouseButton1Click:Connect(function()
+            if PriorityManager:MoveDown(index, function(newList)
+                currentSettings.TaskPriorities = newList
+                saveStuff()
+            end) then
+                renderPriorityPanel()
+            end
+        end)
+    end
+end
+
 local stealPanelPg = Instance.new("Frame", pgsHold)
 stealPanelPg.Name = "StealPanelPage"
 stealPanelPg.Size = UDim2.new(1, 0, 1, 0)
@@ -2542,6 +3203,7 @@ local cBtns = {}
 local tBtns = {}
 local cList = { 
     {Name = "Farm", Page = farmPg, Title = "Farm"},
+    {Name = "Priority", Page = priorityPg, Title = "Task Priority"},
     {Name = "Steal Panel", Page = stealPanelPg, Title = "Steal Panel"},
     {Name = "Settings", Page = setPg, Title = "Settings"} 
 }
@@ -3501,7 +4163,22 @@ createDropdown("Min Rarity", "Only steal eggs with rarity >= this", rarityList, 
     table.clear(State.blacklistedEggs)
 end)
 
-local treadmillCategory = createCategory("Automation Treadmill", farmPg, 2, false)
+
+local halloweenCategory = createCategory("Halloween Event 2026", farmPg, 2, false)
+
+createToggle("Halloween Auto Steal", "Auto direct-remote grab & gate tween", currentSettings.AutoHalloweenSteal, halloweenCategory, 1, function(state)
+    getgenv().config.autoHalloweenSteal = state
+    currentSettings.AutoHalloweenSteal = state
+    saveStuff()
+end)
+
+createToggle("Candy Cane Monster Farm", "Auto weapon swap combat in dimension", currentSettings.AutoCandyCane, halloweenCategory, 2, function(state)
+    getgenv().config.autoCandyCane = state
+    currentSettings.AutoCandyCane = state
+    saveStuff()
+end)
+
+local treadmillCategory = createCategory("Automation Treadmill", farmPg, 3, false)
 
 createToggle("Auto Treadmill", "Gain treadmill speed when idle", currentSettings.AutoTreadmill, treadmillCategory, 1, function(state)
     getgenv().config.autoTreadmill = state
@@ -3511,7 +4188,7 @@ createToggle("Auto Treadmill", "Gain treadmill speed when idle", currentSettings
     if not state then hopOffTreadmill() end
 end)
 
-local bloomCategory = createCategory("Enchanted / Bloom Event", farmPg, 3, false)
+local bloomCategory = createCategory("Enchanted / Bloom Event", farmPg, 4, false)
 
 createToggle("Auto Bloom Event", "Auto catch butterflies during Bloom Event", currentSettings.AutoCatchButterfly, bloomCategory, 1, function(state)
     getgenv().config.autoCatchButterfly = state
@@ -3527,7 +4204,7 @@ createToggle("Auto Wisps Quest", "Auto advance & submit Wisp quest eggs", curren
     if not state then BloomManager.IsBusy = false end
 end)
 
-local upgradesCategory = createCategory("Automation Upgrades", farmPg, 4, false)
+local upgradesCategory = createCategory("Automation Upgrades", farmPg, 5, false)
 
 createToggle("Auto Upgrade Treadmill", "Auto buy next tier treadmill", currentSettings.AutoUpgradeTreadmill, upgradesCategory, 1, function(state)
     getgenv().config.autoUpgradeTreadmill = state
@@ -3712,6 +4389,8 @@ local function swapCat(idx)
 
     if cList[idx].Name == "Steal Panel" and renderStealPanel then
         renderStealPanel()
+    elseif cList[idx].Name == "Priority" and renderPriorityPanel then
+        renderPriorityPanel()
     end
 end
 

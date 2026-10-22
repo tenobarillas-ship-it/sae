@@ -96,7 +96,7 @@ getgenv().config.autoWispQuest = currentSettings.AutoWispQuest
 getgenv().config.autoHalloweenSteal = currentSettings.AutoHalloweenSteal
 getgenv().config.autoCandyCane = currentSettings.AutoCandyCane
 
-local HalloweenPortalManager, HalloweenCombatManager, HalloweenStealManager, PriorityManager
+local HalloweenPortalManager, HalloweenCombatManager, HalloweenStealManager, PriorityManager, activeTheme
 
 local State = {
     currentStealSession = 0,
@@ -935,9 +935,9 @@ end
 -- ==============================================================================
 -- [ HALLOWEEN DIMENSION - PORTAL & TRANSITION CONTROLLER ]
 -- ==============================================================================
-local HalloweenPortalManager = {}
-local HALLOWEEN_DIM_CENTER = Vector3.new(-5808, -200, -7376)
-local HALLOWEEN_RADIUS = 2500
+HalloweenPortalManager = {}
+HalloweenPortalManager.DimCenter = Vector3.new(-5808, -200, -7376)
+HalloweenPortalManager.Radius = 2500
 
 function HalloweenPortalManager.IsInHalloweenDimension()
     if LocalPlayer:GetAttribute("InHalloweenDimension") == true then
@@ -949,8 +949,8 @@ function HalloweenPortalManager.IsInHalloweenDimension()
     end
     local _, root = getAliveRig()
     if root then
-        local dist = (root.Position - HALLOWEEN_DIM_CENTER).Magnitude
-        if dist <= HALLOWEEN_RADIUS then
+        local dist = (root.Position - HalloweenPortalManager.DimCenter).Magnitude
+        if dist <= HalloweenPortalManager.Radius then
             return true
         end
     end
@@ -1042,7 +1042,7 @@ end
 -- ==============================================================================
 -- [ HALLOWEEN COMBAT MANAGER - WEAPON CYCLER & TOUCH INTEREST ]
 -- ==============================================================================
-local HalloweenCombatManager = {
+HalloweenCombatManager = {
     ToolIndex = 1,
     LastSwapTime = 0,
     IsHolding = false,
@@ -1118,8 +1118,7 @@ function HalloweenCombatManager:Start()
         while getgenv().config.autoCandyCane or getgenv().AutoHalloweenFarm do
             if PriorityManager and not PriorityManager:CanRun("CandyCane") then
                 Services.RunService.Heartbeat:Wait()
-                continue
-            end
+            else
 
             local inDimension = HalloweenPortalManager.IsInHalloweenDimension()
             if not inDimension then
@@ -1174,6 +1173,7 @@ function HalloweenCombatManager:Start()
                 end
             end
             Services.RunService.Heartbeat:Wait()
+            end
         end
         self.ThreadRunning = false
         self:Abort()
@@ -1201,7 +1201,7 @@ end
 -- ==============================================================================
 -- [ HALLOWEEN AUTO-STEAL MANAGER - DIRECT REMOTE & GATE TWEEN ]
 -- ==============================================================================
-local HalloweenStealManager = {
+HalloweenStealManager = {
     IsActive = false,
     CurrentSession = 0,
     CachedCarryRemote = nil,
@@ -1401,8 +1401,7 @@ function HalloweenStealManager:Start()
         while getgenv().config.autoHalloweenSteal or getgenv().AutoHalloweenSteal do
             if PriorityManager and not PriorityManager:CanRun("HalloweenSteal") then
                 Services.RunService.Heartbeat:Wait()
-                continue
-            end
+            else
 
             local inDimension = HalloweenPortalManager.IsInHalloweenDimension()
             if not inDimension then
@@ -1451,6 +1450,7 @@ function HalloweenStealManager:Start()
                 end
             end
             Services.RunService.Heartbeat:Wait()
+            end
         end
         self.ThreadRunning = false
         self:Abort()
@@ -1636,14 +1636,14 @@ function WorkerScheduler:Register(name, interval, runFn)
     return item
 end
 
-function if getgenv().config.autoHalloweenSteal and HalloweenStealManager and HalloweenStealManager.Start then
+function WorkerScheduler:Start()
+
+if getgenv().config.autoHalloweenSteal and HalloweenStealManager and HalloweenStealManager.Start then
     HalloweenStealManager:Start()
 end
 if getgenv().config.autoCandyCane and HalloweenCombatManager and HalloweenCombatManager.Start then
     HalloweenCombatManager:Start()
 end
-
-WorkerScheduler:Start()
     if self.Connection then return end
     self.Connection = Services.RunService.Heartbeat:Connect(function(dt)
         if not self.IsActive then return end
@@ -2448,16 +2448,7 @@ local function getBestEgg()
                 if not posX or posX >= 560 then
                     local rawName = record.AssetCategory or record.Category or record.Name or "Unknown"
                     
-                    if isLabNeeded then
-                        local scale = tonumber(record.AssetScale) or 1
-                        local mutationBonus = (record.Mutations and #record.Mutations > 0) and 2.5 or 1
-                        local score = 100000000 + ((scale ^ 1.85) * mutationBonus)
-
-                        if score > highestScore then
-                            highestScore = score
-                            bestEgg = record
-                        end
-                    elseif normalStealEnabled then
+                    if normalStealEnabled then
                         local areaIdStr = tostring(record.AreaId or "")
                         if matchesTargetArea(areaIdStr) then
                             local _, rank = MasterRegistry:Lookup(rawName)
@@ -2682,8 +2673,10 @@ end)
 
 WorkerScheduler:Start()
 
+do
 -- ==============================================================================
 -- [ GUI BUILDER & CONTROLS SETUP ]
+local cList = nil
 -- ==============================================================================
 local safeContainer = nil
 if gethui then pcall(function() safeContainer = gethui() end) end
@@ -3339,7 +3332,7 @@ prevTxt.Text = "Current Theme: Sapphire"
 
 local cBtns = {}
 local tBtns = {}
-local cList = { 
+cList = { 
     {Name = "Farm", Page = farmPg, Title = "Farm"},
     {Name = "Priority", Page = priorityPg, Title = "Task Priority"},
     {Name = "Steal Panel", Page = stealPanelPg, Title = "Steal Panel"},
@@ -4667,3 +4660,5 @@ task.defer(function()
     task.wait(0.5)
     showDiscordModal()
 end)
+
+end

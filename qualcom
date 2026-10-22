@@ -127,10 +127,10 @@ local CONFIG = {
     HopGap = 0.06,
     HopGapMin = 0.05,
     HopGapMax = 0.20,
-    FlightAltitude = 120.7,
-    HopAltitude = 112.8,
+    FlightAltitude = 72.0,    -- Ground level (was 120.7, prevents anti-cheat elevation flagging)
+    HopAltitude = 72.0,       -- Ground level (was 112.8, prevents anti-cheat elevation flagging)
     GroundAltitude = 70.8,
-    AirGrabOffset = 8.5,
+    AirGrabOffset = 0.5,      -- Ground level pickup offset (was 8.5)
     CheckpointInterval = 1600,
     BoundaryCheckpointX = 600.2,
     SeparationLineX = 552.2,
@@ -138,7 +138,7 @@ local CONFIG = {
     FastStealHopSpeed = 180,
     FastStealGroundSpeed = 320,
     FastStealDirectSnapRadius = 45,
-    BaseDropPosition = Vector3.new(528.7, 70.8, -364.1)
+    BaseDropPosition = Vector3.new(528.7, 71.8, -364.1)
 }
 
 -- ==============================================================================
@@ -505,52 +505,13 @@ function ShieldManager:CleanupLinks()
 end
 
 function ShieldManager:ApplyHumanoidSwap(character)
-    if not character then return end
-    local humanoid = character:FindFirstChildOfClass("Humanoid")
-    if not humanoid or humanoid.Health <= 0 then return end
-    if self.CloneHumanoid and self.CloneHumanoid.Parent == character then return end
-
-    self:CleanupLinks()
-    local clone = humanoid:Clone()
-    humanoid.Parent = nil
-    clone.Parent = character
-    Services.Workspace.CurrentCamera.CameraSubject = clone
-    self:RebindControls(clone)
-
-    self.OriginalHumanoid = humanoid
-    self.CloneHumanoid = clone
-
-    table.insert(self.Links, clone:GetPropertyChangedSignal("Health"):Connect(function()
-        if clone and clone.Parent and clone.Health < clone.MaxHealth then
-            clone.Health = clone.MaxHealth
-        end
-    end))
-
-    table.insert(self.Links, humanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
-        if clone and clone.Parent then
-            clone.WalkSpeed = humanoid.WalkSpeed
-        end
-    end))
-
-    table.insert(self.Links, clone.Died:Connect(function()
-        self:UndoSwap()
-    end))
+    -- Disabled: swapping the Humanoid detaches the Animate script and permanently freezes walking animations.
+    -- applyGodMode() protects the character while keeping the native Humanoid and Animator fully active.
+    return
 end
 
 function ShieldManager:UndoSwap()
-    self:CleanupLinks()
-    local char = LocalPlayer.Character
-    local orig = self.OriginalHumanoid
-    local clone = self.CloneHumanoid
-    self.OriginalHumanoid = nil
-    self.CloneHumanoid = nil
-
-    if orig and clone and char and orig.Parent == nil and clone.Parent == char then
-        orig.Parent = char
-        Services.Workspace.CurrentCamera.CameraSubject = orig
-        self:RebindControls(orig)
-        pcall(function() clone:Destroy() end)
-    end
+    return
 end
 
 local function isMonitorAction(fn)
@@ -1385,7 +1346,9 @@ function HalloweenStealManager:ExecuteDelivery(session)
         Services.RunService.Heartbeat:Wait()
     end
 
-    hum.PlatformStand = true
+    hum.PlatformStand = false
+    hum.Sit = false
+    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
     local tweenInfo = TweenInfo.new(self.GateCrossDuration, Enum.EasingStyle.Linear)
     local tween = Services.TweenService:Create(root, tweenInfo, {
         CFrame = CFrame.new(safePadPos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
@@ -2007,9 +1970,13 @@ local function executeFastStealDelivery(targetEgg, sessionId)
 
     local uid = targetEgg.Uid
     local laneZ = math.clamp(root.Position.Z, -425, -300)
-    local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, 74.0, laneZ)
+    local groundY = CONFIG.GroundAltitude + 1.2
+    local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, groundY, laneZ)
 
-    hum.PlatformStand = true
+    -- Never suppress walking animation: keep PlatformStand false and state Running
+    hum.PlatformStand = false
+    hum.Sit = false
+    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
     setCollisions(false)
     ShieldManager:MuteUGI()
 
@@ -2028,8 +1995,8 @@ local function executeFastStealDelivery(targetEgg, sessionId)
         local _, cRoot = getAliveRig()
         if not cRoot then break end
 
-        cRoot.CFrame = CFrame.new(currentX, CONFIG.HopAltitude, laneZ) * CFrame.Angles(0, math.rad(90), 0)
-        cRoot.AssemblyLinearVelocity = Vector3.zero
+        cRoot.CFrame = CFrame.new(currentX, groundY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
+        cRoot.AssemblyLinearVelocity = Vector3.new(-hopStep * 6, 0, 0)
         task.wait(0.08)
     end
 
@@ -2157,7 +2124,14 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
 
     StealUIManager:Lock()
     ShieldManager:MuteUGI()
-    if humanoid then humanoid.PlatformStand = true end
+    local groundY = CONFIG.GroundAltitude + 1.2
+
+    -- Preserve walking animations: PlatformStand false, state Running
+    if humanoid then 
+        humanoid.PlatformStand = false 
+        humanoid.Sit = false
+        pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
+    end
 
     local function snapAltitude(targetY)
         local _, cRoot = getAliveRig()
@@ -2169,7 +2143,7 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
             task.wait(0.03)
         end
     end
-    snapAltitude(CONFIG.HopAltitude)
+    snapAltitude(groundY)
 
     while currentX - stepSize > boundaryX do
         if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
@@ -2191,8 +2165,8 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
         local preHopTime = os.clock()
 
         pcall(function()
-            cRoot.CFrame = CFrame.new(nextX, CONFIG.HopAltitude, laneZ) * CFrame.Angles(0, math.rad(90), 0)
-            cRoot.AssemblyLinearVelocity = Vector3.zero
+            cRoot.CFrame = CFrame.new(nextX, groundY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
+            cRoot.AssemblyLinearVelocity = Vector3.new(-stepSize * 6, 0, 0)
         end)
         task.wait(CONFIG.HopGap)
 
@@ -2217,8 +2191,12 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
             end
             lastCheckpointX = currentX
             local _, rRoot, rHum = getAliveRig()
-            if rHum then rHum.PlatformStand = true end
-            snapAltitude(CONFIG.HopAltitude)
+            if rHum then 
+                rHum.PlatformStand = false 
+                rHum.Sit = false
+                pcall(function() rHum:ChangeState(Enum.HumanoidStateType.Running) end)
+            end
+            snapAltitude(groundY)
             task.wait(CONFIG.HopGap)
         end
     end
@@ -2304,8 +2282,11 @@ local function travelPlaneSegment(targetPos, stopDist, speed, timeout, sessionId
         end
 
         local moveDir = delta.Unit
+        local groundY = (targetPos and targetPos.Y and targetPos.Y > 20) and (targetPos.Y + 1.2) or (CONFIG.GroundAltitude + 1.2)
+        -- Set horizontal velocity to trigger natural walking/running animation
         cRoot.AssemblyLinearVelocity = Vector3.new(moveDir.X * speed, 0, moveDir.Z * speed)
-        cRoot.CFrame = CFrame.new(currentPos.X, CONFIG.FlightAltitude, currentPos.Z) * CFrame.lookAt(Vector3.zero, moveDir)
+        -- Ground-level CFrame (strictly avoids sky elevation to prevent anti-cheat flagging)
+        cRoot.CFrame = CFrame.new(currentPos.X, groundY, currentPos.Z) * CFrame.lookAt(Vector3.zero, moveDir)
     end)
 
     while State.activeFlightConnection and State.activeFlightConnection.Connected do
@@ -2333,7 +2314,12 @@ local function flyOutboundElevated(targetPosition, stopDistance, sessionId, targ
         end
     end
 
-    humanoid.PlatformStand = true
+    -- Preserve walking animations: PlatformStand false, state Running
+    humanoid.PlatformStand = false
+    humanoid.Sit = false
+    pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
+
+    local targetGroundY = (targetPosition and targetPosition.Y and targetPosition.Y > 20) and (targetPosition.Y + 1.2) or (CONFIG.GroundAltitude + 1.2)
 
     local function snapAltitude(targetY)
         local _, cRoot = getAliveRig()
@@ -2345,12 +2331,12 @@ local function flyOutboundElevated(targetPosition, stopDistance, sessionId, targ
             task.wait(0.03)
         end
     end
-    snapAltitude(CONFIG.FlightAltitude)
+    snapAltitude(targetGroundY)
 
     local currentPosInit = root.Position
     if currentPosInit.X < CONFIG.BoundaryCheckpointX then
-        local centerDeliveryPos = Vector3.new(CONFIG.BaseDropPosition.X, CONFIG.FlightAltitude, CONFIG.BaseDropPosition.Z)
-        local mouthPos = Vector3.new(CONFIG.BoundaryCheckpointX, CONFIG.FlightAltitude, CONFIG.BaseDropPosition.Z)
+        local centerDeliveryPos = Vector3.new(CONFIG.BaseDropPosition.X, targetGroundY, CONFIG.BaseDropPosition.Z)
+        local mouthPos = Vector3.new(CONFIG.BoundaryCheckpointX, targetGroundY, CONFIG.BaseDropPosition.Z)
 
         local lateralDist = math.abs(currentPosInit.Z - CONFIG.BaseDropPosition.Z)
         if lateralDist > 12 or currentPosInit.X < CONFIG.BaseDropPosition.X then
@@ -2367,7 +2353,7 @@ local function flyOutboundElevated(targetPosition, stopDistance, sessionId, targ
 
     local reached = travelPlaneSegment(targetPosition, stopDistance, playerSpeed, dynamicTimeout, sessionId, targetUid)
     if reached and sessionId == State.currentStealSession and isStealEnabled() and not isMapClosed() then
-        snapAltitude((targetPosition.Y or CONFIG.GroundAltitude) + CONFIG.AirGrabOffset)
+        snapAltitude(targetGroundY)
     end
 
     cleanupFlightState()
@@ -2541,8 +2527,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
             local session = State.currentStealSession
 
             hopOffTreadmill()
-            ShieldManager:ApplyHumanoidSwap(char)
-            task.wait(0.08)
+            task.wait(0.04)
 
             local targetCFrame = currentTargetEgg.BottomCFrame or currentTargetEgg.BoundsCFrame or currentTargetEgg.CFrame
             local eggTargetPos = nil

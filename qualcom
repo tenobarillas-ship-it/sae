@@ -1609,19 +1609,17 @@ function HalloweenStealManager:Process()
                 local dir = (Vector3.new(eggPos.X, 0, eggPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Unit
                 local travelDist = math.min(220, math.max(100, dist - 150))
                 local travelTarget = root.Position + dir * travelDist
-                local travelSpeed = 260
+                local travelSpeed = math.max(getPlayerCurrentSpeed(), 32)
                 local startTime = os.clock()
-                local travelTimeout = (travelDist / travelSpeed) + 0.6
+                local travelTimeout = (travelDist / travelSpeed) + 1.0
 
                 setCollisions(false)
                 while (Vector3.new(travelTarget.X, 0, travelTarget.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude > 6 and (os.clock() - startTime) < travelTimeout do
-                    local dt = Services.RunService.Heartbeat:Wait()
+                    Services.RunService.Heartbeat:Wait()
                     local _, cRoot = getAliveRig()
                     if not cRoot or not self.IsActive or session ~= self.CurrentSession then break end
-                    local remaining = Vector3.new(travelTarget.X - cRoot.Position.X, 0, travelTarget.Z - cRoot.Position.Z)
-                    local step = math.min(travelSpeed * dt, remaining.Magnitude)
-                    cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * travelSpeed, 0, dir.Z * travelSpeed)
-                    cRoot.CFrame = CFrame.new(cRoot.Position + dir * step, cRoot.Position + dir * 10)
+                    cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * travelSpeed, cRoot.AssemblyLinearVelocity.Y, dir.Z * travelSpeed)
+                    cRoot.CFrame = CFrame.new(cRoot.Position.X, cRoot.Position.Y, cRoot.Position.Z) * CFrame.lookAt(Vector3.zero, dir)
                 end
                 task.wait(0.08)
             end
@@ -1937,6 +1935,70 @@ end
 -- ==============================================================================
 -- [ FAST STEAL PIPELINE (TITAN / LIGHT DARK / ENCHANTED) ]
 -- ==============================================================================
+-- ==============================================================================
+-- [ DYNAMIC SPEED IDENTIFIER ]
+-- ==============================================================================
+local function getPlayerCurrentSpeed()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+    -- 1. Check live Humanoid WalkSpeed (handling ShieldManager clone if active)
+    if hum and typeof(hum.WalkSpeed) == "number" and hum.WalkSpeed > 0 then
+        if ShieldManager and ShieldManager.OriginalHumanoid and ShieldManager.OriginalHumanoid.Parent == nil then
+            if ShieldManager.OriginalHumanoid.WalkSpeed > hum.WalkSpeed then
+                return ShieldManager.OriginalHumanoid.WalkSpeed
+            end
+        end
+        return hum.WalkSpeed
+    end
+
+    -- 2. Check Character & Player Attributes
+    if char then
+        for _, attrName in ipairs({"WalkSpeed", "Speed", "CurrentSpeed", "MovementSpeed"}) do
+            local val = char:GetAttribute(attrName)
+            if typeof(val) == "number" and val > 0 then return val end
+        end
+    end
+    for _, attrName in ipairs({"WalkSpeed", "Speed", "CurrentSpeed", "MovementSpeed"}) do
+        local val = LocalPlayer:GetAttribute(attrName)
+        if typeof(val) == "number" and val > 0 then return val end
+    end
+
+    -- 3. Check leaderstats
+    local lstats = LocalPlayer:FindFirstChild("leaderstats")
+    if lstats then
+        for _, child in ipairs(lstats:GetChildren()) do
+            local lName = child.Name:lower()
+            if (lName == "speed" or lName == "walkspeed") and typeof(child.Value) == "number" and child.Value > 0 then
+                return child.Value
+            end
+        end
+    end
+
+    -- 4. Check Save module peek
+    local saveMod = Services.ReplicatedStorage:FindFirstChild("Shared") and Services.ReplicatedStorage.Shared:FindFirstChild("Save")
+    if saveMod and saveMod:IsA("ModuleScript") then
+        local ok, mod = pcall(require, saveMod)
+        if ok and type(mod) == "table" then
+            local getter = type(mod.Get) == "function" and mod.Get or (type(mod.Peek) == "function" and mod.Peek)
+            if getter then
+                local resOk, res = pcall(getter)
+                if resOk and type(res) == "table" then
+                    for k, v in pairs(res) do
+                        local lk = tostring(k):lower()
+                        if (lk == "speed" or lk == "walkspeed") and typeof(v) == "number" and v > 0 then
+                            return v
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return 16
+end
+getgenv().getPlayerCurrentSpeed = getPlayerCurrentSpeed
+
 local function getStandingPosition(basePos)
     local _, root, hum = getAliveRig()
     local hipHeight = hum and hum.HipHeight or 2
@@ -1948,10 +2010,9 @@ local function runAlongGroundToEgg(targetPos, speed, sessionId, targetUid)
     local char, root, hum = getAliveRig()
     if not root or not hum then return false end
 
-    -- Strictly use player's own WalkSpeed (never modify or override player speed for normal dimension)
-    local playerSpeed = hum.WalkSpeed
-    if not playerSpeed or playerSpeed <= 0 then playerSpeed = 16 end
-    speed = playerSpeed
+    -- Strictly use player's identified live speed (never artificially boost)
+    local liveSpeed = getPlayerCurrentSpeed()
+    speed = liveSpeed
 
     setCollisions(false)
     local targetStandPos = getStandingPosition(targetPos)
@@ -1961,7 +2022,7 @@ local function runAlongGroundToEgg(targetPos, speed, sessionId, targetUid)
     local lastLiveCheck = 0
 
     local conn
-    conn = Services.RunService.Heartbeat:Connect(function(dt)
+    conn = Services.RunService.Heartbeat:Connect(function()
         if sessionId ~= State.currentStealSession or not isStealEnabled() or isMapClosed() then
             if conn then conn:Disconnect() conn = nil end
             return
@@ -1982,10 +2043,10 @@ local function runAlongGroundToEgg(targetPos, speed, sessionId, targetUid)
             end
         end
 
-        local flatDiff = Vector3.new(targetStandPos.X - cRoot.Position.X, 0, targetStandPos.Z - cRoot.Position.Z)
+        local currentPos = cRoot.Position
+        local flatDiff = Vector3.new(targetStandPos.X - currentPos.X, 0, targetStandPos.Z - currentPos.Z)
         if flatDiff.Magnitude <= 3.5 then
             arrived = true
-            cRoot.CFrame = CFrame.lookAt(targetStandPos, targetPos)
             cRoot.AssemblyLinearVelocity = Vector3.zero
             cRoot.AssemblyAngularVelocity = Vector3.zero
             if conn then conn:Disconnect() conn = nil end
@@ -1993,9 +2054,9 @@ local function runAlongGroundToEgg(targetPos, speed, sessionId, targetUid)
         end
 
         local dir = flatDiff.Unit
-        local moveStep = math.min(speed * dt, flatDiff.Magnitude)
+        -- Natural physics velocity using player's own speed (zero artificial CFrame stepping)
         cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * speed, cRoot.AssemblyLinearVelocity.Y, dir.Z * speed)
-        cRoot.CFrame = CFrame.new(cRoot.Position + dir * moveStep, targetStandPos)
+        cRoot.CFrame = CFrame.new(currentPos.X, currentPos.Y, currentPos.Z) * CFrame.lookAt(Vector3.zero, dir)
     end)
 
     while conn and conn.Connected do
@@ -2242,8 +2303,7 @@ local function executeFastStealDelivery(targetEgg, sessionId)
     local laneZ = math.clamp(root.Position.Z, -425, -300)
     local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, CONFIG.GroundAltitude + 1.0, laneZ)
 
-    local playerSpeed = hum.WalkSpeed
-    if not playerSpeed or playerSpeed <= 0 then playerSpeed = 16 end
+    local playerSpeed = getPlayerCurrentSpeed()
 
     setCollisions(false)
     ShieldManager:MuteUGI()
@@ -2252,22 +2312,19 @@ local function executeFastStealDelivery(targetEgg, sessionId)
     local travelTimeout = math.max(12, ((root.Position.X - dropTargetPos.X) / playerSpeed) + 6)
 
     while root.Position.X > dropTargetPos.X + 2.0 and (os.clock() - startTime) < travelTimeout do
-        local dt = Services.RunService.Heartbeat:Wait()
+        Services.RunService.Heartbeat:Wait()
         if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
             setCollisions(true)
             ShieldManager:UnmuteUGI()
             return false
         end
 
-        local _, cRoot, cHum = getAliveRig()
-        if not cRoot or not cHum then break end
+        local _, cRoot = getAliveRig()
+        if not cRoot then break end
 
-        local cSpeed = cHum.WalkSpeed
-        if not cSpeed or cSpeed <= 0 then cSpeed = playerSpeed end
-
-        local step = math.min(cSpeed * dt, cRoot.Position.X - dropTargetPos.X)
-        cRoot.AssemblyLinearVelocity = Vector3.new(-cSpeed, cRoot.AssemblyLinearVelocity.Y, 0)
-        cRoot.CFrame = CFrame.new(cRoot.Position.X - step, CONFIG.GroundAltitude + 1.0, laneZ) * CFrame.Angles(0, math.rad(90), 0)
+        -- Natural physics velocity without artificial CFrame position increments
+        cRoot.AssemblyLinearVelocity = Vector3.new(-playerSpeed, cRoot.AssemblyLinearVelocity.Y, 0)
+        cRoot.CFrame = CFrame.new(cRoot.Position.X, CONFIG.GroundAltitude + 1.0, laneZ) * CFrame.Angles(0, math.rad(90), 0)
     end
 
     local _, cRoot = getAliveRig()
@@ -2383,8 +2440,7 @@ local function executeGroundDeliveryHome(targetEgg, sessionId)
     local char, root, hum = getAliveRig()
     if not root or not hum then return false end
 
-    local playerSpeed = hum.WalkSpeed
-    if not playerSpeed or playerSpeed <= 0 then playerSpeed = 16 end
+    local playerSpeed = getPlayerCurrentSpeed()
 
     setCollisions(false)
     StealUIManager:Lock()
@@ -2398,23 +2454,21 @@ local function executeGroundDeliveryHome(targetEgg, sessionId)
     local reached = false
 
     local conn
-    conn = Services.RunService.Heartbeat:Connect(function(dt)
+    conn = Services.RunService.Heartbeat:Connect(function()
         if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() or isMapClosed() then
             if conn then conn:Disconnect() conn = nil end
             return
         end
 
-        local _, cRoot, cHum = getAliveRig()
-        if not cRoot or not cHum or os.clock() > timeout then
+        local _, cRoot = getAliveRig()
+        if not cRoot or os.clock() > timeout then
             if conn then conn:Disconnect() conn = nil end
             return
         end
 
-        local cSpeed = cHum.WalkSpeed
-        if not cSpeed or cSpeed <= 0 then cSpeed = playerSpeed end
-
-        local flatDiff = Vector3.new(targetPos.X - cRoot.Position.X, 0, targetPos.Z - cRoot.Position.Z)
-        if flatDiff.Magnitude <= 4.0 or cRoot.Position.X <= targetPos.X then
+        local currentPos = cRoot.Position
+        local flatDiff = Vector3.new(targetPos.X - currentPos.X, 0, targetPos.Z - currentPos.Z)
+        if flatDiff.Magnitude <= 4.0 or currentPos.X <= targetPos.X then
             reached = true
             cRoot.AssemblyLinearVelocity = Vector3.zero
             cRoot.AssemblyAngularVelocity = Vector3.zero
@@ -2423,9 +2477,9 @@ local function executeGroundDeliveryHome(targetEgg, sessionId)
         end
 
         local dir = flatDiff.Unit
-        local moveStep = math.min(cSpeed * dt, flatDiff.Magnitude)
-        cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * cSpeed, cRoot.AssemblyLinearVelocity.Y, dir.Z * cSpeed)
-        cRoot.CFrame = CFrame.new(cRoot.Position + dir * moveStep) * CFrame.Angles(0, math.rad(90), 0)
+        -- Natural physics velocity using player's own speed (zero artificial CFrame stepping)
+        cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * playerSpeed, cRoot.AssemblyLinearVelocity.Y, dir.Z * playerSpeed)
+        cRoot.CFrame = CFrame.new(currentPos.X, CONFIG.GroundAltitude + 1.0, currentPos.Z) * CFrame.lookAt(Vector3.zero, dir)
     end)
 
     while conn and conn.Connected do

@@ -1604,7 +1604,7 @@ function HalloweenStealManager:Process()
             local isManor = (targetArea == HalloweenAreaManager.CanonicalNames.Zone3)
 
             -- If egg is in Abandoned Manor (Zone3) or 500+ studs away:
-            -- Physically travel 200 studs closer first using high-speed ground glide before snap TP
+            -- Physically travel 200 studs closer first using ground velocity before snap TP
             if isManor or dist >= 500 then
                 local dir = (Vector3.new(eggPos.X, 0, eggPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Unit
                 local travelDist = math.min(220, math.max(100, dist - 150))
@@ -1614,10 +1614,12 @@ function HalloweenStealManager:Process()
                 local travelTimeout = (travelDist / travelSpeed) + 1.0
 
                 setCollisions(false)
-                while (Vector3.new(travelTarget.X, 0, travelTarget.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude > 6 and (os.clock() - startTime) < travelTimeout do
+                while (os.clock() - startTime) < travelTimeout do
                     Services.RunService.Heartbeat:Wait()
                     local _, cRoot = getAliveRig()
                     if not cRoot or not self.IsActive or session ~= self.CurrentSession then break end
+                    local curDist = (Vector3.new(travelTarget.X, 0, travelTarget.Z) - Vector3.new(cRoot.Position.X, 0, cRoot.Position.Z)).Magnitude
+                    if curDist <= 6 then break end
                     cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * travelSpeed, cRoot.AssemblyLinearVelocity.Y, dir.Z * travelSpeed)
                     cRoot.CFrame = CFrame.new(cRoot.Position.X, cRoot.Position.Y, cRoot.Position.Z) * CFrame.lookAt(Vector3.zero, dir)
                 end
@@ -1729,59 +1731,25 @@ function PriorityManager:IsTaskEnabled(taskName)
     return false
 end
 
-function PriorityManager:IsTaskDemanding(taskName)
-    local resolved = self.TaskAliases[taskName] or taskName
-    if not self:IsTaskEnabled(resolved) then return false end
-
-    local inHalloween = HalloweenPortalManager.IsInHalloweenDimension()
-
-    if inHalloween then
-        -- Inside Halloween Dimension: Main-world tasks cannot demand execution
-        if resolved == "Auto Steal" or resolved == "Bloom Event" or resolved == "Auto Treadmill" then
-            return false
-        end
-        if resolved == "Halloween Steal" then
-            return getgenv().config.autoHalloweenSteal == true
-        elseif resolved == "Candy Cane Farm" then
-            return getgenv().config.autoCandyCane == true
-        end
-    else
-        -- Inside Main World: Halloween tasks cannot block main-world tasks or idle treadmill
-        if resolved == "Halloween Steal" or resolved == "Candy Cane Farm" then
-            return false
-        end
-        if resolved == "Auto Steal" then
-            local egg = (typeof(getBestEgg) == "function") and getBestEgg() or nil
-            return (isHoldingEgg() or State.isStealingActive or (egg ~= nil and not isMapClosed()))
-        elseif resolved == "Bloom Event" then
-            return (BloomManager and BloomManager.IsBusy == true) or (State.isCatchingWisp == true)
-        elseif resolved == "Auto Treadmill" then
-            return getgenv().config.autoTreadmill == true
-        end
+function PriorityManager:CanRun(taskName)
+    local inRace = LocalPlayer:GetAttribute("RaceId") ~= nil
+    if inRace and taskName ~= "Race" then
+        return false
     end
 
-    return false
-end
-
-function PriorityManager:CanRun(taskName)
     local myRank = self:GetRank(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
 
-    if self.ActiveTask and self.ActiveTask ~= taskName and self.ActiveTask ~= resolved then
-        local currentRank = self:GetRank(self.ActiveTask)
-        if myRank > currentRank then
-            return false
-        end
+    -- Auto Steal only blocks lower priority tasks when actively stealing or holding an egg
+    if resolved ~= "Auto Steal" and resolved ~= "Race" and isStealEnabled() and (isHoldingEgg() or State.isStealingActive) then
+        return false
     end
 
-    if resolved ~= "Auto Upgrades" then
-        for i = 1, myRank - 1 do
-            local higherTask = self.List[i]
-            if higherTask and higherTask ~= resolved and higherTask ~= "Auto Upgrades" then
-                if self:IsTaskDemanding(higherTask) then
-                    return false
-                end
-            end
+    -- If another task is currently claiming execution
+    if self.ActiveTask and self.ActiveTask ~= taskName and self.ActiveTask ~= resolved then
+        local currentRank = self:GetRank(self.ActiveTask)
+        if myRank >= currentRank then
+            return false
         end
     end
 
@@ -1790,7 +1758,7 @@ end
 
 function PriorityManager:Claim(taskName)
     if self:CanRun(taskName) then
-        self.ActiveTask = taskName
+        self.ActiveTask = self.TaskAliases[taskName] or taskName
         return true
     end
     return false
@@ -2436,62 +2404,92 @@ local function performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
     return isHoldingEgg()
 end
 
-local function executeGroundDeliveryHome(targetEgg, sessionId)
-    local char, root, hum = getAliveRig()
-    if not root or not hum then return false end
+local function executeCheckpointedHopsHome(targetEgg, sessionId)
+    local _, root, humanoid = getAliveRig()
+    if not root then return false end
 
-    local playerSpeed = getPlayerCurrentSpeed()
+    local boundaryX = CONFIG.BoundaryCheckpointX
+    local stepSize = CONFIG.HopDistance
+    local interval = CONFIG.CheckpointInterval
+    local safeTarget = CONFIG.BaseDropPosition
 
-    setCollisions(false)
+    local laneZ = math.clamp(root.Position.Z, -425, -300)
+    local currentX = root.Position.X
+    local lastCheckpointX = currentX
+
     StealUIManager:Lock()
     ShieldManager:MuteUGI()
+    if humanoid then humanoid.PlatformStand = false end
 
-    local safeTarget = CONFIG.BaseDropPosition
-    local laneZ = math.clamp(root.Position.Z, -425, -300)
-    local targetPos = Vector3.new(safeTarget.X, CONFIG.GroundAltitude + 1.0, laneZ)
-    local delta = Vector3.new(targetPos.X - root.Position.X, 0, targetPos.Z - root.Position.Z)
-    local timeout = os.clock() + math.max(15, (delta.Magnitude / playerSpeed) + 8)
-    local reached = false
+    local groundY = CONFIG.GroundAltitude + 1.0
 
-    local conn
-    conn = Services.RunService.Heartbeat:Connect(function()
-        if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() or isMapClosed() then
-            if conn then conn:Disconnect() conn = nil end
-            return
+    while currentX - stepSize > boundaryX do
+        if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
+            ShieldManager:UnmuteUGI()
+            StealUIManager:Unlock()
+            cleanupFlightState()
+            return false
         end
 
         local _, cRoot = getAliveRig()
-        if not cRoot or os.clock() > timeout then
-            if conn then conn:Disconnect() conn = nil end
-            return
+        if not cRoot then 
+            ShieldManager:UnmuteUGI()
+            StealUIManager:Unlock()
+            cleanupFlightState() 
+            return false 
         end
 
-        local currentPos = cRoot.Position
-        local flatDiff = Vector3.new(targetPos.X - currentPos.X, 0, targetPos.Z - currentPos.Z)
-        if flatDiff.Magnitude <= 4.0 or currentPos.X <= targetPos.X then
-            reached = true
+        local nextX = currentX - stepSize
+        local preHopTime = os.clock()
+
+        pcall(function()
+            cRoot.CFrame = CFrame.new(nextX, groundY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
             cRoot.AssemblyLinearVelocity = Vector3.zero
-            cRoot.AssemblyAngularVelocity = Vector3.zero
-            if conn then conn:Disconnect() conn = nil end
-            return
+        end)
+        task.wait(CONFIG.HopGap)
+
+        local _, postRoot = getAliveRig()
+        local pulled = (State.lastServerRollbackTime > preHopTime) or (postRoot ~= nil and (postRoot.Position.X - nextX > 15))
+
+        if pulled then
+            CONFIG.HopGap = math.min(CONFIG.HopGapMax, CONFIG.HopGap + 0.02)
+            task.wait(0.1)
+        else
+            currentX = nextX
+            CONFIG.HopGap = math.max(CONFIG.HopGapMin, CONFIG.HopGap - 0.01)
         end
 
-        local dir = flatDiff.Unit
-        -- Natural physics velocity using player's own speed (zero artificial CFrame stepping)
-        cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * playerSpeed, cRoot.AssemblyLinearVelocity.Y, dir.Z * playerSpeed)
-        cRoot.CFrame = CFrame.new(currentPos.X, CONFIG.GroundAltitude + 1.0, currentPos.Z) * CFrame.lookAt(Vector3.zero, dir)
-    end)
+        if math.abs(lastCheckpointX - currentX) >= interval and currentX > 1050 then
+            local success = performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
+            if not success then
+                ShieldManager:UnmuteUGI()
+                StealUIManager:Unlock()
+                cleanupFlightState()
+                return false
+            end
+            lastCheckpointX = currentX
+            local _, rRoot, rHum = getAliveRig()
+            if rHum then rHum.PlatformStand = false end
+            task.wait(CONFIG.HopGap)
+        end
+    end
 
-    while conn and conn.Connected do
-        Services.RunService.Heartbeat:Wait()
+    local boundarySuccess = performGroundCheckpoint(targetEgg, boundaryX, laneZ, sessionId)
+    if not boundarySuccess then
+        ShieldManager:UnmuteUGI()
+        StealUIManager:Unlock()
+        cleanupFlightState()
+        return false
     end
 
     local _, fRoot, fHum = getAliveRig()
     if fRoot then
-        fRoot.CFrame = CFrame.new(safeTarget.X, CONFIG.GroundAltitude + 1.2, safeTarget.Z)
-        fRoot.AssemblyLinearVelocity = Vector3.zero
+        pcall(function()
+            fRoot.CFrame = CFrame.new(safeTarget.X, CONFIG.GroundAltitude + 1.2, safeTarget.Z)
+            fRoot.AssemblyLinearVelocity = Vector3.zero
+        end)
     end
-    task.wait(0.2)
+    task.wait(0.25)
     if fHum then fHum.PlatformStand = false end
 
     dropHeldEggDirect()
@@ -2509,8 +2507,8 @@ local function executeGroundDeliveryHome(targetEgg, sessionId)
     return not isHoldingEgg()
 end
 
-local function executeCheckpointedHopsHome(targetEgg, sessionId)
-    return executeGroundDeliveryHome(targetEgg, sessionId)
+local function executeGroundDeliveryHome(targetEgg, sessionId)
+    return executeCheckpointedHopsHome(targetEgg, sessionId)
 end
 
 local function travelPlaneSegment(targetPos, stopDist, speed, timeout, sessionId, targetUid)
@@ -2722,20 +2720,34 @@ end
 -- ==============================================================================
 WorkerScheduler:Register("HalloweenSteal", 0.25, function()
     if not getgenv().config.autoHalloweenSteal then return end
-    if PriorityManager:CanRun("HalloweenSteal") then
+    if not PriorityManager:CanRun("HalloweenSteal") then return end
+
+    if not HalloweenPortalManager.IsInHalloweenDimension() then
         PriorityManager:Claim("HalloweenSteal")
-        pcall(function() HalloweenStealManager:Process() end)
+        HalloweenPortalManager.EnterDimension(5.0)
         PriorityManager:Release("HalloweenSteal")
+        return
     end
+
+    PriorityManager:Claim("HalloweenSteal")
+    pcall(function() HalloweenStealManager:Process() end)
+    PriorityManager:Release("HalloweenSteal")
 end)
 
 WorkerScheduler:Register("CandyCaneFarm", 0.05, function()
     if not getgenv().config.autoCandyCane then return end
-    if PriorityManager:CanRun("CandyCane") then
+    if not PriorityManager:CanRun("CandyCane") then return end
+
+    if not HalloweenPortalManager.IsInHalloweenDimension() then
         PriorityManager:Claim("CandyCane")
-        pcall(function() HalloweenCombatManager:Process() end)
+        HalloweenPortalManager.EnterDimension(5.0)
         PriorityManager:Release("CandyCane")
+        return
     end
+
+    PriorityManager:Claim("CandyCane")
+    pcall(function() HalloweenCombatManager:Process() end)
+    PriorityManager:Release("CandyCane")
 end)
 
 WorkerScheduler:Register("AutoUpgrades", 6.0, function()
@@ -2863,8 +2875,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     end
 
     -- 2. Treadmill Idle Execution (With Automatic Flag/Lock Reset)
-    local hasEggToSteal = (currentTargetEgg ~= nil)
-    local isStealBusy = State.isStealingActive or isHoldingEgg() or hasEggToSteal
+    local isStealBusy = State.isStealingActive or isHoldingEgg()
     local canTreadmill = getgenv().config.autoTreadmill and not isStealBusy and PriorityManager:CanRun("Treadmill")
 
     if canTreadmill and getAliveRig() then
@@ -3335,11 +3346,11 @@ local function renderPriorityPanel()
         if child:IsA("Frame") then child:Destroy() end
     end
 
-    priorityPg.CanvasSize = UDim2.new(0, 0, 0, #PriorityManager.List * 54 + 20)
+    priorityPg.CanvasSize = UDim2.new(0, 0, 0, 0)
 
     for index, taskName in ipairs(PriorityManager.List) do
         local card = Instance.new("Frame", priorityPg)
-        card.Size = UDim2.new(1, 0, 0, 48)
+        card.Size = UDim2.new(1, -6, 0, 48)
         card.BackgroundColor3 = activeTheme and activeTheme.CardBg or Color3.fromRGB(20, 24, 34)
         card.BackgroundTransparency = 0.35
         card.BorderSizePixel = 0

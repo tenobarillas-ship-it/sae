@@ -96,7 +96,7 @@ getgenv().config.autoWispQuest = currentSettings.AutoWispQuest
 getgenv().config.autoHalloweenSteal = currentSettings.AutoHalloweenSteal
 getgenv().config.autoCandyCane = currentSettings.AutoCandyCane
 
-local HalloweenPortalManager, HalloweenCombatManager, HalloweenStealManager, PriorityManager
+local HalloweenPortalManager, HalloweenCombatManager, HalloweenStealManager, PriorityManager, getBestEgg
 
 local State = {
     currentStealSession = 0,
@@ -127,10 +127,10 @@ local CONFIG = {
     HopGap = 0.06,
     HopGapMin = 0.05,
     HopGapMax = 0.20,
-    FlightAltitude = 120.7,
-    HopAltitude = 112.8,
+    FlightAltitude = 71.5,
+    HopAltitude = 71.8,
     GroundAltitude = 70.8,
-    AirGrabOffset = 8.5,
+    AirGrabOffset = 1.2,
     CheckpointInterval = 1600,
     BoundaryCheckpointX = 600.2,
     SeparationLineX = 552.2,
@@ -775,11 +775,14 @@ function EggDetector:CheckHolding()
         return true
     end
 
-    for _, gui in ipairs(PlayerGui:GetChildren()) do
-        if gui:IsA("ScreenGui") and gui.Enabled and gui.Name ~= "HalloweenDirectGrabGUI" and gui.Name ~= "SyntaxHubGUI" then
-            local btn = gui:FindFirstChild("Drop", true)
-            if btn and (btn:IsA("TextButton") or btn:IsA("ImageButton")) and btn.Visible then
-                return true
+    -- Universal check for seasonal "Drop" button ONLY inside Halloween dimension
+    if HalloweenPortalManager and HalloweenPortalManager.IsInHalloweenDimension and HalloweenPortalManager.IsInHalloweenDimension() then
+        for _, gui in ipairs(PlayerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui.Enabled and gui.Name ~= "HalloweenDirectGrabGUI" and gui.Name ~= "SyntaxHubGUI" then
+                local btn = gui:FindFirstChild("Drop", true)
+                if btn and (btn:IsA("TextButton") or btn:IsA("ImageButton")) and btn.Visible then
+                    return true
+                end
             end
         end
     end
@@ -1298,6 +1301,52 @@ function HalloweenStealManager:GetBarrierPart()
     return nil
 end
 
+function HalloweenStealManager:TravelToPosition(targetPos, maxFinalSnap)
+    maxFinalSnap = maxFinalSnap or 300
+    local _, root, hum = getAliveRig()
+    if not root or not hum then return false end
+
+    local currentPos = root.Position
+    local flatDelta = Vector3.new(targetPos.X - currentPos.X, 0, targetPos.Z - currentPos.Z)
+    local totalDist = flatDelta.Magnitude
+
+    -- If egg or destination is 500+ studs away, step in safe travel hops so server tracking stays valid
+    if totalDist >= 500 then
+        local stepSize = 180
+        local dir = flatDelta.Unit
+
+        while totalDist > maxFinalSnap do
+            if not getgenv().config.autoHalloweenSteal then return false end
+            local _, cRoot = getAliveRig()
+            if not cRoot then return false end
+
+            local moveDist = math.min(stepSize, totalDist - (maxFinalSnap - 50))
+            local nextPos = cRoot.Position + dir * moveDist
+            cRoot.CFrame = CFrame.new(Vector3.new(nextPos.X, targetPos.Y + 1.2, nextPos.Z))
+            cRoot.AssemblyLinearVelocity = Vector3.zero
+            cRoot.AssemblyAngularVelocity = Vector3.zero
+            task.wait(0.06)
+
+            local _, afterRoot = getAliveRig()
+            if afterRoot then
+                totalDist = (Vector3.new(targetPos.X - afterRoot.Position.X, 0, targetPos.Z - afterRoot.Position.Z)).Magnitude
+            else
+                break
+            end
+        end
+    end
+
+    -- Final snap onto the target position
+    local _, finalRoot = getAliveRig()
+    if finalRoot then
+        finalRoot.AssemblyLinearVelocity = Vector3.zero
+        finalRoot.AssemblyAngularVelocity = Vector3.zero
+        finalRoot.CFrame = CFrame.new(Vector3.new(targetPos.X, targetPos.Y + 1.2, targetPos.Z))
+        task.wait(0.04)
+    end
+    return true
+end
+
 function HalloweenStealManager:SelectTargetEgg()
     local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
     local folder = dim and dim:FindFirstChild("WorldEggs")
@@ -1370,6 +1419,7 @@ function HalloweenStealManager:ExecuteDelivery(session)
         safePadPos = Vector3.new(barrier.Position.X, self.InsideSafePadPos.Y, barrier.Position.Z - 30)
     end
 
+    self:TravelToPosition(entrancePos, 250)
     root.AssemblyLinearVelocity = Vector3.zero
     root.AssemblyAngularVelocity = Vector3.zero
     root.CFrame = CFrame.new(entrancePos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
@@ -1433,9 +1483,9 @@ function HalloweenStealManager:Process()
         local targetEgg = self:SelectTargetEgg()
         if targetEgg and targetEgg.Parent then
             local eggPos = targetEgg:GetPivot().Position
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.CFrame = CFrame.new(Vector3.new(eggPos.X, eggPos.Y + 1.2, eggPos.Z))
-            task.wait(0.04)
+            
+            -- Travel safely to egg (segments if >= 500 studs, instant snap if closer)
+            self:TravelToPosition(eggPos, 280)
 
             local grabbed = self:GrabEgg(targetEgg)
             if not grabbed then
@@ -1537,13 +1587,14 @@ function PriorityManager:IsTaskDemanding(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
     if not self:IsTaskEnabled(resolved) then return false end
     if resolved == "Auto Steal" then
-        return (isHoldingEgg() or State.isStealingActive or (getBestEgg and getBestEgg() ~= nil))
+        local egg = (typeof(getBestEgg) == "function") and getBestEgg() or nil
+        return (isHoldingEgg() or State.isStealingActive or (egg ~= nil))
     elseif resolved == "Halloween Steal" then
         return getgenv().config.autoHalloweenSteal == true
     elseif resolved == "Candy Cane Farm" then
         return getgenv().config.autoCandyCane == true
     elseif resolved == "Bloom Event" then
-        return (BloomManager and BloomManager.IsBusy) or State.isCatchingWisp
+        return (BloomManager and BloomManager.IsBusy == true) or (State.isCatchingWisp == true)
     elseif resolved == "Auto Treadmill" then
         return getgenv().config.autoTreadmill == true
     end
@@ -1916,9 +1967,22 @@ local function findMyPlot()
 
     if State.myPlot then
         for _, desc in ipairs(State.myPlot:GetDescendants()) do
-            if desc.Name:lower():find("treadmill") and desc:IsA("BasePart") then
-                State.myTreadmill = desc
-                break
+            if desc.Name:lower():find("treadmill") then
+                if desc:IsA("BasePart") then
+                    State.myTreadmill = desc
+                    break
+                elseif desc:IsA("Model") then
+                    State.myTreadmill = desc.PrimaryPart or desc:FindFirstChildWhichIsA("BasePart")
+                    if State.myTreadmill then break end
+                end
+            end
+        end
+        if not State.myTreadmill then
+            for _, child in ipairs(State.myPlot:GetChildren()) do
+                if child.Name:lower():find("treadmill") then
+                    State.myTreadmill = child:IsA("BasePart") and child or (child:IsA("Model") and (child.PrimaryPart or child:FindFirstChildWhichIsA("BasePart")))
+                    if State.myTreadmill then break end
+                end
             end
         end
     end
@@ -2374,7 +2438,7 @@ local function flyOutboundElevated(targetPosition, stopDistance, sessionId, targ
     return reached and (sessionId == State.currentStealSession) and isStealEnabled() and not isMapClosed()
 end
 
-local function getBestEgg()
+getBestEgg = function()
     if not EggState or not EggState.ReadFieldEggs or isMapClosed() then return nil end
     local data = nil
     pcall(function() data = EggState.ReadFieldEggs() end)
@@ -2562,12 +2626,12 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                 if canUseFastSteal then
                     local arrived = executeFastStealOutbound(eggTargetPos, session, targetUid)
                     if not arrived and session == State.currentStealSession and isStealEnabled() and isEggStillValid(targetUid) then
-                        arrived = flyOutboundElevated(eggTargetPos, 4, session, targetUid)
+                        arrived = runAlongGroundToEgg(eggTargetPos, CONFIG.FastStealGroundSpeed, session, targetUid)
                     end
 
                     if arrived and session == State.currentStealSession and isStealEnabled() then
                         task.wait(0.04)
-                        local grabbed = instantGrabAtPosition(targetUid, eggTargetPos, session, true)
+                        local grabbed = instantGrabAtPosition(targetUid, eggTargetPos, session, false)
 
                         if (grabbed or isHoldingEgg()) and session == State.currentStealSession and isStealEnabled() then
                             stealSuccess = executeFastStealDelivery(currentTargetEgg, session)
@@ -2577,10 +2641,10 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                         end
                     end
                 else
-                    local arrived = flyOutboundElevated(eggTargetPos, 4, session, targetUid)
+                    local arrived = runAlongGroundToEgg(eggTargetPos, CONFIG.FastStealGroundSpeed, session, targetUid)
                     if arrived and session == State.currentStealSession and isStealEnabled() then
                         task.wait(0.04)
-                        local grabbed = instantGrabAtPosition(targetUid, eggTargetPos, session, true)
+                        local grabbed = instantGrabAtPosition(targetUid, eggTargetPos, session, false)
                         if (grabbed or isHoldingEgg()) and session == State.currentStealSession and isStealEnabled() then
                             stealSuccess = executeCheckpointedHopsHome(currentTargetEgg, session)
                         end
@@ -2630,26 +2694,27 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                     tw:Play()
                     tw.Completed:Wait()
                 end
-            end
 
-            local _, postRoot, postHum = getAliveRig()
-            if postRoot and not postRoot.Anchored then
-                if postHum then
-                    postHum.PlatformStand = false
-                    postHum.Sit = false
-                end
-                if Remotes.AskWearStill and not isStealBusy then
-                    pcall(function() Remotes.AskWearStill:InvokeServer() end)
-                end
-                task.wait(0.35)
-                local _, verifyRoot = getAliveRig()
-                if verifyRoot and not verifyRoot.Anchored then
-                    State.treadmillFailCount = State.treadmillFailCount + 1
-                    -- If server refuses to let us on the treadmill after 8 tries (~5s), reset character to clear flag
-                    if State.treadmillFailCount >= 8 then
-                        resetFlaggedCharacter()
-                    elseif State.treadmillFailCount == 4 and Remotes.AskDoff then
-                        pcall(function() Remotes.AskDoff:InvokeServer() end)
+                local _, postRoot, postHum = getAliveRig()
+                if postRoot and not postRoot.Anchored then
+                    if postHum then
+                        postHum.PlatformStand = false
+                        postHum.Sit = false
+                    end
+                    if Remotes.AskWearStill and not isStealBusy then
+                        pcall(function() Remotes.AskWearStill:InvokeServer() end)
+                    end
+                    task.wait(0.35)
+                    local _, verifyRoot = getAliveRig()
+                    if verifyRoot and not verifyRoot.Anchored then
+                        State.treadmillFailCount = State.treadmillFailCount + 1
+                        if State.treadmillFailCount >= 8 then
+                            resetFlaggedCharacter()
+                        elseif State.treadmillFailCount == 4 and Remotes.AskDoff then
+                            pcall(function() Remotes.AskDoff:InvokeServer() end)
+                        end
+                    else
+                        State.treadmillFailCount = 0
                     end
                 else
                     State.treadmillFailCount = 0

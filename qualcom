@@ -33,6 +33,8 @@ local currentSettings = {
     TargetAreas = { ["All"] = true },
     MinRarity = "All",
     AutoHalloweenSteal = false,
+    HalloweenTargetAreas = { ["All"] = true },
+    HalloweenMinRarity = "All",
     AutoCandyCane = false,
     TaskPriorities = {
         "Auto Steal",
@@ -60,7 +62,9 @@ local function loadStuff()
                 for k, v in pairs(decoded) do
                     if k == "TargetAreas" and type(v) == "table" then
                         currentSettings.TargetAreas = v
-                                        elseif k == "TaskPriorities" and type(v) == "table" then
+                    elseif k == "HalloweenTargetAreas" and type(v) == "table" then
+                        currentSettings.HalloweenTargetAreas = v
+                    elseif k == "TaskPriorities" and type(v) == "table" then
                         currentSettings.TaskPriorities = v
                     elseif type(v) == "table" and type(currentSettings[k]) == "table" then
                         for k2, v2 in pairs(v) do currentSettings[k][k2] = v2 end
@@ -78,6 +82,12 @@ local function loadStuff()
         if type(currentSettings.MinRarity) ~= "string" or string.find(currentSettings.MinRarity, "table:") then
         currentSettings.MinRarity = "All"
     end
+    if type(currentSettings.HalloweenTargetAreas) ~= "table" or next(currentSettings.HalloweenTargetAreas) == nil then
+        currentSettings.HalloweenTargetAreas = { ["All"] = true }
+    end
+    if type(currentSettings.HalloweenMinRarity) ~= "string" or string.find(currentSettings.HalloweenMinRarity, "table:") then
+        currentSettings.HalloweenMinRarity = "All"
+    end
     end
 
 loadStuff()
@@ -94,9 +104,11 @@ getgenv().config.autoClaimMastery = currentSettings.AutoClaimMastery
 getgenv().config.autoCatchButterfly = currentSettings.AutoCatchButterfly
 getgenv().config.autoWispQuest = currentSettings.AutoWispQuest
 getgenv().config.autoHalloweenSteal = currentSettings.AutoHalloweenSteal
+getgenv().config.halloweenTargetAreas = currentSettings.HalloweenTargetAreas
+getgenv().config.halloweenMinRarity = currentSettings.HalloweenMinRarity
 getgenv().config.autoCandyCane = currentSettings.AutoCandyCane
 
-local HalloweenPortalManager, HalloweenAreaManager, HalloweenCombatManager, HalloweenStealManager, PriorityManager, getBestEgg
+local HalloweenPortalManager, HalloweenAreaManager, HalloweenCombatManager, HalloweenStealManager, PriorityManager, getBestEgg, DynamicRarityResolver
 
 local State = {
     currentStealSession = 0,
@@ -1421,6 +1433,196 @@ function HalloweenCombatManager:Abort()
 end
 
 -- ==============================================================================
+-- [ DYNAMIC RUNTIME EGG RARITY RESOLVER (ZERO HARDCODING) ]
+-- ==============================================================================
+DynamicRarityResolver = {
+    AssetsDirectory = nil,
+    HalloweenSpecs = nil,
+    RarityIndex = {},
+    IsReady = false
+}
+
+function DynamicRarityResolver:Initialize()
+    local dataFolder = Services.ReplicatedStorage:FindFirstChild("Data")
+    if not dataFolder then return false end
+
+    -- 1. Load Master Assets Directory
+    local assetsMod = dataFolder:FindFirstChild("Assets")
+    if assetsMod and assetsMod:IsA("ModuleScript") then
+        local ok, data = pcall(require, assetsMod)
+        if ok and type(data) == "table" and type(data.Directory) == "table" then
+            self.AssetsDirectory = data.Directory
+        end
+    end
+
+    -- 2. Load Halloween Pets Specs (Seasonal Module)
+    local hwMod = dataFolder:FindFirstChild("HalloweenPets")
+    if hwMod and hwMod:IsA("ModuleScript") then
+        local ok, data = pcall(require, hwMod)
+        if ok and type(data) == "table" and type(data.Specs) == "table" then
+            self.HalloweenSpecs = data.Specs
+        end
+    end
+
+    -- 3. Load Master Rarity Definitions for rank number fallback
+    local rarityMod = dataFolder:FindFirstChild("Rarity")
+    if rarityMod and rarityMod:IsA("ModuleScript") then
+        local ok, data = pcall(require, rarityMod)
+        if ok and type(data) == "table" then
+            for rName, rInfo in pairs(data) do
+                if type(rInfo) == "table" then
+                    local rank = rInfo.Rank or rInfo.RarityNumber or rInfo.Order
+                    if rank then
+                        self.RarityIndex[tostring(rName):lower()] = tonumber(rank)
+                    end
+                end
+            end
+        end
+    end
+
+    -- Standard rank fallbacks if the Rarity module only provides helper functions
+    local defaultRanks = {
+        common = 1, uncommon = 2, superrare = 2, rare = 3,
+        epic = 4, legendary = 5, mythic = 6, cosmic = 7,
+        secret = 8, eternal = 9, divine = 10, transcendent = 10
+    }
+    for k, v in pairs(defaultRanks) do
+        if not self.RarityIndex[k] then
+            self.RarityIndex[k] = v
+        end
+    end
+
+    self.IsReady = (self.AssetsDirectory ~= nil or self.HalloweenSpecs ~= nil)
+    return self.IsReady
+end
+
+function DynamicRarityResolver:GetEggSourceName(eggInstance)
+    if not eggInstance then return "Unknown" end
+
+    local source = eggInstance:GetAttribute("PreparedSourceName")
+                or eggInstance:GetAttribute("AssetCategory")
+                or eggInstance:GetAttribute("Category")
+                or eggInstance.Name
+
+    local cleaned = tostring(source):gsub("[Ee]gg", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    return (cleaned ~= "") and cleaned or eggInstance.Name
+end
+
+function DynamicRarityResolver:_FormatResult(assetData, displayName)
+    local rarityName = "Unknown"
+    local rank = 1
+    local value = tonumber(assetData.EarningRate or assetData.BaseValue) or 0
+
+    if type(assetData.Rarity) == "table" then
+        rarityName = assetData.Rarity._id or assetData.Rarity.DisplayName or "Unknown"
+        rank = tonumber(assetData.Rarity.Rank or assetData.Rarity.RarityNumber) 
+            or self.RarityIndex[tostring(rarityName):lower()] 
+            or 1
+    elseif assetData.Rarity then
+        rarityName = tostring(assetData.Rarity)
+        rank = self.RarityIndex[rarityName:lower()] or 1
+    end
+
+    return rarityName, rank, value, displayName
+end
+
+function DynamicRarityResolver:ResolveRarity(eggOrName)
+    if not self.IsReady then
+        self:Initialize()
+    end
+
+    local rawName = ""
+    local eggInstance = nil
+
+    if typeof(eggOrName) == "Instance" then
+        eggInstance = eggOrName
+        rawName = self:GetEggSourceName(eggOrName)
+    else
+        rawName = tostring(eggOrName)
+    end
+
+    local cleanTarget = rawName:gsub("[Ee]gg", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local lowerTarget = cleanTarget:lower()
+
+    -- Search Source 1: ReplicatedStorage.Data.Assets.Directory
+    if self.AssetsDirectory then
+        local direct = self.AssetsDirectory[cleanTarget] or self.AssetsDirectory[rawName]
+        if direct and direct.Rarity then
+            return self:_FormatResult(direct, cleanTarget)
+        end
+
+        for assetKey, assetData in pairs(self.AssetsDirectory) do
+            local keyLower = tostring(assetKey):lower()
+            local dispLower = assetData.DisplayName and tostring(assetData.DisplayName):lower() or ""
+
+            if keyLower == lowerTarget or dispLower == lowerTarget then
+                return self:_FormatResult(assetData, assetData.DisplayName or assetKey)
+            end
+        end
+
+        for assetKey, assetData in pairs(self.AssetsDirectory) do
+            local keyLower = tostring(assetKey):lower()
+            if keyLower:find(lowerTarget, 1, true) or lowerTarget:find(keyLower, 1, true) then
+                return self:_FormatResult(assetData, assetData.DisplayName or assetKey)
+            end
+        end
+    end
+
+    -- Search Source 2: ReplicatedStorage.Data.HalloweenPets.Specs
+    if self.HalloweenSpecs then
+        for specKey, specData in pairs(self.HalloweenSpecs) do
+            local keyLower = tostring(specKey):lower()
+            if keyLower == lowerTarget or keyLower:find(lowerTarget, 1, true) or lowerTarget:find(keyLower, 1, true) then
+                local rarityName = tostring(specData.Rarity or "Unknown")
+                local rank = self.RarityIndex[rarityName:lower()] or 1
+                local value = specData.BaseValue or specData.EarningRate or 0
+                return rarityName, rank, value, specKey
+            end
+        end
+    end
+
+    -- Search Source 3: Direct Model Attributes
+    if eggInstance then
+        local directAttr = eggInstance:GetAttribute("Rarity")
+        if directAttr then
+            local rName = tostring(directAttr)
+            local rank = self.RarityIndex[rName:lower()] or 1
+            return rName, rank, 0, cleanTarget
+        end
+    end
+
+    return "Unknown", 1, 0, cleanTarget
+end
+
+function DynamicRarityResolver:MeetsMinRarity(eggInstance, minFilter)
+    if not minFilter or minFilter == "All" then return true end
+
+    local _, eggRank = self:ResolveRarity(eggInstance)
+    local minRank = tonumber(string.match(tostring(minFilter), "^(%d+)"))
+
+    if not minRank then
+        minRank = self.RarityIndex[tostring(minFilter):lower()] or 1
+    end
+
+    return eggRank >= minRank
+end
+
+function DynamicRarityResolver:GetEggScore(eggInstance)
+    if not eggInstance then return -math.huge end
+
+    local rarityName, rank, baseValue = self:ResolveRarity(eggInstance)
+    local scale = tonumber(eggInstance:GetAttribute("AssetScale")) or 1.0
+
+    local mutations = eggInstance:GetAttribute("Mutations")
+    local mutationBonus = (mutations and type(mutations) == "table" and #mutations > 0) and 2.5 or 1.0
+
+    local score = (rank * 1000000) + (baseValue * (scale ^ 1.85) * mutationBonus)
+    return score, rarityName, rank
+end
+
+getgenv().DynamicRarityResolver = DynamicRarityResolver
+
+-- ==============================================================================
 -- [ HALLOWEEN AUTO-STEAL MANAGER - DIRECT REMOTE & GATE TWEEN ]
 -- ==============================================================================
 HalloweenStealManager = {
@@ -1483,16 +1685,39 @@ function HalloweenStealManager:SelectTargetEgg()
     local _, root = getAliveRig()
     if not root then return nil end
 
+    local targetAreas = getgenv().config.halloweenTargetAreas or currentSettings.HalloweenTargetAreas
+    local minRarity = getgenv().config.halloweenMinRarity or currentSettings.HalloweenMinRarity or "All"
+
     local bestEgg = nil
-    local shortestDist = math.huge
+    local bestScore = -math.huge
 
     for _, egg in ipairs(folder:GetChildren()) do
         if egg:IsA("Model") or egg:IsA("BasePart") then
-            local pivot = egg:GetPivot().Position
-            local dist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(pivot.X, 0, pivot.Z)).Magnitude
-            if dist < shortestDist then
-                shortestDist = dist
-                bestEgg = egg
+            -- 1. Area Filter (Graveyard, Haunted Swamps, Abandoned Manor)
+            local eggArea = HalloweenAreaManager:GetArea(egg)
+            local areaAllowed = false
+            if not targetAreas or targetAreas["All"] or next(targetAreas) == nil then
+                areaAllowed = true
+            elseif targetAreas[eggArea] == true then
+                areaAllowed = true
+            end
+
+            if areaAllowed then
+                -- 2. Rarity Filter (Meets minimum rarity rank)
+                if DynamicRarityResolver:MeetsMinRarity(egg, minRarity) then
+                    -- 3. Priority Scoring (Highest rank, scale & base value)
+                    local score = DynamicRarityResolver:GetEggScore(egg)
+                    local pivot = egg:IsA("Model") and egg:GetPivot().Position or egg.Position
+                    local dist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(pivot.X, 0, pivot.Z)).Magnitude
+
+                    -- Tie-breaker: prefer closer egg if score is identical
+                    local finalScore = score - (dist * 0.1)
+
+                    if finalScore > bestScore then
+                        bestScore = finalScore
+                        bestEgg = egg
+                    end
+                end
             end
         end
     end
@@ -4627,7 +4852,23 @@ createToggle("Halloween Auto Steal", "Auto direct-remote grab & gate tween", cur
     end
 end)
 
-createToggle("Candy Cane Monster Farm", "Auto weapon swap combat in dimension", currentSettings.AutoCandyCane, halloweenCategory, 2, function(state)
+local halloweenAreaList = {
+    "All", "Graveyard", "Haunted Swamps", "Abandoned Manor"
+}
+
+createMultiDropdown("Target Areas", "Select Halloween areas to steal from", halloweenAreaList, currentSettings.HalloweenTargetAreas, halloweenCategory, 2, function(selectedMap)
+    getgenv().config.halloweenTargetAreas = selectedMap
+    currentSettings.HalloweenTargetAreas = selectedMap
+    saveStuff()
+end)
+
+createDropdown("Min Rarity", "Only steal Halloween eggs with rarity >= this", rarityList, currentSettings.HalloweenMinRarity, halloweenCategory, 3, function(selected)
+    getgenv().config.halloweenMinRarity = selected
+    currentSettings.HalloweenMinRarity = selected
+    saveStuff()
+end)
+
+createToggle("Candy Cane Monster Farm", "Auto weapon swap combat in dimension", currentSettings.AutoCandyCane, halloweenCategory, 4, function(state)
     getgenv().config.autoCandyCane = state
     currentSettings.AutoCandyCane = state
     saveStuff()

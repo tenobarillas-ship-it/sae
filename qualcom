@@ -142,6 +142,27 @@ local CONFIG = {
 }
 
 -- ==============================================================================
+-- [ DIMENSION DETECTION HELPER ]
+-- ==============================================================================
+local HALLOWEEN_DIM_CENTER = Vector3.new(-5808, -200, -7376)
+local HALLOWEEN_RADIUS = 2500
+
+local function isInHalloweenDimension()
+    if LocalPlayer:GetAttribute("InHalloweenDimension") == true then
+        return true
+    end
+    local char = LocalPlayer.Character
+    local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+    if root then
+        local dist = (root.Position - HALLOWEEN_DIM_CENTER).Magnitude
+        if dist <= HALLOWEEN_RADIUS then
+            return true
+        end
+    end
+    return false
+end
+
+-- ==============================================================================
 -- [ HELPER FUNCTIONS & NETWORK DISPATCHERS ]
 -- ==============================================================================
 local function formatMoneyPerSec(val)
@@ -776,11 +797,11 @@ function EggDetector:CheckHolding()
     end
 
     -- Universal check for seasonal "Drop" button ONLY inside Halloween dimension
-    if HalloweenPortalManager and HalloweenPortalManager.IsInHalloweenDimension and HalloweenPortalManager.IsInHalloweenDimension() then
+    if isInHalloweenDimension() then
         for _, gui in ipairs(PlayerGui:GetChildren()) do
             if gui:IsA("ScreenGui") and gui.Enabled and gui.Name ~= "HalloweenDirectGrabGUI" and gui.Name ~= "SyntaxHubGUI" then
                 local btn = gui:FindFirstChild("Drop", true)
-                if btn and (btn:IsA("TextButton") or btn:IsA("ImageButton")) and btn.Visible then
+                if btn and (btn:IsA("TextButton") or btn:IsA("ImageButton")) then
                     return true
                 end
             end
@@ -998,22 +1019,12 @@ end
 -- ==============================================================================
 -- [ HALLOWEEN DIMENSION - PORTAL & TRANSITION CONTROLLER ]
 -- ==============================================================================
-local HalloweenPortalManager = {}
+HalloweenPortalManager = {}
 local HALLOWEEN_DIM_CENTER = Vector3.new(-5808, -200, -7376)
 local HALLOWEEN_RADIUS = 2500
 
 function HalloweenPortalManager.IsInHalloweenDimension()
-    if LocalPlayer:GetAttribute("InHalloweenDimension") == true then
-        return true
-    end
-    local _, root = getAliveRig()
-    if root then
-        local dist = (root.Position - HALLOWEEN_DIM_CENTER).Magnitude
-        if dist <= HALLOWEEN_RADIUS then
-            return true
-        end
-    end
-    return false
+    return isInHalloweenDimension()
 end
 
 function HalloweenPortalManager.EnterDimension(timeout)
@@ -1116,7 +1127,7 @@ end
 -- ==============================================================================
 -- [ HALLOWEEN COMBAT MANAGER - MONSTER FARM & WEAPON SWAPPER ]
 -- ==============================================================================
-local HalloweenCombatManager = {
+HalloweenCombatManager = {
     ToolIndex = 1,
     LastSwapTime = 0,
     IsHolding = false,
@@ -1249,7 +1260,7 @@ end
 -- ==============================================================================
 -- [ HALLOWEEN AUTO-STEAL MANAGER - DIRECT REMOTE & GATE TWEEN ]
 -- ==============================================================================
-local HalloweenStealManager = {
+HalloweenStealManager = {
     IsActive = false,
     CurrentSession = 0,
     CachedCarryRemote = nil,
@@ -1299,52 +1310,6 @@ function HalloweenStealManager:GetBarrierPart()
         end
     end
     return nil
-end
-
-function HalloweenStealManager:TravelToPosition(targetPos, maxFinalSnap)
-    maxFinalSnap = maxFinalSnap or 300
-    local _, root, hum = getAliveRig()
-    if not root or not hum then return false end
-
-    local currentPos = root.Position
-    local flatDelta = Vector3.new(targetPos.X - currentPos.X, 0, targetPos.Z - currentPos.Z)
-    local totalDist = flatDelta.Magnitude
-
-    -- If egg or destination is 500+ studs away, step in safe travel hops so server tracking stays valid
-    if totalDist >= 500 then
-        local stepSize = 180
-        local dir = flatDelta.Unit
-
-        while totalDist > maxFinalSnap do
-            if not getgenv().config.autoHalloweenSteal then return false end
-            local _, cRoot = getAliveRig()
-            if not cRoot then return false end
-
-            local moveDist = math.min(stepSize, totalDist - (maxFinalSnap - 50))
-            local nextPos = cRoot.Position + dir * moveDist
-            cRoot.CFrame = CFrame.new(Vector3.new(nextPos.X, targetPos.Y + 1.2, nextPos.Z))
-            cRoot.AssemblyLinearVelocity = Vector3.zero
-            cRoot.AssemblyAngularVelocity = Vector3.zero
-            task.wait(0.06)
-
-            local _, afterRoot = getAliveRig()
-            if afterRoot then
-                totalDist = (Vector3.new(targetPos.X - afterRoot.Position.X, 0, targetPos.Z - afterRoot.Position.Z)).Magnitude
-            else
-                break
-            end
-        end
-    end
-
-    -- Final snap onto the target position
-    local _, finalRoot = getAliveRig()
-    if finalRoot then
-        finalRoot.AssemblyLinearVelocity = Vector3.zero
-        finalRoot.AssemblyAngularVelocity = Vector3.zero
-        finalRoot.CFrame = CFrame.new(Vector3.new(targetPos.X, targetPos.Y + 1.2, targetPos.Z))
-        task.wait(0.04)
-    end
-    return true
 end
 
 function HalloweenStealManager:SelectTargetEgg()
@@ -1419,7 +1384,6 @@ function HalloweenStealManager:ExecuteDelivery(session)
         safePadPos = Vector3.new(barrier.Position.X, self.InsideSafePadPos.Y, barrier.Position.Z - 30)
     end
 
-    self:TravelToPosition(entrancePos, 250)
     root.AssemblyLinearVelocity = Vector3.zero
     root.AssemblyAngularVelocity = Vector3.zero
     root.CFrame = CFrame.new(entrancePos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
@@ -1484,8 +1448,24 @@ function HalloweenStealManager:Process()
         if targetEgg and targetEgg.Parent then
             local eggPos = targetEgg:GetPivot().Position
             
-            -- Travel safely to egg (segments if >= 500 studs, instant snap if closer)
-            self:TravelToPosition(eggPos, 280)
+            -- If egg is far (500+ studs), travel a little bit closer first so server position tracks, then do the tp
+            local dist = (Vector3.new(eggPos.X, 0, eggPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
+            if dist >= 500 then
+                local dir = (Vector3.new(eggPos.X, 0, eggPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Unit
+                -- Travel 260 studs closer toward the egg
+                local midPos = root.Position + dir * math.min(260, dist - 250)
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.CFrame = CFrame.new(Vector3.new(midPos.X, eggPos.Y + 1.2, midPos.Z))
+                task.wait(0.18)
+            end
+
+            -- Snap onto the egg
+            local _, curRoot = getAliveRig()
+            if curRoot then
+                curRoot.AssemblyLinearVelocity = Vector3.zero
+                curRoot.CFrame = CFrame.new(Vector3.new(eggPos.X, eggPos.Y + 1.2, eggPos.Z))
+                task.wait(0.04)
+            end
 
             local grabbed = self:GrabEgg(targetEgg)
             if not grabbed then
@@ -1586,18 +1566,32 @@ end
 function PriorityManager:IsTaskDemanding(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
     if not self:IsTaskEnabled(resolved) then return false end
-    if resolved == "Auto Steal" then
-        local egg = (typeof(getBestEgg) == "function") and getBestEgg() or nil
-        return (isHoldingEgg() or State.isStealingActive or (egg ~= nil))
-    elseif resolved == "Halloween Steal" then
+
+    local inHalloween = isInHalloweenDimension()
+
+    -- Main-world tasks cannot demand execution while inside the Halloween dimension
+    if inHalloween then
+        if resolved == "Auto Steal" or resolved == "Bloom Event" or resolved == "Auto Treadmill" then
+            return false
+        end
+    else
+        -- When in main world, check if main tasks have active work
+        if resolved == "Auto Steal" then
+            local egg = (typeof(getBestEgg) == "function") and getBestEgg() or nil
+            return (isHoldingEgg() or State.isStealingActive or (egg ~= nil))
+        elseif resolved == "Bloom Event" then
+            return (BloomManager and BloomManager.IsBusy == true) or (State.isCatchingWisp == true)
+        elseif resolved == "Auto Treadmill" then
+            return getgenv().config.autoTreadmill == true
+        end
+    end
+
+    if resolved == "Halloween Steal" then
         return getgenv().config.autoHalloweenSteal == true
     elseif resolved == "Candy Cane Farm" then
         return getgenv().config.autoCandyCane == true
-    elseif resolved == "Bloom Event" then
-        return (BloomManager and BloomManager.IsBusy == true) or (State.isCatchingWisp == true)
-    elseif resolved == "Auto Treadmill" then
-        return getgenv().config.autoTreadmill == true
     end
+
     return false
 end
 
@@ -1783,6 +1777,11 @@ end
 local function runAlongGroundToEgg(targetPos, speed, sessionId, targetUid)
     local char, root, hum = getAliveRig()
     if not root or not hum then return false end
+
+    -- Use player's own WalkSpeed (never modify or override player speed)
+    local playerSpeed = hum.WalkSpeed
+    if not playerSpeed or playerSpeed <= 0 then playerSpeed = 16 end
+    speed = playerSpeed
 
     setCollisions(false)
     local targetStandPos = getStandingPosition(targetPos)

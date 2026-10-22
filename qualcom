@@ -96,7 +96,7 @@ getgenv().config.autoWispQuest = currentSettings.AutoWispQuest
 getgenv().config.autoHalloweenSteal = currentSettings.AutoHalloweenSteal
 getgenv().config.autoCandyCane = currentSettings.AutoCandyCane
 
-local HalloweenPortalManager, HalloweenCombatManager, HalloweenStealManager, PriorityManager, getBestEgg
+local HalloweenPortalManager, HalloweenAreaManager, HalloweenCombatManager, HalloweenStealManager, PriorityManager, getBestEgg
 
 local State = {
     currentStealSession = 0,
@@ -135,8 +135,8 @@ local CONFIG = {
     BoundaryCheckpointX = 600.2,
     SeparationLineX = 552.2,
     FastStealLineDropOffset = 45,
-    FastStealHopSpeed = 180,
-    FastStealGroundSpeed = 320,
+    -- FastStealHopSpeed removed: no air hopping
+    -- FastStealGroundSpeed removed: strictly uses natural hum.WalkSpeed
     FastStealDirectSnapRadius = 45,
     BaseDropPosition = Vector3.new(528.7, 70.8, -364.1)
 }
@@ -1125,6 +1125,158 @@ function HalloweenPortalManager.ExitDimension(timeout)
 end
 
 -- ==============================================================================
+-- [ HALLOWEEN CANONICAL AREA MANAGER ]
+-- ==============================================================================
+HalloweenAreaManager = {
+    -- Canonical Zone Definitions
+    CanonicalNames = {
+        Zone1 = "Graveyard",
+        Zone2 = "Haunted Swamps",
+        Zone3 = "Abandoned Manor"
+    },
+    MasterBoundaries = {},
+    IsInitialized = false
+}
+
+-- Checks if a 3D coordinate is physically inside a BasePart volume
+local function isInsideBoundingBox(worldPos, part)
+    if not part or not part:IsA("BasePart") then return false end
+    local localPoint = part.CFrame:PointToObjectSpace(worldPos)
+    local halfSize = part.Size / 2
+    return math.abs(localPoint.X) <= halfSize.X
+       and math.abs(localPoint.Y) <= (halfSize.Y + 20) -- generous Y tolerance for terrain slopes
+       and math.abs(localPoint.Z) <= halfSize.Z
+end
+
+-- Normalizes any raw string or alias into the official canonical name
+function HalloweenAreaManager.NormalizeName(rawName)
+    if not rawName then return "Unknown Area" end
+    local lower = string.lower(tostring(rawName)):gsub("[^%w]", "")
+
+    if lower:find("graveyard") or lower:find("zone1") then
+        return HalloweenAreaManager.CanonicalNames.Zone1
+    elseif lower:find("swamp") or lower:find("hauntedswamp") or lower:find("zone2") then
+        return HalloweenAreaManager.CanonicalNames.Zone2
+    elseif lower:find("manor") or lower:find("abandoned") or lower:find("zone3") then
+        return HalloweenAreaManager.CanonicalNames.Zone3
+    end
+
+    return tostring(rawName)
+end
+
+-- Locates and binds the 3 master bounding box parts directly from Workspace
+function HalloweenAreaManager:InitMasterBoundaries()
+    table.clear(self.MasterBoundaries)
+    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    if not dim then return false end
+
+    for _, desc in ipairs(dim:GetDescendants()) do
+        if desc:IsA("BasePart") and desc.Size.X > 500 then
+            local clean = self.NormalizeName(desc.Name)
+            if clean == self.CanonicalNames.Zone1 or clean == self.CanonicalNames.Zone2 or clean == self.CanonicalNames.Zone3 then
+                self.MasterBoundaries[clean] = desc
+            end
+        end
+    end
+
+    self.IsInitialized = true
+    return true
+end
+
+-- Identifies the canonical area name of any egg instance or Vector3 coordinate
+function HalloweenAreaManager:GetArea(eggOrPosition)
+    if not self.IsInitialized or next(self.MasterBoundaries) == nil then
+        self:InitMasterBoundaries()
+    end
+
+    local targetPos = nil
+    local zoneAttr = nil
+
+    if typeof(eggOrPosition) == "Vector3" then
+        targetPos = eggOrPosition
+    elseif typeof(eggOrPosition) == "Instance" then
+        zoneAttr = eggOrPosition:GetAttribute("Zone") or eggOrPosition:GetAttribute("AreaId")
+        if eggOrPosition:IsA("Model") then
+            targetPos = eggOrPosition:GetPivot().Position
+        elseif eggOrPosition:IsA("BasePart") then
+            targetPos = eggOrPosition.Position
+        end
+    end
+
+    -- 1. Check primary master bounding box parts (Point-In-Part)
+    if targetPos then
+        for canonicalName, boundPart in pairs(self.MasterBoundaries) do
+            if isInsideBoundingBox(targetPos, boundPart) then
+                return canonicalName
+            end
+        end
+    end
+
+    -- 2. Check the game's official server Zone attribute
+    if type(zoneAttr) == "number" then
+        if zoneAttr == 1 then return self.CanonicalNames.Zone1 end
+        if zoneAttr == 2 then return self.CanonicalNames.Zone2 end
+        if zoneAttr == 3 then return self.CanonicalNames.Zone3 end
+    end
+
+    -- 3. Fallback: Distance to master boundary part centers
+    if targetPos and next(self.MasterBoundaries) ~= nil then
+        local closestArea = "Unknown Area"
+        local minDistance = math.huge
+        for canonicalName, boundPart in pairs(self.MasterBoundaries) do
+            local dist = (Vector3.new(targetPos.X, 0, targetPos.Z) - Vector3.new(boundPart.Position.X, 0, boundPart.Position.Z)).Magnitude
+            if dist < minDistance then
+                minDistance = dist
+                closestArea = canonicalName
+            end
+        end
+        return closestArea
+    end
+
+    return "Unknown Area"
+end
+
+-- Scans all active eggs in WorldEggs and groups them by canonical area
+function HalloweenAreaManager:GetEggsByArea()
+    local areaMap = {
+        [self.CanonicalNames.Zone1] = {},
+        [self.CanonicalNames.Zone2] = {},
+        [self.CanonicalNames.Zone3] = {}
+    }
+
+    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    local worldEggs = dim and dim:FindFirstChild("WorldEggs")
+    if not worldEggs then return areaMap end
+
+    for _, egg in ipairs(worldEggs:GetChildren()) do
+        if egg:IsA("Model") or egg:IsA("BasePart") then
+            local areaName = self:GetArea(egg)
+            if not areaMap[areaName] then
+                areaMap[areaName] = {}
+            end
+
+            table.insert(areaMap[areaName], {
+                Instance = egg,
+                Name = egg:GetAttribute("PreparedSourceName") or egg.Name,
+                Uid = egg:GetAttribute("HalloweenEggUid") or "NoUID",
+                Position = egg:GetPivot().Position
+            })
+        end
+    end
+
+    return areaMap
+end
+
+-- Returns a simple table of all eggs inside a specific area
+function HalloweenAreaManager:GetEggsInArea(targetAreaName)
+    local canonicalTarget = self.NormalizeName(targetAreaName)
+    local grouped = self:GetEggsByArea()
+    return grouped[canonicalTarget] or {}
+end
+
+getgenv().HalloweenAreaManager = HalloweenAreaManager
+
+-- ==============================================================================
 -- [ HALLOWEEN COMBAT MANAGER - MONSTER FARM & WEAPON SWAPPER ]
 -- ==============================================================================
 HalloweenCombatManager = {
@@ -1447,24 +1599,40 @@ function HalloweenStealManager:Process()
         local targetEgg = self:SelectTargetEgg()
         if targetEgg and targetEgg.Parent then
             local eggPos = targetEgg:GetPivot().Position
-            
-            -- If egg is far (500+ studs), travel a little bit closer first so server position tracks, then do the tp
             local dist = (Vector3.new(eggPos.X, 0, eggPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
-            if dist >= 500 then
+            local targetArea = HalloweenAreaManager:GetArea(targetEgg)
+            local isManor = (targetArea == HalloweenAreaManager.CanonicalNames.Zone3)
+
+            -- If egg is in Abandoned Manor (Zone3) or 500+ studs away:
+            -- Physically travel 200 studs closer first using high-speed ground glide before snap TP
+            if isManor or dist >= 500 then
                 local dir = (Vector3.new(eggPos.X, 0, eggPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Unit
-                -- Travel 260 studs closer toward the egg
-                local midPos = root.Position + dir * math.min(260, dist - 250)
-                root.AssemblyLinearVelocity = Vector3.zero
-                root.CFrame = CFrame.new(Vector3.new(midPos.X, eggPos.Y + 1.2, midPos.Z))
-                task.wait(0.18)
+                local travelDist = math.min(220, math.max(100, dist - 150))
+                local travelTarget = root.Position + dir * travelDist
+                local travelSpeed = 260
+                local startTime = os.clock()
+                local travelTimeout = (travelDist / travelSpeed) + 0.6
+
+                setCollisions(false)
+                while (Vector3.new(travelTarget.X, 0, travelTarget.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude > 6 and (os.clock() - startTime) < travelTimeout do
+                    local dt = Services.RunService.Heartbeat:Wait()
+                    local _, cRoot = getAliveRig()
+                    if not cRoot or not self.IsActive or session ~= self.CurrentSession then break end
+                    local remaining = Vector3.new(travelTarget.X - cRoot.Position.X, 0, travelTarget.Z - cRoot.Position.Z)
+                    local step = math.min(travelSpeed * dt, remaining.Magnitude)
+                    cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * travelSpeed, 0, dir.Z * travelSpeed)
+                    cRoot.CFrame = CFrame.new(cRoot.Position + dir * step, cRoot.Position + dir * 10)
+                end
+                task.wait(0.08)
             end
 
-            -- Snap onto the egg
+            -- Snap directly onto the egg
             local _, curRoot = getAliveRig()
             if curRoot then
                 curRoot.AssemblyLinearVelocity = Vector3.zero
+                curRoot.AssemblyAngularVelocity = Vector3.zero
                 curRoot.CFrame = CFrame.new(Vector3.new(eggPos.X, eggPos.Y + 1.2, eggPos.Z))
-                task.wait(0.04)
+                task.wait(0.06)
             end
 
             local grabbed = self:GrabEgg(targetEgg)
@@ -1567,29 +1735,31 @@ function PriorityManager:IsTaskDemanding(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
     if not self:IsTaskEnabled(resolved) then return false end
 
-    local inHalloween = isInHalloweenDimension()
+    local inHalloween = HalloweenPortalManager.IsInHalloweenDimension()
 
-    -- Main-world tasks cannot demand execution while inside the Halloween dimension
     if inHalloween then
+        -- Inside Halloween Dimension: Main-world tasks cannot demand execution
         if resolved == "Auto Steal" or resolved == "Bloom Event" or resolved == "Auto Treadmill" then
             return false
         end
+        if resolved == "Halloween Steal" then
+            return getgenv().config.autoHalloweenSteal == true
+        elseif resolved == "Candy Cane Farm" then
+            return getgenv().config.autoCandyCane == true
+        end
     else
-        -- When in main world, check if main tasks have active work
+        -- Inside Main World: Halloween tasks cannot block main-world tasks or idle treadmill
+        if resolved == "Halloween Steal" or resolved == "Candy Cane Farm" then
+            return false
+        end
         if resolved == "Auto Steal" then
             local egg = (typeof(getBestEgg) == "function") and getBestEgg() or nil
-            return (isHoldingEgg() or State.isStealingActive or (egg ~= nil))
+            return (isHoldingEgg() or State.isStealingActive or (egg ~= nil and not isMapClosed()))
         elseif resolved == "Bloom Event" then
             return (BloomManager and BloomManager.IsBusy == true) or (State.isCatchingWisp == true)
         elseif resolved == "Auto Treadmill" then
             return getgenv().config.autoTreadmill == true
         end
-    end
-
-    if resolved == "Halloween Steal" then
-        return getgenv().config.autoHalloweenSteal == true
-    elseif resolved == "Candy Cane Farm" then
-        return getgenv().config.autoCandyCane == true
     end
 
     return false
@@ -1778,7 +1948,7 @@ local function runAlongGroundToEgg(targetPos, speed, sessionId, targetUid)
     local char, root, hum = getAliveRig()
     if not root or not hum then return false end
 
-    -- Use player's own WalkSpeed (never modify or override player speed)
+    -- Strictly use player's own WalkSpeed (never modify or override player speed for normal dimension)
     local playerSpeed = hum.WalkSpeed
     if not playerSpeed or playerSpeed <= 0 then playerSpeed = 16 end
     speed = playerSpeed
@@ -1851,7 +2021,7 @@ local function executeFastStealOutbound(targetPos, sessionId, targetUid)
     local exitPart = zone and zone:FindFirstChild("ExitPart", true)
 
     if not entrance or not exitPart then
-        return runAlongGroundToEgg(targetPos, CONFIG.FastStealGroundSpeed, sessionId, targetUid)
+        return runAlongGroundToEgg(targetPos, nil, sessionId, targetUid)
     end
 
     local _, root = getAliveRig()
@@ -1885,7 +2055,7 @@ local function executeFastStealOutbound(targetPos, sessionId, targetUid)
     end
 
     if not inSky then
-        return runAlongGroundToEgg(targetPos, CONFIG.FastStealGroundSpeed, sessionId, targetUid)
+        return runAlongGroundToEgg(targetPos, nil, sessionId, targetUid)
     end
 
     local exitedSky = false
@@ -1926,7 +2096,7 @@ local function executeFastStealOutbound(targetPos, sessionId, targetUid)
         task.wait(0.05)
         return true
     else
-        return runAlongGroundToEgg(targetPos, CONFIG.FastStealGroundSpeed, sessionId, targetUid)
+        return runAlongGroundToEgg(targetPos, nil, sessionId, targetUid)
     end
 end
 
@@ -2070,30 +2240,34 @@ local function executeFastStealDelivery(targetEgg, sessionId)
 
     local uid = targetEgg.Uid
     local laneZ = math.clamp(root.Position.Z, -425, -300)
-    local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, 74.0, laneZ)
+    local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, CONFIG.GroundAltitude + 1.0, laneZ)
 
-    hum.PlatformStand = true
+    local playerSpeed = hum.WalkSpeed
+    if not playerSpeed or playerSpeed <= 0 then playerSpeed = 16 end
+
     setCollisions(false)
     ShieldManager:MuteUGI()
 
-    local currentX = root.Position.X
-    local hopStep = CONFIG.FastStealHopSpeed
+    local startTime = os.clock()
+    local travelTimeout = math.max(12, ((root.Position.X - dropTargetPos.X) / playerSpeed) + 6)
 
-    while currentX - hopStep > dropTargetPos.X do
+    while root.Position.X > dropTargetPos.X + 2.0 and (os.clock() - startTime) < travelTimeout do
+        local dt = Services.RunService.Heartbeat:Wait()
         if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
-            hum.PlatformStand = false
             setCollisions(true)
             ShieldManager:UnmuteUGI()
             return false
         end
 
-        currentX = currentX - hopStep
-        local _, cRoot = getAliveRig()
-        if not cRoot then break end
+        local _, cRoot, cHum = getAliveRig()
+        if not cRoot or not cHum then break end
 
-        cRoot.CFrame = CFrame.new(currentX, CONFIG.HopAltitude, laneZ) * CFrame.Angles(0, math.rad(90), 0)
-        cRoot.AssemblyLinearVelocity = Vector3.zero
-        task.wait(0.08)
+        local cSpeed = cHum.WalkSpeed
+        if not cSpeed or cSpeed <= 0 then cSpeed = playerSpeed end
+
+        local step = math.min(cSpeed * dt, cRoot.Position.X - dropTargetPos.X)
+        cRoot.AssemblyLinearVelocity = Vector3.new(-cSpeed, cRoot.AssemblyLinearVelocity.Y, 0)
+        cRoot.CFrame = CFrame.new(cRoot.Position.X - step, CONFIG.GroundAltitude + 1.0, laneZ) * CFrame.Angles(0, math.rad(90), 0)
     end
 
     local _, cRoot = getAliveRig()
@@ -2205,103 +2379,65 @@ local function performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
     return isHoldingEgg()
 end
 
-local function executeCheckpointedHopsHome(targetEgg, sessionId)
-    local _, root, humanoid = getAliveRig()
-    if not root then return false end
+local function executeGroundDeliveryHome(targetEgg, sessionId)
+    local char, root, hum = getAliveRig()
+    if not root or not hum then return false end
 
-    local boundaryX = CONFIG.BoundaryCheckpointX
-    local stepSize = CONFIG.HopDistance
-    local interval = CONFIG.CheckpointInterval
-    local safeTarget = CONFIG.BaseDropPosition
+    local playerSpeed = hum.WalkSpeed
+    if not playerSpeed or playerSpeed <= 0 then playerSpeed = 16 end
 
-    local laneZ = math.clamp(root.Position.Z, -425, -300)
-    local currentX = root.Position.X
-    local lastCheckpointX = currentX
-
+    setCollisions(false)
     StealUIManager:Lock()
     ShieldManager:MuteUGI()
-    if humanoid then humanoid.PlatformStand = true end
 
-    local function snapAltitude(targetY)
-        local _, cRoot = getAliveRig()
-        if cRoot then
-            pcall(function()
-                cRoot.CFrame = CFrame.new(cRoot.Position.X, targetY, cRoot.Position.Z) * cRoot.CFrame.Rotation
-                cRoot.AssemblyLinearVelocity = Vector3.zero
-            end)
-            task.wait(0.03)
-        end
-    end
-    snapAltitude(CONFIG.HopAltitude)
+    local safeTarget = CONFIG.BaseDropPosition
+    local laneZ = math.clamp(root.Position.Z, -425, -300)
+    local targetPos = Vector3.new(safeTarget.X, CONFIG.GroundAltitude + 1.0, laneZ)
+    local delta = Vector3.new(targetPos.X - root.Position.X, 0, targetPos.Z - root.Position.Z)
+    local timeout = os.clock() + math.max(15, (delta.Magnitude / playerSpeed) + 8)
+    local reached = false
 
-    while currentX - stepSize > boundaryX do
-        if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
-            ShieldManager:UnmuteUGI()
-            StealUIManager:Unlock()
-            cleanupFlightState()
-            return false
+    local conn
+    conn = Services.RunService.Heartbeat:Connect(function(dt)
+        if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() or isMapClosed() then
+            if conn then conn:Disconnect() conn = nil end
+            return
         end
 
-        local _, cRoot = getAliveRig()
-        if not cRoot then 
-            ShieldManager:UnmuteUGI()
-            StealUIManager:Unlock()
-            cleanupFlightState() 
-            return false 
+        local _, cRoot, cHum = getAliveRig()
+        if not cRoot or not cHum or os.clock() > timeout then
+            if conn then conn:Disconnect() conn = nil end
+            return
         end
 
-        local nextX = currentX - stepSize
-        local preHopTime = os.clock()
+        local cSpeed = cHum.WalkSpeed
+        if not cSpeed or cSpeed <= 0 then cSpeed = playerSpeed end
 
-        pcall(function()
-            cRoot.CFrame = CFrame.new(nextX, CONFIG.HopAltitude, laneZ) * CFrame.Angles(0, math.rad(90), 0)
+        local flatDiff = Vector3.new(targetPos.X - cRoot.Position.X, 0, targetPos.Z - cRoot.Position.Z)
+        if flatDiff.Magnitude <= 4.0 or cRoot.Position.X <= targetPos.X then
+            reached = true
             cRoot.AssemblyLinearVelocity = Vector3.zero
-        end)
-        task.wait(CONFIG.HopGap)
-
-        local _, postRoot = getAliveRig()
-        local pulled = (State.lastServerRollbackTime > preHopTime) or (postRoot ~= nil and (postRoot.Position.X - nextX > 15))
-
-        if pulled then
-            CONFIG.HopGap = math.min(CONFIG.HopGapMax, CONFIG.HopGap + 0.02)
-            task.wait(0.1)
-        else
-            currentX = nextX
-            CONFIG.HopGap = math.max(CONFIG.HopGapMin, CONFIG.HopGap - 0.01)
+            cRoot.AssemblyAngularVelocity = Vector3.zero
+            if conn then conn:Disconnect() conn = nil end
+            return
         end
 
-        if math.abs(lastCheckpointX - currentX) >= interval and currentX > 1050 then
-            local success = performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
-            if not success then
-                ShieldManager:UnmuteUGI()
-                StealUIManager:Unlock()
-                cleanupFlightState()
-                return false
-            end
-            lastCheckpointX = currentX
-            local _, rRoot, rHum = getAliveRig()
-            if rHum then rHum.PlatformStand = true end
-            snapAltitude(CONFIG.HopAltitude)
-            task.wait(CONFIG.HopGap)
-        end
-    end
+        local dir = flatDiff.Unit
+        local moveStep = math.min(cSpeed * dt, flatDiff.Magnitude)
+        cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * cSpeed, cRoot.AssemblyLinearVelocity.Y, dir.Z * cSpeed)
+        cRoot.CFrame = CFrame.new(cRoot.Position + dir * moveStep) * CFrame.Angles(0, math.rad(90), 0)
+    end)
 
-    local boundarySuccess = performGroundCheckpoint(targetEgg, boundaryX, laneZ, sessionId)
-    if not boundarySuccess then
-        ShieldManager:UnmuteUGI()
-        StealUIManager:Unlock()
-        cleanupFlightState()
-        return false
+    while conn and conn.Connected do
+        Services.RunService.Heartbeat:Wait()
     end
 
     local _, fRoot, fHum = getAliveRig()
     if fRoot then
-        pcall(function()
-            fRoot.CFrame = CFrame.new(safeTarget.X, CONFIG.GroundAltitude + 1.2, safeTarget.Z)
-            fRoot.AssemblyLinearVelocity = Vector3.zero
-        end)
+        fRoot.CFrame = CFrame.new(safeTarget.X, CONFIG.GroundAltitude + 1.2, safeTarget.Z)
+        fRoot.AssemblyLinearVelocity = Vector3.zero
     end
-    task.wait(0.25)
+    task.wait(0.2)
     if fHum then fHum.PlatformStand = false end
 
     dropHeldEggDirect()
@@ -2316,7 +2452,11 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
     StealUIManager:Unlock()
     ShieldManager:UnmuteUGI()
     cleanupFlightState()
-    return true
+    return not isHoldingEgg()
+end
+
+local function executeCheckpointedHopsHome(targetEgg, sessionId)
+    return executeGroundDeliveryHome(targetEgg, sessionId)
 end
 
 local function travelPlaneSegment(targetPos, stopDist, speed, timeout, sessionId, targetUid)
@@ -2625,7 +2765,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                 if canUseFastSteal then
                     local arrived = executeFastStealOutbound(eggTargetPos, session, targetUid)
                     if not arrived and session == State.currentStealSession and isStealEnabled() and isEggStillValid(targetUid) then
-                        arrived = runAlongGroundToEgg(eggTargetPos, CONFIG.FastStealGroundSpeed, session, targetUid)
+                        arrived = runAlongGroundToEgg(eggTargetPos, nil, session, targetUid)
                     end
 
                     if arrived and session == State.currentStealSession and isStealEnabled() then
@@ -2640,7 +2780,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                         end
                     end
                 else
-                    local arrived = runAlongGroundToEgg(eggTargetPos, CONFIG.FastStealGroundSpeed, session, targetUid)
+                    local arrived = runAlongGroundToEgg(eggTargetPos, nil, session, targetUid)
                     if arrived and session == State.currentStealSession and isStealEnabled() then
                         task.wait(0.04)
                         local grabbed = instantGrabAtPosition(targetUid, eggTargetPos, session, false)

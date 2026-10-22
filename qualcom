@@ -96,7 +96,7 @@ getgenv().config.autoWispQuest = currentSettings.AutoWispQuest
 getgenv().config.autoHalloweenSteal = currentSettings.AutoHalloweenSteal
 getgenv().config.autoCandyCane = currentSettings.AutoCandyCane
 
-local HalloweenPortalManager, HalloweenCombatManager, HalloweenStealManager, PriorityManager, activeTheme
+local HalloweenPortalManager, HalloweenCombatManager, HalloweenStealManager, PriorityManager
 
 local State = {
     currentStealSession = 0,
@@ -127,8 +127,8 @@ local CONFIG = {
     HopGap = 0.06,
     HopGapMin = 0.05,
     HopGapMax = 0.20,
-    FlightAltitude = 73.6,
-    HopAltitude = 73.6,
+    FlightAltitude = 120.7,
+    HopAltitude = 112.8,
     GroundAltitude = 70.8,
     AirGrabOffset = 8.5,
     CheckpointInterval = 1600,
@@ -325,24 +325,34 @@ end
 
 local function cleanupFlightState()
     if State.activeFlightConnection then
-        State.activeFlightConnection:Disconnect()
+        pcall(function() State.activeFlightConnection:Disconnect() end)
         State.activeFlightConnection = nil
     end
-    for part in pairs(State.activeCollisionsDisabled) do
+
+    local _, root, hum = getAliveRig()
+    if hum then
+        pcall(function()
+            hum.PlatformStand = false
+            hum.Sit = false
+            hum:ChangeState(Enum.HumanoidStateType.Running)
+        end)
+    end
+    if root then
+        pcall(function()
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end)
+    end
+
+    for part, _ in pairs(State.activeCollisionsDisabled) do
         if part and part.Parent then
-            part.CanCollide = true
+            pcall(function() part.CanCollide = true end)
         end
     end
     table.clear(State.activeCollisionsDisabled)
-    local _, root, hum = getAliveRig()
-    if hum then
-        hum.PlatformStand = false
-        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
-    end
-    if root then
-        root.AssemblyLinearVelocity = Vector3.zero
-    end
+    setCollisions(true)
 end
+
 -- ==============================================================================
 -- [ AUDIO & HUD SUPPRESSION MANAGERS ]
 -- ==============================================================================
@@ -935,22 +945,18 @@ end
 -- ==============================================================================
 -- [ HALLOWEEN DIMENSION - PORTAL & TRANSITION CONTROLLER ]
 -- ==============================================================================
-HalloweenPortalManager = {}
-HalloweenPortalManager.DimCenter = Vector3.new(-5808, -200, -7376)
-HalloweenPortalManager.Radius = 2500
+local HalloweenPortalManager = {}
+local HALLOWEEN_DIM_CENTER = Vector3.new(-5808, -200, -7376)
+local HALLOWEEN_RADIUS = 2500
 
 function HalloweenPortalManager.IsInHalloweenDimension()
     if LocalPlayer:GetAttribute("InHalloweenDimension") == true then
         return true
     end
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    if dim and (dim:FindFirstChild("WorldEggs") or dim:FindFirstChild("Monsters")) then
-        return true
-    end
     local _, root = getAliveRig()
     if root then
-        local dist = (root.Position - HalloweenPortalManager.DimCenter).Magnitude
-        if dist <= HalloweenPortalManager.Radius then
+        local dist = (root.Position - HALLOWEEN_DIM_CENTER).Magnitude
+        if dist <= HALLOWEEN_RADIUS then
             return true
         end
     end
@@ -966,25 +972,34 @@ function HalloweenPortalManager.EnterDimension(timeout)
     hopOffTreadmill()
     task.wait(0.05)
 
+    local _, root, hum = getAliveRig()
+    if not root or not hum then return false end
+
     local portalModel = Services.Workspace:FindFirstChild("HalloweenDimensionPortal", true)
     local hitbox = portalModel and (portalModel:FindFirstChild("Hitbox") or portalModel:FindFirstChildWhichIsA("BasePart"))
-    local _, root = getAliveRig()
-    if hitbox and root then
-        root.CFrame = hitbox.CFrame
-        root.AssemblyLinearVelocity = Vector3.zero
-        if typeof(firetouchinterest) == "function" then
-            pcall(firetouchinterest, root, hitbox, 0)
-            task.wait(0.04)
-            pcall(firetouchinterest, root, hitbox, 1)
-        end
-    end
+
+    if not hitbox then return false end
 
     local deadline = os.clock() + timeout
     while os.clock() < deadline do
         if HalloweenPortalManager.IsInHalloweenDimension() then break end
-        Services.RunService.Heartbeat:Wait()
+
+        local _, cRoot = getAliveRig()
+        if cRoot and hitbox and hitbox.Parent then
+            cRoot.CFrame = hitbox.CFrame
+            cRoot.AssemblyLinearVelocity = Vector3.zero
+            cRoot.AssemblyAngularVelocity = Vector3.zero
+
+            if typeof(firetouchinterest) == "function" then
+                pcall(firetouchinterest, cRoot, hitbox, 0)
+                task.wait(0.04)
+                pcall(firetouchinterest, cRoot, hitbox, 1)
+            end
+        end
+        task.wait(0.2)
     end
 
+    task.wait(0.5)
     return HalloweenPortalManager.IsInHalloweenDimension()
 end
 
@@ -1020,35 +1035,40 @@ function HalloweenPortalManager.ExitDimension(timeout)
         end
     end
 
-    if exitPart and root then
-        root.CFrame = exitPart.CFrame
-        root.AssemblyLinearVelocity = Vector3.zero
-        if typeof(firetouchinterest) == "function" then
-            pcall(firetouchinterest, root, exitPart, 0)
-            task.wait(0.04)
-            pcall(firetouchinterest, root, exitPart, 1)
-        end
-    end
+    if not exitPart then return false end
 
     local deadline = os.clock() + timeout
     while os.clock() < deadline do
         if not HalloweenPortalManager.IsInHalloweenDimension() then break end
-        Services.RunService.Heartbeat:Wait()
+
+        local _, cRoot = getAliveRig()
+        if cRoot and exitPart and exitPart.Parent then
+            cRoot.CFrame = exitPart.CFrame
+            cRoot.AssemblyLinearVelocity = Vector3.zero
+            cRoot.AssemblyAngularVelocity = Vector3.zero
+
+            if typeof(firetouchinterest) == "function" then
+                pcall(firetouchinterest, cRoot, exitPart, 0)
+                task.wait(0.04)
+                pcall(firetouchinterest, cRoot, exitPart, 1)
+            end
+        end
+        task.wait(0.2)
     end
 
+    task.wait(0.5)
     return not HalloweenPortalManager.IsInHalloweenDimension()
 end
 
 -- ==============================================================================
--- [ HALLOWEEN COMBAT MANAGER - WEAPON CYCLER & TOUCH INTEREST ]
+-- [ HALLOWEEN COMBAT MANAGER - MONSTER FARM & WEAPON SWAPPER ]
 -- ==============================================================================
-HalloweenCombatManager = {
+local HalloweenCombatManager = {
     ToolIndex = 1,
     LastSwapTime = 0,
     IsHolding = false,
     HoverHeight = 3.0,
-    SwapDelay = 0.08,
-    ThreadRunning = false
+    SwapDelay = 0.08
 }
 
 function HalloweenCombatManager:GetWeaponList()
@@ -1107,88 +1127,63 @@ function HalloweenCombatManager:GetClosestMonster()
     return nearest
 end
 
-function HalloweenCombatManager:Start()
-    if self.ThreadRunning then return end
-    self.ThreadRunning = true
-    task.spawn(function()
-        local toolIndex = 1
-        local lastSwapTime = 0
-        local isHolding = false
+function HalloweenCombatManager:Process()
+    if not getgenv().config.autoCandyCane then return end
+    if not HalloweenPortalManager.IsInHalloweenDimension() then
+        HalloweenPortalManager.EnterDimension(5.0)
+        return
+    end
 
-        while getgenv().config.autoCandyCane or getgenv().AutoHalloweenFarm do
-            if PriorityManager and not PriorityManager:CanRun("CandyCane") then
-                Services.RunService.Heartbeat:Wait()
-            else
+    local char, root, hum = getAliveRig()
+    if not char or not root or not hum then return end
 
-            local inDimension = HalloweenPortalManager.IsInHalloweenDimension()
-            if not inDimension then
-                HalloweenPortalManager.EnterDimension(3.0)
-                task.wait(1.0)
-            else
-                local char, root, hum = getAliveRig()
-                local monster = self:GetClosestMonster()
+    local monster = self:GetClosestMonster()
+    if not monster or not monster.Parent then return end
 
-                if char and root and hum and monster and monster.Parent then
-                    local monsterPart = monster:FindFirstChild("HumanoidRootPart") or monster.PrimaryPart or monster:FindFirstChildWhichIsA("BasePart")
-                    if monsterPart then
-                        local hoverPosition = monsterPart.Position + Vector3.new(0, self.HoverHeight, 0)
-                        root.CFrame = CFrame.lookAt(hoverPosition, monsterPart.Position)
-                        root.AssemblyLinearVelocity = Vector3.zero
-                        root.AssemblyAngularVelocity = Vector3.zero
+    local monsterPart = monster:FindFirstChild("HumanoidRootPart") or monster.PrimaryPart or monster:FindFirstChildWhichIsA("BasePart")
+    if not monsterPart then return end
 
-                        if os.clock() - lastSwapTime >= self.SwapDelay then
-                            lastSwapTime = os.clock()
-                            local weapons = self:GetWeaponList()
+    local hoverPosition = monsterPart.Position + Vector3.new(0, self.HoverHeight, 0)
+    root.CFrame = CFrame.lookAt(hoverPosition, monsterPart.Position)
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
 
-                            if #weapons >= 2 then
-                                toolIndex = (toolIndex % #weapons) + 1
-                                local targetTool = weapons[toolIndex]
-                                if targetTool then
-                                    hum:EquipTool(targetTool)
-                                    pcall(function() targetTool:Activate() end)
-                                end
-                            elseif #weapons == 1 then
-                                local singleTool = weapons[1]
-                                if isHolding or singleTool.Parent == char then
-                                    hum:UnequipTools()
-                                    isHolding = false
-                                else
-                                    hum:EquipTool(singleTool)
-                                    pcall(function() singleTool:Activate() end)
-                                    isHolding = true
-                                end
-                            end
+    if os.clock() - self.LastSwapTime >= self.SwapDelay then
+        self.LastSwapTime = os.clock()
+        local weapons = self:GetWeaponList()
 
-                            if typeof(firetouchinterest) == "function" then
-                                local activeTool = char:FindFirstChildOfClass("Tool")
-                                local handle = activeTool and (activeTool:FindFirstChild("Handle") or activeTool:FindFirstChildWhichIsA("BasePart"))
-                                if handle and monsterPart then
-                                    pcall(firetouchinterest, handle, monsterPart, 0)
-                                    task.wait(0.01)
-                                    pcall(firetouchinterest, handle, monsterPart, 1)
-                                end
-                            end
-                        end
-                    end
-                end
+        if #weapons >= 2 then
+            self.ToolIndex = (self.ToolIndex % #weapons) + 1
+            local targetTool = weapons[self.ToolIndex]
+            if targetTool then
+                hum:EquipTool(targetTool)
+                pcall(function() targetTool:Activate() end)
             end
-            Services.RunService.Heartbeat:Wait()
+        elseif #weapons == 1 then
+            local singleTool = weapons[1]
+            if self.IsHolding or singleTool.Parent == char then
+                hum:UnequipTools()
+                self.IsHolding = false
+            else
+                hum:EquipTool(singleTool)
+                pcall(function() singleTool:Activate() end)
+                self.IsHolding = true
             end
         end
-        self.ThreadRunning = false
-        self:Abort()
-    end)
-end
 
-function HalloweenCombatManager:Process()
-    if not getgenv().config.autoCandyCane and not getgenv().AutoHalloweenFarm then return end
-    if not self.ThreadRunning then
-        self:Start()
+        if typeof(firetouchinterest) == "function" then
+            local activeTool = char:FindFirstChildOfClass("Tool")
+            local handle = activeTool and (activeTool:FindFirstChild("Handle") or activeTool:FindFirstChildWhichIsA("BasePart"))
+            if handle and monsterPart then
+                pcall(firetouchinterest, handle, monsterPart, 0)
+                task.wait(0.01)
+                pcall(firetouchinterest, handle, monsterPart, 1)
+            end
+        end
     end
 end
 
 function HalloweenCombatManager:Abort()
-    self.ThreadRunning = false
     if PriorityManager then PriorityManager:Release("CandyCane") end
     local _, root, hum = getAliveRig()
     if hum then hum.PlatformStand = false end
@@ -1201,7 +1196,7 @@ end
 -- ==============================================================================
 -- [ HALLOWEEN AUTO-STEAL MANAGER - DIRECT REMOTE & GATE TWEEN ]
 -- ==============================================================================
-HalloweenStealManager = {
+local HalloweenStealManager = {
     IsActive = false,
     CurrentSession = 0,
     CachedCarryRemote = nil,
@@ -1210,8 +1205,7 @@ HalloweenStealManager = {
     InsideSafePadPos = Vector3.new(-5810.3, -200.1, -7342.9),
     DeliveryDelay = 2.5,
     GateCrossDuration = 0.35,
-    SecureTimeout = 3.5,
-    ThreadRunning = false
+    SecureTimeout = 3.5
 }
 
 function HalloweenStealManager:GetCarryRemote()
@@ -1248,12 +1242,6 @@ function HalloweenStealManager:GetBarrierPart()
             if barrier then
                 self.CachedBarrier = barrier
                 return barrier
-            end
-        end
-        for _, desc in ipairs(dim:GetDescendants()) do
-            if desc:IsA("BasePart") and desc.Name == "Barrier" then
-                self.CachedBarrier = desc
-                return desc
             end
         end
     end
@@ -1293,9 +1281,9 @@ function HalloweenStealManager:IsHoldingHalloweenEgg()
     end
 
     for _, gui in ipairs(PlayerGui:GetChildren()) do
-        if gui:IsA("ScreenGui") and gui.Enabled and gui.Name ~= "HalloweenDirectGrabGUI" and gui.Name ~= "SyntaxHubGUI" and gui.Name ~= "SyntaxHub" then
+        if gui:IsA("ScreenGui") and gui.Enabled and gui.Name ~= "HalloweenDirectGrabGUI" and gui.Name ~= "SyntaxHubGUI" then
             local btn = gui:FindFirstChild("Drop", true)
-            if btn and (btn:IsA("TextButton") or btn:IsA("ImageButton")) then
+            if btn and (btn:IsA("TextButton") or btn:IsA("ImageButton")) and btn.Visible then
                 return true
             end
         end
@@ -1357,7 +1345,7 @@ function HalloweenStealManager:ExecuteDelivery(session)
 
     local waitStart = os.clock()
     while os.clock() - waitStart < self.DeliveryDelay do
-        if session ~= self.CurrentSession or (not getgenv().config.autoHalloweenSteal and not getgenv().AutoHalloweenSteal) or not self:IsHoldingHalloweenEgg() then
+        if session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or not self:IsHoldingHalloweenEgg() then
             ShieldManager:UnmuteUGI()
             return false
         end
@@ -1394,80 +1382,49 @@ function HalloweenStealManager:ExecuteDelivery(session)
     return not self:IsHoldingHalloweenEgg()
 end
 
-function HalloweenStealManager:Start()
-    if self.ThreadRunning then return end
-    self.ThreadRunning = true
-    task.spawn(function()
-        while getgenv().config.autoHalloweenSteal or getgenv().AutoHalloweenSteal do
-            if PriorityManager and not PriorityManager:CanRun("HalloweenSteal") then
-                Services.RunService.Heartbeat:Wait()
-            else
+function HalloweenStealManager:Process()
+    if not getgenv().config.autoHalloweenSteal then return end
+    if self.IsActive then return end
 
-            local inDimension = HalloweenPortalManager.IsInHalloweenDimension()
-            if not inDimension then
-                HalloweenPortalManager.EnterDimension(3.0)
-                task.wait(1.0)
-            else
-                local char, root, hum = getAliveRig()
-                if char and root and hum and not self.IsActive then
-                    applyGodMode(char)
+    if not HalloweenPortalManager.IsInHalloweenDimension() then
+        HalloweenPortalManager.EnterDimension(5.0)
+        return
+    end
 
-                    if self:IsHoldingHalloweenEgg() then
-                        self.IsActive = true
-                        self.CurrentSession = self.CurrentSession + 1
-                        local session = self.CurrentSession
-                        self:ExecuteDelivery(session)
-                        self.IsActive = false
-                        task.wait(0.15)
-                    else
-                        local targetEgg = self:SelectTargetEgg()
-                        if targetEgg and targetEgg.Parent then
-                            self.IsActive = true
-                            self.CurrentSession = self.CurrentSession + 1
-                            local session = self.CurrentSession
+    local char, root, hum = getAliveRig()
+    if not char or not root or not hum then return end
 
-                            local eggPos = targetEgg:GetPivot().Position
-                            root.AssemblyLinearVelocity = Vector3.zero
-                            root.CFrame = CFrame.new(Vector3.new(eggPos.X, eggPos.Y + 1.2, eggPos.Z))
-                            task.wait(0.04)
+    self.IsActive = true
+    self.CurrentSession = self.CurrentSession + 1
+    local session = self.CurrentSession
 
-                            local grabbed = self:GrabEgg(targetEgg)
-                            if not grabbed then
-                                task.wait(0.1)
-                                grabbed = self:GrabEgg(targetEgg)
-                            end
+    if self:IsHoldingHalloweenEgg() then
+        self:ExecuteDelivery(session)
+    else
+        local targetEgg = self:SelectTargetEgg()
+        if targetEgg and targetEgg.Parent then
+            local eggPos = targetEgg:GetPivot().Position
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.CFrame = CFrame.new(Vector3.new(eggPos.X, eggPos.Y + 1.2, eggPos.Z))
+            task.wait(0.04)
 
-                            if (grabbed or self:IsHoldingHalloweenEgg()) and session == self.CurrentSession then
-                                self:ExecuteDelivery(session)
-                            end
-
-                            self.IsActive = false
-                            task.wait(0.15)
-                        else
-                            task.wait(1.5)
-                        end
-                    end
-                end
+            local grabbed = self:GrabEgg(targetEgg)
+            if not grabbed then
+                task.wait(0.1)
+                grabbed = self:GrabEgg(targetEgg)
             end
-            Services.RunService.Heartbeat:Wait()
+
+            if (grabbed or self:IsHoldingHalloweenEgg()) and session == self.CurrentSession then
+                self:ExecuteDelivery(session)
             end
         end
-        self.ThreadRunning = false
-        self:Abort()
-    end)
-end
-
-function HalloweenStealManager:Process()
-    if not getgenv().config.autoHalloweenSteal and not getgenv().AutoHalloweenSteal then return end
-    if not self.ThreadRunning then
-        self:Start()
     end
+    self.IsActive = false
 end
 
 function HalloweenStealManager:Abort()
     self.CurrentSession = self.CurrentSession + 1
     self.IsActive = false
-    self.ThreadRunning = false
     ShieldManager:UnmuteUGI()
     if PriorityManager then PriorityManager:Release("HalloweenSteal") end
     local _, root, hum = getAliveRig()
@@ -1478,6 +1435,7 @@ function HalloweenStealManager:Abort()
     end
 end
 
+-- ==============================================================================
 -- [ TASK PRIORITY ARBITRATOR ]
 -- ==============================================================================
 PriorityManager = {
@@ -1637,13 +1595,6 @@ function WorkerScheduler:Register(name, interval, runFn)
 end
 
 function WorkerScheduler:Start()
-
-if getgenv().config.autoHalloweenSteal and HalloweenStealManager and HalloweenStealManager.Start then
-    HalloweenStealManager:Start()
-end
-if getgenv().config.autoCandyCane and HalloweenCombatManager and HalloweenCombatManager.Start then
-    HalloweenCombatManager:Start()
-end
     if self.Connection then return end
     self.Connection = Services.RunService.Heartbeat:Connect(function(dt)
         if not self.IsActive then return end
@@ -1808,25 +1759,6 @@ local function runAlongGroundToEgg(targetPos, speed, sessionId, targetUid)
     return arrived and (sessionId == State.currentStealSession) and isStealEnabled()
 end
 
-local function getGroundY(x, z, fallbackY)
-    fallbackY = fallbackY or (CONFIG.GroundAltitude + 2.85)
-    local origin = Vector3.new(x, 150, z)
-    local rayDir = Vector3.new(0, -200, 0)
-    local rayParams = RaycastParams.new()
-    rayParams.FilterType = Enum.RaycastFilterType.Exclude
-    local filterList = {}
-    if LocalPlayer.Character then
-        table.insert(filterList, LocalPlayer.Character)
-    end
-    rayParams.FilterDescendantsInstances = filterList
-    rayParams.IgnoreWater = true
-    local result = Services.Workspace:Raycast(origin, rayDir, rayParams)
-    if result and result.Position then
-        return result.Position.Y + 2.85
-    end
-    return fallbackY
-end
-
 local function executeFastStealOutbound(targetPos, sessionId, targetUid)
     local world = Services.Workspace:FindFirstChild("World") or Services.Workspace:FindFirstChild("__OBJECTS")
     local build = world and world:FindFirstChild("Build")
@@ -1873,10 +1805,10 @@ local function executeFastStealOutbound(targetPos, sessionId, targetUid)
         return runAlongGroundToEgg(targetPos, CONFIG.FastStealGroundSpeed, sessionId, targetUid)
     end
 
-    local exitTimeout = os.clock() + 4.0
-    local leftSky = false
+    local exitedSky = false
+    local exitDeadline = os.clock() + 5.0
 
-    while os.clock() < exitTimeout do
+    while os.clock() < exitDeadline do
         if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
         local _, cRoot = getAliveRig()
         if not cRoot then return false end
@@ -1889,26 +1821,30 @@ local function executeFastStealOutbound(targetPos, sessionId, targetUid)
             pcall(firetouchinterest, cRoot, exitPart, 1)
         end
 
-        if cRoot.Position.Y < 500 then
-            leftSky = true
+        if cRoot.Position.Y < 10000 then
+            exitedSky = true
             break
         end
         Services.RunService.Heartbeat:Wait()
     end
 
-    if not leftSky then
+    if not exitedSky then return false end
+    task.wait(0.12)
+
+    local _, cRoot = getAliveRig()
+    if not cRoot then return false end
+
+    local remainingDist = (Vector3.new(targetPos.X, 0, targetPos.Z) - Vector3.new(cRoot.Position.X, 0, cRoot.Position.Z)).Magnitude
+    if remainingDist <= CONFIG.FastStealDirectSnapRadius then
+        setCollisions(false)
+        local standPos = getStandingPosition(targetPos)
+        cRoot.CFrame = CFrame.lookAt(standPos, targetPos)
+        cRoot.AssemblyLinearVelocity = Vector3.zero
+        task.wait(0.05)
+        return true
+    else
         return runAlongGroundToEgg(targetPos, CONFIG.FastStealGroundSpeed, sessionId, targetUid)
     end
-
-    local _, fRoot = getAliveRig()
-    if fRoot then
-        local gY = getGroundY(targetPos.X, targetPos.Z, CONFIG.GroundAltitude + 2.85)
-        fRoot.CFrame = CFrame.new(targetPos.X, gY, targetPos.Z)
-        fRoot.AssemblyLinearVelocity = Vector3.zero
-        task.wait(0.08)
-    end
-
-    return true
 end
 
 local function findMyPlot()
@@ -1916,84 +1852,105 @@ local function findMyPlot()
         return State.myPlot
     end
 
-    local plotContainers = {
-        Services.Workspace:FindFirstChild("Plots"),
-        Services.Workspace:FindFirstChild("World") and Services.Workspace.World:FindFirstChild("Plots"),
-        Services.Workspace:FindFirstChild("__OBJECTS") and Services.Workspace.__OBJECTS:FindFirstChild("Plots")
-    }
-
-    local myName = LocalPlayer.Name
+    local myName = LocalPlayer.Name:lower()
+    local myDisplayName = LocalPlayer.DisplayName:lower()
     local myUserId = LocalPlayer.UserId
 
-    for _, container in ipairs(plotContainers) do
-        if container then
-            for _, plot in ipairs(container:GetChildren()) do
-                local ownerVal = plot:FindFirstChild("Owner") or plot:FindFirstChild("Player") or plot:FindFirstChild("OwnerId") or plot:FindFirstChild("UserId")
-                local isMine = false
+    local plotsFolder = Services.Workspace:FindFirstChild("Plots")
+    local candidates = plotsFolder and plotsFolder:GetChildren() or Services.Workspace:GetChildren()
 
-                if ownerVal then
-                    if (ownerVal:IsA("ObjectValue") and ownerVal.Value == LocalPlayer) or
-                       (ownerVal:IsA("StringValue") and (ownerVal.Value == myName or ownerVal.Value == tostring(myUserId))) or
-                       (ownerVal:IsA("IntValue") and ownerVal.Value == myUserId) then
-                        isMine = true
+    for _, plot in ipairs(candidates) do
+        local ownerAttr = plot:GetAttribute("Owner") or plot:GetAttribute("OwnerUserId") or plot:GetAttribute("Player")
+        if ownerAttr and (tostring(ownerAttr):lower() == myName or tonumber(ownerAttr) == myUserId) then
+            State.myPlot = plot
+            break
+        end
+
+        local sign = plot:FindFirstChild("PlotSign") or plot:FindFirstChild("Sign")
+        if sign then
+            for _, desc in ipairs(sign:GetDescendants()) do
+                if desc:IsA("TextLabel") or desc:IsA("TextButton") then
+                    local txt = desc.Text:lower()
+                    if txt:find(myName, 1, true) or txt:find(myDisplayName, 1, true) then
+                        State.myPlot = plot
+                        break
                     end
-                elseif plot.Name == myName or plot.Name == tostring(myUserId) then
-                    isMine = true
-                elseif plot:GetAttribute("Owner") == myName or plot:GetAttribute("UserId") == myUserId then
-                    isMine = true
-                end
-
-                if isMine then
-                    State.myPlot = plot
-                    local objects = plot:FindFirstChild("Objects") or plot:FindFirstChild("Build") or plot
-                    State.myTreadmill = objects:FindFirstChild("Treadmill", true) or plot:FindFirstChild("Treadmill", true)
-                    return plot
                 end
             end
         end
+        if State.myPlot then break end
     end
-    return nil
+
+    if State.myPlot then
+        for _, desc in ipairs(State.myPlot:GetDescendants()) do
+            if desc.Name:lower():find("treadmill") and desc:IsA("BasePart") then
+                State.myTreadmill = desc
+                break
+            end
+        end
+    end
+
+    if not State.myTreadmill then
+        for _, obj in ipairs(Services.Workspace:GetDescendants()) do
+            if obj.Name == "TreadmillBottom" and obj:IsA("BasePart") then
+                State.myTreadmill = obj
+                break
+            end
+        end
+    end
+    return State.myPlot
 end
 
 local function instantGrabAtPosition(uid, targetPos, sessionId, isNest)
-    if sessionId ~= State.currentStealSession or not isStealEnabled() or isMapClosed() then return false end
-    local _, root, hum = getAliveRig()
-    if not root then return false end
-    if hum then 
-        hum.PlatformStand = false 
-        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
-    end
-
-    local groundY = getGroundY(targetPos.X, targetPos.Z, CONFIG.GroundAltitude + 2.85)
-    local snapPos = Vector3.new(targetPos.X, groundY, targetPos.Z)
-
-    pcall(function()
-        root.CFrame = CFrame.new(snapPos)
+    local _, root = getAliveRig()
+    if root and targetPos then
+        local offsetY = isNest and CONFIG.AirGrabOffset or 1.0
+        local safeY = (targetPos.Y or CONFIG.GroundAltitude) + offsetY
+        root.CFrame = CFrame.new(Vector3.new(targetPos.X, safeY, targetPos.Z))
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
-    end)
-    task.wait(0.04)
-
-    if Remotes.AskCarryEgg and uid then
-        pcall(function()
-            Remotes.AskCarryEgg:InvokeServer({ EggUid = tostring(uid) })
-        end)
     end
 
-    if isHoldingEgg() then return true end
-
-    local eggModel = nil
-    local world = Services.Workspace:FindFirstChild("World") or Services.Workspace:FindFirstChild("__OBJECTS")
-    local eggsFolder = world and world:FindFirstChild("FieldEggs")
-    if eggsFolder then
-        eggModel = eggsFolder:FindFirstChild(tostring(uid)) or eggsFolder:FindFirstChild(uid)
-    end
-
+    local targetPrompt = nil
+    local eggModel = uid and (Services.Workspace:FindFirstChild(uid) or (Services.Workspace:FindFirstChild("AreaEggSlotsClient") and Services.Workspace.AreaEggSlotsClient:FindFirstChild(uid)))
     if eggModel then
-        local targetPrompt = eggModel:FindFirstChildWhichIsA("ProximityPrompt", true)
+        targetPrompt = eggModel:FindFirstChildWhichIsA("ProximityPrompt", true)
+    end
+    if not targetPrompt and targetPos then
+        local parts = Services.Workspace:GetPartBoundsInRadius(targetPos, 12)
+        for _, part in ipairs(parts) do
+            local p = part:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if p and p.Enabled then
+                targetPrompt = p
+                break
+            end
+        end
+    end
+
+    local grabTimeout = os.clock() + 3.0
+    local nextRemoteDispatch = 0
+
+    while os.clock() < grabTimeout do
+        if sessionId ~= State.currentStealSession or not isStealEnabled() then break end
+        local _, cRoot = getAliveRig()
+        if not cRoot then break end
+
+        if uid and not isHoldingEgg() and not isEggStillValid(uid) then
+            blacklistEgg(uid, 15)
+            return false
+        end
+
+        if os.clock() >= nextRemoteDispatch then
+            nextRemoteDispatch = os.clock() + 0.3
+            if Remotes.AskFieldEggCarry and uid then
+                task.spawn(function() pcall(function() Remotes.AskFieldEggCarry:InvokeServer({ Uid = uid }) end) end)
+            end
+            if typeof(EggState.CarryFieldEgg) == "function" and uid then
+                pcall(function() EggState.CarryFieldEgg(uid) end)
+            end
+        end
+
         if targetPrompt and targetPrompt.Enabled then
-            targetPrompt.RequiresLineOfSight = false
-            targetPrompt.MaxActivationDistance = 30
             targetPrompt.HoldDuration = 0
             if typeof(fireproximityprompt) == "function" then
                 fireproximityprompt(targetPrompt)
@@ -2017,11 +1974,9 @@ local function executeFastStealDelivery(targetEgg, sessionId)
 
     local uid = targetEgg.Uid
     local laneZ = math.clamp(root.Position.Z, -425, -300)
-    local dropTargetGY = getGroundY(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, laneZ, 74.0)
-    local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, dropTargetGY, laneZ)
+    local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, 74.0, laneZ)
 
-    hum.PlatformStand = false
-    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+    hum.PlatformStand = true
     setCollisions(false)
     ShieldManager:MuteUGI()
 
@@ -2037,20 +1992,17 @@ local function executeFastStealDelivery(targetEgg, sessionId)
         end
 
         currentX = currentX - hopStep
-        local _, cRoot, cHum = getAliveRig()
+        local _, cRoot = getAliveRig()
         if not cRoot then break end
-        if cHum then cHum.PlatformStand = false end
 
-        local hopGY = getGroundY(currentX, laneZ, CONFIG.GroundAltitude + 2.85)
-        cRoot.CFrame = CFrame.new(currentX, hopGY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
+        cRoot.CFrame = CFrame.new(currentX, CONFIG.HopAltitude, laneZ) * CFrame.Angles(0, math.rad(90), 0)
         cRoot.AssemblyLinearVelocity = Vector3.zero
         task.wait(0.08)
     end
 
     local _, cRoot = getAliveRig()
     if cRoot then
-        local finalGY = getGroundY(dropTargetPos.X, dropTargetPos.Z, dropTargetPos.Y)
-        cRoot.CFrame = CFrame.new(dropTargetPos.X, finalGY, dropTargetPos.Z) * CFrame.Angles(0, math.rad(90), 0)
+        cRoot.CFrame = CFrame.new(dropTargetPos) * CFrame.Angles(0, math.rad(90), 0)
         cRoot.AssemblyLinearVelocity = Vector3.zero
     end
     task.wait(0.2)
@@ -2105,8 +2057,7 @@ local function executeFastStealDelivery(targetEgg, sessionId)
 
     local _, fRoot, fHum = getAliveRig()
     if fRoot then
-        local baseGY = getGroundY(CONFIG.BaseDropPosition.X, CONFIG.BaseDropPosition.Z, CONFIG.BaseDropPosition.Y + 1.2)
-        fRoot.CFrame = CFrame.new(CONFIG.BaseDropPosition.X, baseGY, CONFIG.BaseDropPosition.Z)
+        fRoot.CFrame = CFrame.new(CONFIG.BaseDropPosition)
         fRoot.AssemblyLinearVelocity = Vector3.zero
     end
     task.wait(0.25)
@@ -2124,13 +2075,10 @@ local function performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
     if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
     local _, root, humanoid = getAliveRig()
     if not root then return false end
-    if humanoid then 
-        humanoid.PlatformStand = false 
-        pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
-    end
+    if humanoid then humanoid.PlatformStand = false end
 
     local uid = (targetEgg and targetEgg.Uid) or (EggState and EggState.CarryUid)
-    local checkY = getGroundY(currentX, laneZ, CONFIG.GroundAltitude + 2.85)
+    local checkY = CONFIG.GroundAltitude + 1.0
 
     pcall(function()
         root.CFrame = CFrame.new(currentX, checkY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
@@ -2176,10 +2124,19 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
 
     StealUIManager:Lock()
     ShieldManager:MuteUGI()
-    if humanoid then 
-        humanoid.PlatformStand = false 
-        pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
+    if humanoid then humanoid.PlatformStand = true end
+
+    local function snapAltitude(targetY)
+        local _, cRoot = getAliveRig()
+        if cRoot then
+            pcall(function()
+                cRoot.CFrame = CFrame.new(cRoot.Position.X, targetY, cRoot.Position.Z) * cRoot.CFrame.Rotation
+                cRoot.AssemblyLinearVelocity = Vector3.zero
+            end)
+            task.wait(0.03)
+        end
     end
+    snapAltitude(CONFIG.HopAltitude)
 
     while currentX - stepSize > boundaryX do
         if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
@@ -2189,21 +2146,19 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
             return false
         end
 
-        local _, cRoot, cHum = getAliveRig()
+        local _, cRoot = getAliveRig()
         if not cRoot then 
             ShieldManager:UnmuteUGI()
             StealUIManager:Unlock()
             cleanupFlightState() 
             return false 
         end
-        if cHum then cHum.PlatformStand = false end
 
         local nextX = currentX - stepSize
         local preHopTime = os.clock()
-        local nextGY = getGroundY(nextX, laneZ, CONFIG.GroundAltitude + 2.85)
 
         pcall(function()
-            cRoot.CFrame = CFrame.new(nextX, nextGY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
+            cRoot.CFrame = CFrame.new(nextX, CONFIG.HopAltitude, laneZ) * CFrame.Angles(0, math.rad(90), 0)
             cRoot.AssemblyLinearVelocity = Vector3.zero
         end)
         task.wait(CONFIG.HopGap)
@@ -2229,7 +2184,8 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
             end
             lastCheckpointX = currentX
             local _, rRoot, rHum = getAliveRig()
-            if rHum then rHum.PlatformStand = false end
+            if rHum then rHum.PlatformStand = true end
+            snapAltitude(CONFIG.HopAltitude)
             task.wait(CONFIG.HopGap)
         end
     end
@@ -2242,11 +2198,10 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
         return false
     end
 
-    local safeGY = getGroundY(safeTarget.X, safeTarget.Z, CONFIG.BaseDropPosition.Y + 1.2)
     local _, fRoot, fHum = getAliveRig()
     if fRoot then
         pcall(function()
-            fRoot.CFrame = CFrame.new(safeTarget.X, safeGY, safeTarget.Z)
+            fRoot.CFrame = CFrame.new(safeTarget.X, CONFIG.GroundAltitude + 1.2, safeTarget.Z)
             fRoot.AssemblyLinearVelocity = Vector3.zero
         end)
     end
@@ -2283,12 +2238,11 @@ local function travelPlaneSegment(targetPos, stopDist, speed, timeout, sessionId
             return
         end
 
-        local _, cRoot, cHum = getAliveRig()
+        local _, cRoot = getAliveRig()
         if not cRoot then
             if State.activeFlightConnection then State.activeFlightConnection:Disconnect() State.activeFlightConnection = nil end
             return
         end
-        if cHum then cHum.PlatformStand = false end
 
         if targetUid and (os.clock() - lastLiveCheck >= 0.25) then
             lastLiveCheck = os.clock()
@@ -2317,9 +2271,8 @@ local function travelPlaneSegment(targetPos, stopDist, speed, timeout, sessionId
         end
 
         local moveDir = delta.Unit
-        local groundY = getGroundY(currentPos.X, currentPos.Z, CONFIG.GroundAltitude + 2.85)
         cRoot.AssemblyLinearVelocity = Vector3.new(moveDir.X * speed, 0, moveDir.Z * speed)
-        cRoot.CFrame = CFrame.new(currentPos.X, groundY, currentPos.Z) * CFrame.lookAt(Vector3.zero, moveDir)
+        cRoot.CFrame = CFrame.new(currentPos.X, CONFIG.FlightAltitude, currentPos.Z) * CFrame.lookAt(Vector3.zero, moveDir)
     end)
 
     while State.activeFlightConnection and State.activeFlightConnection.Connected do
@@ -2341,35 +2294,30 @@ local function flyOutboundElevated(targetPosition, stopDistance, sessionId, targ
 
     table.clear(State.activeCollisionsDisabled)
     for _, part in ipairs(char:GetDescendants()) do
-        if part:IsA("BasePart") and part.CanCollide and part ~= root then
+        if part:IsA("BasePart") and part.CanCollide then
             State.activeCollisionsDisabled[part] = true
             part.CanCollide = false
         end
     end
 
-    humanoid.PlatformStand = false
-    pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
+    humanoid.PlatformStand = true
 
     local function snapAltitude(targetY)
-        local _, cRoot, cHum = getAliveRig()
+        local _, cRoot = getAliveRig()
         if cRoot then
             pcall(function()
-                local gy = getGroundY(cRoot.Position.X, cRoot.Position.Z, targetY or (CONFIG.GroundAltitude + 2.85))
-                cRoot.CFrame = CFrame.new(cRoot.Position.X, gy, cRoot.Position.Z) * cRoot.CFrame.Rotation
+                cRoot.CFrame = CFrame.new(cRoot.Position.X, targetY, cRoot.Position.Z) * cRoot.CFrame.Rotation
                 cRoot.AssemblyLinearVelocity = Vector3.zero
             end)
-            if cHum then cHum.PlatformStand = false end
             task.wait(0.03)
         end
     end
-    snapAltitude(CONFIG.GroundAltitude + 2.85)
+    snapAltitude(CONFIG.FlightAltitude)
 
     local currentPosInit = root.Position
     if currentPosInit.X < CONFIG.BoundaryCheckpointX then
-        local centerGY = getGroundY(CONFIG.BaseDropPosition.X, CONFIG.BaseDropPosition.Z, CONFIG.GroundAltitude + 2.85)
-        local centerDeliveryPos = Vector3.new(CONFIG.BaseDropPosition.X, centerGY, CONFIG.BaseDropPosition.Z)
-        local mouthGY = getGroundY(CONFIG.BoundaryCheckpointX, CONFIG.BaseDropPosition.Z, CONFIG.GroundAltitude + 2.85)
-        local mouthPos = Vector3.new(CONFIG.BoundaryCheckpointX, mouthGY, CONFIG.BaseDropPosition.Z)
+        local centerDeliveryPos = Vector3.new(CONFIG.BaseDropPosition.X, CONFIG.FlightAltitude, CONFIG.BaseDropPosition.Z)
+        local mouthPos = Vector3.new(CONFIG.BoundaryCheckpointX, CONFIG.FlightAltitude, CONFIG.BaseDropPosition.Z)
 
         local lateralDist = math.abs(currentPosInit.Z - CONFIG.BaseDropPosition.Z)
         if lateralDist > 12 or currentPosInit.X < CONFIG.BaseDropPosition.X then
@@ -2386,8 +2334,7 @@ local function flyOutboundElevated(targetPosition, stopDistance, sessionId, targ
 
     local reached = travelPlaneSegment(targetPosition, stopDistance, playerSpeed, dynamicTimeout, sessionId, targetUid)
     if reached and sessionId == State.currentStealSession and isStealEnabled() and not isMapClosed() then
-        local eggGY = getGroundY(targetPosition.X, targetPosition.Z, (targetPosition.Y or CONFIG.GroundAltitude) + 2.85)
-        snapAltitude(eggGY)
+        snapAltitude((targetPosition.Y or CONFIG.GroundAltitude) + CONFIG.AirGrabOffset)
     end
 
     cleanupFlightState()
@@ -2448,7 +2395,16 @@ local function getBestEgg()
                 if not posX or posX >= 560 then
                     local rawName = record.AssetCategory or record.Category or record.Name or "Unknown"
                     
-                    if normalStealEnabled then
+                    if isLabNeeded then
+                        local scale = tonumber(record.AssetScale) or 1
+                        local mutationBonus = (record.Mutations and #record.Mutations > 0) and 2.5 or 1
+                        local score = 100000000 + ((scale ^ 1.85) * mutationBonus)
+
+                        if score > highestScore then
+                            highestScore = score
+                            bestEgg = record
+                        end
+                    elseif normalStealEnabled then
                         local areaIdStr = tostring(record.AreaId or "")
                         if matchesTargetArea(areaIdStr) then
                             local _, rank = MasterRegistry:Lookup(rawName)
@@ -2673,10 +2629,8 @@ end)
 
 WorkerScheduler:Start()
 
-do
 -- ==============================================================================
 -- [ GUI BUILDER & CONTROLS SETUP ]
-local cList = nil
 -- ==============================================================================
 local safeContainer = nil
 if gethui then pcall(function() safeContainer = gethui() end) end
@@ -3093,7 +3047,7 @@ local function renderPriorityPanel()
 
     for index, taskName in ipairs(PriorityManager.List) do
         local card = Instance.new("Frame", priorityPg)
-        card.Size = UDim2.new(1, -6, 0, 48)
+        card.Size = UDim2.new(1, 0, 0, 48)
         card.BackgroundColor3 = activeTheme and activeTheme.CardBg or Color3.fromRGB(20, 24, 34)
         card.BackgroundTransparency = 0.35
         card.BorderSizePixel = 0
@@ -3149,7 +3103,7 @@ local function renderPriorityPanel()
         upBtn.TextColor3 = (index > 1) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(90, 95, 110)
         upBtn.Font = Enum.Font.GothamBold
         upBtn.TextSize = 12
-        upBtn.Text = "^"
+        upBtn.Text = "▲"
         rndCorner(upBtn, 6)
         local upStr = Instance.new("UIStroke", upBtn)
         upStr.Color = (index > 1) and (activeTheme and activeTheme.Stroke or Color3.fromRGB(60, 70, 95)) or Color3.fromRGB(35, 40, 50)
@@ -3163,7 +3117,7 @@ local function renderPriorityPanel()
         downBtn.TextColor3 = (index < #PriorityManager.List) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(90, 95, 110)
         downBtn.Font = Enum.Font.GothamBold
         downBtn.TextSize = 12
-        downBtn.Text = "v"
+        downBtn.Text = "▼"
         rndCorner(downBtn, 6)
         local downStr = Instance.new("UIStroke", downBtn)
         downStr.Color = (index < #PriorityManager.List) and (activeTheme and activeTheme.Stroke or Color3.fromRGB(60, 70, 95)) or Color3.fromRGB(35, 40, 50)
@@ -3332,7 +3286,7 @@ prevTxt.Text = "Current Theme: Sapphire"
 
 local cBtns = {}
 local tBtns = {}
-cList = { 
+local cList = { 
     {Name = "Farm", Page = farmPg, Title = "Farm"},
     {Name = "Priority", Page = priorityPg, Title = "Task Priority"},
     {Name = "Steal Panel", Page = stealPanelPg, Title = "Steal Panel"},
@@ -4299,25 +4253,19 @@ local halloweenCategory = createCategory("Halloween Event 2026", farmPg, 2, fals
 
 createToggle("Halloween Auto Steal", "Auto direct-remote grab & gate tween", currentSettings.AutoHalloweenSteal, halloweenCategory, 1, function(state)
     getgenv().config.autoHalloweenSteal = state
-    getgenv().AutoHalloweenSteal = state
     currentSettings.AutoHalloweenSteal = state
     saveStuff()
-    if state then
-        if HalloweenStealManager and HalloweenStealManager.Start then HalloweenStealManager:Start() end
-    else
-        if HalloweenStealManager and HalloweenStealManager.Abort then HalloweenStealManager:Abort() end
+    if not state and HalloweenStealManager and HalloweenStealManager.Abort then
+        HalloweenStealManager:Abort()
     end
 end)
 
 createToggle("Candy Cane Monster Farm", "Auto weapon swap combat in dimension", currentSettings.AutoCandyCane, halloweenCategory, 2, function(state)
     getgenv().config.autoCandyCane = state
-    getgenv().AutoHalloweenFarm = state
     currentSettings.AutoCandyCane = state
     saveStuff()
-    if state then
-        if HalloweenCombatManager and HalloweenCombatManager.Start then HalloweenCombatManager:Start() end
-    else
-        if HalloweenCombatManager and HalloweenCombatManager.Abort then HalloweenCombatManager:Abort() end
+    if not state and HalloweenCombatManager and HalloweenCombatManager.Abort then
+        HalloweenCombatManager:Abort()
     end
 end)
 
@@ -4660,5 +4608,3 @@ task.defer(function()
     task.wait(0.5)
     showDiscordModal()
 end)
-
-end

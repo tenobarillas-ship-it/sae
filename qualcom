@@ -24,23 +24,12 @@ local currentSettings = {
     Transparency = 0,
     AutoFarm = false,
     FastSteal = false,
-    AutoStealLabEggs = false,
     AutoTreadmill = false,
     AutoUpgradeTreadmill = false,
     AutoUpgradeBase = false,
-    AutoDrones = false,
-    AutoMechBoss = false,
-    AutoLabTradeIn = false,
     AutoClaimMastery = false,
     AutoCatchButterfly = false,
     AutoWispQuest = false,
-    AutoRace = false,
-    RaceSpeed = 120,
-    RacePowerUps = true,
-    RaceAutoClaim = true,
-    RaceAutoEquip = true,
-    RaceAutoBuy = false,
-    RaceShopItems = {},
     TargetAreas = { ["All"] = true },
     MinRarity = "All"
 }
@@ -61,9 +50,7 @@ local function loadStuff()
                 for k, v in pairs(decoded) do
                     if k == "TargetAreas" and type(v) == "table" then
                         currentSettings.TargetAreas = v
-                    elseif k == "RaceShopItems" and type(v) == "table" then
-                        currentSettings.RaceShopItems = v
-                    elseif type(v) == "table" and type(currentSettings[k]) == "table" then
+                                        elseif type(v) == "table" and type(currentSettings[k]) == "table" then
                         for k2, v2 in pairs(v) do currentSettings[k][k2] = v2 end
                     else
                         currentSettings[k] = v
@@ -76,14 +63,10 @@ local function loadStuff()
     if type(currentSettings.TargetAreas) ~= "table" or next(currentSettings.TargetAreas) == nil then
         currentSettings.TargetAreas = { ["All"] = true }
     end
-    if type(currentSettings.RaceShopItems) ~= "table" then
-        currentSettings.RaceShopItems = {}
-    end
-    if type(currentSettings.MinRarity) ~= "string" or string.find(currentSettings.MinRarity, "table:") then
+        if type(currentSettings.MinRarity) ~= "string" or string.find(currentSettings.MinRarity, "table:") then
         currentSettings.MinRarity = "All"
     end
-    currentSettings.RaceSpeed = math.clamp(tonumber(currentSettings.RaceSpeed) or 120, 10, 400)
-end
+    end
 
 loadStuff()
 
@@ -92,23 +75,12 @@ getgenv().config.targetAreas = currentSettings.TargetAreas
 getgenv().config.minRarity = currentSettings.MinRarity
 getgenv().config.autoFarm = currentSettings.AutoFarm
 getgenv().config.fastSteal = currentSettings.FastSteal
-getgenv().config.autoStealLabEggs = currentSettings.AutoStealLabEggs
 getgenv().config.autoTreadmill = currentSettings.AutoTreadmill
 getgenv().config.autoUpgradeTreadmill = currentSettings.AutoUpgradeTreadmill
 getgenv().config.autoUpgradeBase = currentSettings.AutoUpgradeBase
-getgenv().config.autoDrones = currentSettings.AutoDrones
-getgenv().config.autoMechBoss = currentSettings.AutoMechBoss
-getgenv().config.autoLabTradeIn = currentSettings.AutoLabTradeIn
 getgenv().config.autoClaimMastery = currentSettings.AutoClaimMastery
 getgenv().config.autoCatchButterfly = currentSettings.AutoCatchButterfly
 getgenv().config.autoWispQuest = currentSettings.AutoWispQuest
-getgenv().config.autoRace = currentSettings.AutoRace
-getgenv().config.raceSpeed = currentSettings.RaceSpeed
-getgenv().config.racePowerUps = currentSettings.RacePowerUps
-getgenv().config.raceAutoClaim = currentSettings.RaceAutoClaim
-getgenv().config.raceAutoEquip = currentSettings.RaceAutoEquip
-getgenv().config.raceAutoBuy = currentSettings.RaceAutoBuy
-getgenv().config.raceShopItems = currentSettings.RaceShopItems
 
 local State = {
     currentStealSession = 0,
@@ -217,7 +189,7 @@ end
 
 local function isStealEnabled()
     if isMapClosed() then return false end
-    return getgenv().config.autoFarm == true or getgenv().config.autoStealLabEggs == true or State.targetedSpecificUid ~= nil
+    return getgenv().config.autoFarm == true or State.targetedSpecificUid ~= nil
 end
 
 local function isFastStealArea(areaId)
@@ -264,19 +236,8 @@ local Remotes = {
     AskDoff = getRemote("RF/Treadmill/AskDoff"),
     AskWearStill = getRemote("RF/Treadmill/AskWearStill"),
     AskSnapshot = getRemote("RF/EggWorld/AskFieldEggSnapshot"),
-    AskLabState = getRemote("RF/ScrambleTradeIn/AskState"),
-    AskLabTrade = getRemote("RF/ScrambleTradeIn/AskTradeIn"),
-    AskLabFinishReveal = getRemote("RF/ScrambleTradeIn/AskFinishReveal"),
-    EnterArena = getRemote("RF/ScrambleBoss/EnterArena"),
-    ScrambleRequest = getRemote("RF/Scramble/Request"),
     TierRaise = getRemote("RF/Treadmill/AskTierRaise"),
     BaseTierRaise = getRemote("RE/Homestead/AskBaseTierRaise"),
-    MountRacePowerUp = getRemote("RE/MountRace/PowerUp"),
-    MountRaceAskLeave = getRemote("RE/MountRace/AskLeave"),
-    MountRaceOutroFinished = getRemote("RE/MountRace/OutroFinished"),
-    AskEquipRacer = getRemote("RF/RaceRally/AskEquipRacer"),
-    AskClaimMilestone = getRemote("RF/RaceRally/AskClaimMilestone"),
-    AskBuyRaceShop = getRemote("RF/RaceRally/AskBuy"),
     AskRigWipe = getRemote("RE/RigSync/AskRigWipe")
 }
 
@@ -892,125 +853,6 @@ local function getMinRequiredScore()
 end
 
 -- ==============================================================================
--- [ LAB & RECIPE DEDUPLICATION CONTROLLER ]
--- ==============================================================================
-local LabManager = { Needs = {}, LastCheck = 0, LastTrade = 0 }
-
-function LabManager:CheckOwnership(req)
-    local save = getSaveData()
-    if save then
-        if type(save.EggInventory) == "table" then
-            for _, egg in pairs(save.EggInventory) do
-                if type(egg) == "table" and NameResolver:Matches(egg.AssetCategory or egg.Category or egg.Name, req) then
-                    return true
-                end
-            end
-        end
-        if type(save.Inventory) == "table" then
-            for _, pet in pairs(save.Inventory) do
-                if type(pet) == "table" and NameResolver:Matches(pet.Category or pet.AssetCategory or pet.Name, req) then
-                    return true
-                end
-            end
-        end
-    end
-    return false
-end
-
-function LabManager:UpdateNeeds()
-    if not Remotes.AskLabState or os.clock() - self.LastCheck < 5 then return end
-    self.LastCheck = os.clock()
-
-    local ok, state = pcall(function() return Remotes.AskLabState:InvokeServer() end)
-    if not ok or type(state) ~= "table" or state.Unlocked ~= true or not state.Requirements then 
-        table.clear(self.Needs)
-        return 
-    end
-
-    if state.PendingReward ~= nil and state.PendingReward ~= false and Remotes.AskLabFinishReveal then
-        pcall(function() Remotes.AskLabFinishReveal:InvokeServer() end)
-    end
-
-    table.clear(self.Needs)
-    for _, req in ipairs(state.Requirements) do
-        local reqStr = tostring(req)
-        if not self:CheckOwnership(reqStr) then
-            table.insert(self.Needs, reqStr)
-        end
-    end
-end
-
-function LabManager:IsNeeded(eggName)
-    if not eggName or #self.Needs == 0 then return false end
-    for _, req in ipairs(self.Needs) do
-        if NameResolver:Matches(eggName, req) then return true end
-    end
-    return false
-end
-
-function LabManager:ExecuteTrade()
-    if not getgenv().config.autoLabTradeIn or not Remotes.AskLabState or not Remotes.AskLabTrade then return end
-    if os.clock() - self.LastTrade < 4 then return end
-    self.LastTrade = os.clock()
-
-    local ok, state = pcall(function() return Remotes.AskLabState:InvokeServer() end)
-    if not ok or type(state) ~= "table" or state.Unlocked ~= true or not state.Requirements then return end
-
-    local save = getSaveData()
-    if not save then return end
-
-    local equippedMap = {}
-    for _, id in pairs(save.EquippedAssets or {}) do equippedMap[id] = true end
-
-    local candidates = {}
-    for _, req in ipairs(state.Requirements) do candidates[tostring(req)] = {} end
-
-    for uid, egg in pairs(save.EggInventory or {}) do
-        if type(egg) == "table" and egg.Placement == nil then
-            for req, pool in pairs(candidates) do
-                if NameResolver:Matches(egg.AssetCategory or egg.Category, req) then
-                    table.insert(pool, tostring(uid))
-                    break
-                end
-            end
-        end
-    end
-
-    for uid, pet in pairs(save.Inventory or {}) do
-        if type(pet) == "table" and not equippedMap[uid] and pet.InFuse ~= true and pet.IsFavorite ~= true then
-            for req, pool in pairs(candidates) do
-                if NameResolver:Matches(pet.Category or pet.AssetCategory, req) then
-                    table.insert(pool, tostring(uid))
-                    break
-                end
-            end
-        end
-    end
-
-    local finalUids = {}
-    local complete = true
-    for _, req in ipairs(state.Requirements) do
-        local pool = candidates[tostring(req)]
-        if pool and #pool > 0 then
-            table.insert(finalUids, pool[1])
-            table.remove(pool, 1)
-        else
-            complete = false
-            break
-        end
-    end
-
-    if complete and #finalUids == #state.Requirements then
-        local success = pcall(function() return Remotes.AskLabTrade:InvokeServer(finalUids) end)
-        if success then
-            task.wait(0.5)
-            if Remotes.AskLabFinishReveal then pcall(function() Remotes.AskLabFinishReveal:InvokeServer() end) end
-            self:UpdateNeeds()
-        end
-    end
-end
-
--- ==============================================================================
 -- [ BLOOM & WISPS EVENT CONTROLLER ]
 -- ==============================================================================
 local BloomManager = { IsBusy = false }
@@ -1121,25 +963,18 @@ end
 -- ==============================================================================
 local PriorityManager = {
     Rankings = {
-        Race = 1,
-        Steal = 2,
-        Bloom = 3,
-        Drones = 4,
-        Boss = 5,
-        Treadmill = 6
+        Steal = 1,
+        Bloom = 2,
+        Treadmill = 3
     },
     ActiveTask = nil
 }
 
 function PriorityManager:CanRun(taskName)
-    local inRace = LocalPlayer:GetAttribute("RaceId") ~= nil
-    if inRace and taskName ~= "Race" then
-        return false
-    end
 
     local requestedRank = self.Rankings[taskName] or 99
     
-    if taskName ~= "Steal" and taskName ~= "Race" and isStealEnabled() and (isHoldingEgg() or State.isStealingActive) then
+    if taskName ~= "Steal" and isStealEnabled() and (isHoldingEgg() or State.isStealingActive) then
         return false
     end
     
@@ -1164,352 +999,6 @@ function PriorityManager:Release(taskName)
     if self.ActiveTask == taskName then
         self.ActiveTask = nil
     end
-end
-
--- ==============================================================================
--- [ AUTO RACE RALLY CONTROLLER ]
--- ==============================================================================
-local RaceController = {
-    IsRacing = false,
-    SplinePath = nil,
-    DrivingData = nil,
-    LastCheck = 0,
-    LastClaim = 0,
-    LastShopBuy = 0,
-    DropSpeed = 0,
-    LeaveAt = 0,
-    CooldownUntil = 0,
-    CompletedHeat = nil,
-    CompletedWindow = nil,
-    WasInRace = false,
-    ShopItemsDict = {
-        ["Nitro Mutation"] = "MutationToken",
-        ["Cash Booster"] = "CashBooster",
-        ["Speed Boost"] = "SpeedBoost",
-        ["Treadmill Boost"] = "TreadmillBoost",
-        ["Racing Bat"] = "RacingBat"
-    }
-}
-
-function RaceController:MarkCurrentEventCompleted()
-    local joinEndsAt = Services.Workspace:GetAttribute("RaceRallyJoinEndsAt")
-    if joinEndsAt then
-        self.CompletedHeat = joinEndsAt
-    end
-    local rallyWindow = Services.Workspace:GetAttribute("RaceRallyWindow")
-    if rallyWindow then
-        self.CompletedWindow = rallyWindow
-    end
-    self.CooldownUntil = os.clock() + 65
-end
-
-function RaceController:IsRaceOpen()
-    if os.clock() < self.CooldownUntil then
-        return false
-    end
-
-    local isRunning = Services.Workspace:GetAttribute("RaceRallyRunning") == true
-    local joinEndsAt = Services.Workspace:GetAttribute("RaceRallyJoinEndsAt")
-    local rallyWindow = Services.Workspace:GetAttribute("RaceRallyWindow")
-    local currentTime = workspace:GetServerTimeNow()
-
-    if not (isRunning and type(joinEndsAt) == "number" and currentTime < joinEndsAt) then
-        return false
-    end
-
-    if self.CompletedHeat and self.CompletedHeat == joinEndsAt then
-        return false
-    end
-    if self.CompletedWindow and rallyWindow and self.CompletedWindow == rallyWindow then
-        return false
-    end
-
-    return true
-end
-
-function RaceController:GetTrackAttachment()
-    local trackFolder = Services.Workspace:FindFirstChild("RaceTrack")
-    if trackFolder then
-        local att = trackFolder:FindFirstChild("AttachmentTrack", true)
-        if att then return att end
-    end
-    return Services.Workspace:FindFirstChild("AttachmentTrack", true)
-end
-
-function RaceController:JoinRace()
-    local portal = Services.Workspace:FindFirstChild("RaceRallyPortal", true)
-    local hitbox = portal and (portal:FindFirstChild("Hitbox") or portal:FindFirstChildWhichIsA("BasePart"))
-    local _, root = getAliveRig()
-    if not hitbox or not root then return false end
-
-    -- Ensure real Humanoid is active and off the treadmill before entering race
-    ShieldManager:UndoSwap()
-    hopOffTreadmill()
-
-    root.CFrame = hitbox.CFrame
-    root.AssemblyLinearVelocity = Vector3.zero
-
-    if typeof(firetouchinterest) == "function" then
-        pcall(firetouchinterest, root, hitbox, 0)
-        task.wait(0.04)
-        pcall(firetouchinterest, root, hitbox, 1)
-    end
-    return true
-end
-
-function RaceController:StartSplineDriver(trackAttachment)
-    local sharedModules = Services.ReplicatedStorage:FindFirstChild("Shared") and Services.ReplicatedStorage.Shared:FindFirstChild("Modules")
-    local splineModule = sharedModules and sharedModules:FindFirstChild("RaceTrackPath")
-    if not trackAttachment or not splineModule then return false end
-
-    local ok, SplineClass = pcall(require, splineModule)
-    if not ok or type(SplineClass) ~= "table" then return false end
-
-    local pathOk, pathInstance = pcall(SplineClass.new, trackAttachment)
-    if not pathOk or not pathInstance then return false end
-
-    local _, root = getAliveRig()
-    if not root then return false end
-
-    local halfLen = pathInstance.Length / 2
-    local currentProgress = pathInstance:Project(root.Position, halfLen, halfLen, halfLen)
-    local startFrame = pathInstance:FrameAt(currentProgress)
-
-    self.DrivingData = {
-        Path = pathInstance,
-        Progress = currentProgress,
-        Lift = math.max((root.Position - startFrame.Position):Dot(startFrame.UpVector), 2),
-        CheckAt = 0,
-        PulledAt = nil,
-        Connections = {}
-    }
-
-    local function getEffectiveSpeed()
-        local rawSpeed = math.clamp(tonumber(getgenv().config.raceSpeed) or 120, 10, 400)
-        return math.max(rawSpeed - self.DropSpeed, 10)
-    end
-
-    local function applyCurrentFrame()
-        local _, cRoot = getAliveRig()
-        local data = self.DrivingData
-        if not cRoot or not data then return end
-
-        local targetSpeed = getEffectiveSpeed()
-        local frame = data.Path:FrameAt(data.Progress)
-
-        if os.clock() >= data.CheckAt then
-            data.CheckAt = os.clock() + 1
-            local expectedPos = frame.Position + frame.UpVector * data.Lift
-            if (cRoot.Position - expectedPos).Magnitude > 40 then
-                data.Progress = data.Path:Project(cRoot.Position, data.Progress, 300, 300)
-                frame = data.Path:FrameAt(data.Progress)
-                local now = os.clock()
-                if data.PulledAt and (now - data.PulledAt < 6) then
-                    data.PulledAt = nil
-                    self.DropSpeed = math.min(self.DropSpeed + 25, math.max(0, (tonumber(getgenv().config.raceSpeed) or 120) - 10))
-                else
-                    data.PulledAt = now
-                end
-            end
-        end
-
-        cRoot.CFrame = frame + frame.UpVector * data.Lift
-        cRoot.AssemblyLinearVelocity = frame.LookVector * targetSpeed
-        cRoot.AssemblyAngularVelocity = Vector3.zero
-    end
-
-    local hbConn = Services.RunService.Heartbeat:Connect(function(dt)
-        local data = self.DrivingData
-        if not data then return end
-
-        data.Progress = (data.Progress + getEffectiveSpeed() * dt) % data.Path.Length
-        pcall(applyCurrentFrame)
-
-        if getgenv().config.racePowerUps and Remotes.MountRacePowerUp and os.clock() - self.LastCheck >= 0.2 then
-            self.LastCheck = os.clock()
-            local _, cRoot = getAliveRig()
-            local activeBuff = LocalPlayer:GetAttribute("RacePowerUp")
-            if cRoot and type(activeBuff) == "string" and activeBuff ~= "" then
-                local frame = data.Path:FrameAt(data.Progress)
-                pcall(function()
-                    Remotes.MountRacePowerUp:FireServer("Use", cRoot.Position, frame.LookVector)
-                end)
-            end
-
-            if cRoot then
-                for _, box in ipairs(Services.CollectionService:GetTagged("RacePowerUpSpawn")) do
-                    local pad = box:FindFirstChild("Pad") or box.PrimaryPart or box:FindFirstChildWhichIsA("BasePart")
-                    if pad and (pad.Position - cRoot.Position).Magnitude <= 30 then
-                        pcall(function()
-                            Remotes.MountRacePowerUp:FireServer("Pickup", box)
-                        end)
-                        break
-                    end
-                end
-            end
-        end
-    end)
-    table.insert(self.DrivingData.Connections, hbConn)
-
-    local preConn = Services.RunService.PreSimulation:Connect(function()
-        if self.DrivingData then
-            pcall(applyCurrentFrame)
-        end
-    end)
-    table.insert(self.DrivingData.Connections, preConn)
-
-    return true
-end
-
-function RaceController:StopDriving()
-    if self.DrivingData then
-        for _, conn in ipairs(self.DrivingData.Connections) do
-            pcall(function() conn:Disconnect() end)
-        end
-        self.DrivingData = nil
-    end
-    local _, root, hum = getAliveRig()
-    if root then
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
-    end
-    if hum then
-        pcall(function()
-            hum.PlatformStand = false
-            hum.Sit = false
-            hum:ChangeState(Enum.HumanoidStateType.Running)
-        end)
-    end
-end
-
-function RaceController:ProcessRewardsAndShop()
-    local save = getSaveData()
-    if not save or type(save.RaceRally) ~= "table" then return end
-    local raceData = save.RaceRally
-
-    if getgenv().config.raceAutoEquip and Remotes.AskEquipRacer then
-        local racersModule = Services.ReplicatedStorage:FindFirstChild("Data") and Services.ReplicatedStorage.Data:FindFirstChild("RaceRally")
-        if racersModule then
-            local ok, rData = pcall(require, racersModule)
-            if ok and type(rData) == "table" and type(rData.Racers) == "table" then
-                local bestRacerId, highestOrder = rData.DefaultRacer, -1
-                for id, info in pairs(rData.Racers) do
-                    if (raceData.Racers and raceData.Racers[id] == true) or id == rData.DefaultRacer then
-                        local order = tonumber(info.Order) or 0
-                        if order > highestOrder then
-                            highestOrder = order
-                            bestRacerId = id
-                        end
-                    end
-                end
-                if bestRacerId and tostring(raceData.EquippedRacer or "") ~= bestRacerId then
-                    pcall(function() Remotes.AskEquipRacer:InvokeServer(bestRacerId) end)
-                end
-            end
-        end
-    end
-
-    if getgenv().config.raceAutoClaim and Remotes.AskClaimMilestone and os.clock() - self.LastClaim >= 5 then
-        self.LastClaim = os.clock()
-        local wins = tonumber(raceData.Wins) or 0
-        local claimed = raceData.Milestones or {}
-        local racersModule = Services.ReplicatedStorage:FindFirstChild("Data") and Services.ReplicatedStorage.Data:FindFirstChild("RaceRally")
-        if racersModule then
-            local ok, rData = pcall(require, racersModule)
-            if ok and type(rData) == "table" and type(rData.Milestones) == "table" then
-                for qId, info in pairs(rData.Milestones) do
-                    if not claimed[qId] and wins >= (tonumber(info.Wins) or 0) then
-                        pcall(function() Remotes.AskClaimMilestone:InvokeServer(qId) end)
-                    end
-                end
-            end
-        end
-    end
-
-    if getgenv().config.raceAutoBuy and Remotes.AskBuyRaceShop and os.clock() - self.LastShopBuy >= 5 then
-        self.LastShopBuy = os.clock()
-        local tokens = tonumber(raceData.Tokens) or 0
-        local racersModule = Services.ReplicatedStorage:FindFirstChild("Data") and Services.ReplicatedStorage.Data:FindFirstChild("RaceRally")
-        if racersModule and tokens > 0 then
-            local ok, rData = pcall(require, racersModule)
-            if ok and type(rData) == "table" and type(rData.Shop) == "table" then
-                for friendlyName, isWanted in pairs(getgenv().config.raceShopItems or {}) do
-                    if isWanted == true and self.ShopItemsDict[friendlyName] then
-                        local itemId = self.ShopItemsDict[friendlyName]
-                        local shopItem = rData.Shop[itemId]
-                        if shopItem and tokens >= (tonumber(shopItem.Price) or 0) then
-                            pcall(function() Remotes.AskBuyRaceShop:InvokeServer(itemId) end)
-                        end
-                    end
-                end
-            end
-        end
-    end
-end
-
-function RaceController:Process()
-    if not getgenv().config.autoRace then return end
-
-    local raceId = LocalPlayer:GetAttribute("RaceId")
-    local isInRace = raceId ~= nil
-
-    if isInRace then
-        self.WasInRace = true
-        ShieldManager:UndoSwap()
-        PriorityManager:Claim("Race")
-
-        local currentLap = tonumber(LocalPlayer:GetAttribute("RaceLap")) or 1
-        if currentLap >= 2 then
-            self:MarkCurrentEventCompleted()
-        end
-
-        if type(LocalPlayer:GetAttribute("RaceFinishPlace")) == "number" then
-            self:StopDriving()
-            self:MarkCurrentEventCompleted()
-
-            if os.clock() >= (self.LeaveAt or 0) then
-                self.LeaveAt = os.clock() + 2
-                if Remotes.MountRaceOutroFinished then
-                    pcall(function() Remotes.MountRaceOutroFinished:FireServer() end)
-                end
-                if Remotes.MountRaceAskLeave then
-                    pcall(function() Remotes.MountRaceAskLeave:FireServer() end)
-                end
-            end
-            return
-        end
-
-        local raceLive = LocalPlayer:GetAttribute("RacePlace") ~= nil or LocalPlayer:GetAttribute("RaceBoardPlace") ~= nil
-        if raceLive and not self.DrivingData then
-            local trackAtt = self:GetTrackAttachment()
-            if trackAtt then
-                self:StartSplineDriver(trackAtt)
-            end
-        end
-        return
-    end
-
-    if not isInRace then
-        self.DropSpeed = 0
-        if self.DrivingData or self.WasInRace then
-            self.WasInRace = false
-            self:StopDriving()
-            self:MarkCurrentEventCompleted()
-            PriorityManager:Release("Race")
-            -- Clean up post-race character state so treadmill works immediately
-            hopOffTreadmill()
-        elseif PriorityManager.ActiveTask == "Race" then
-            PriorityManager:Release("Race")
-        end
-    end
-
-    if self:IsRaceOpen() and PriorityManager:CanRun("Race") then
-        if PriorityManager:Claim("Race") then
-            self:JoinRace()
-        end
-    end
-
-    self:ProcessRewardsAndShop()
 end
 
 -- ==============================================================================
@@ -2312,8 +1801,7 @@ local function getBestEgg()
     local minScore = getMinRequiredScore()
     local bestEgg = nil
     local highestScore = -math.huge
-    local labEnabled = getgenv().config.autoStealLabEggs == true
-    local normalStealEnabled = getgenv().config.autoFarm == true
+        local normalStealEnabled = getgenv().config.autoFarm == true
 
     for keyUid, record in pairs(data.Records) do
         local uid = record.Uid or keyUid
@@ -2328,8 +1816,7 @@ local function getBestEgg()
 
                 if not posX or posX >= 560 then
                     local rawName = record.AssetCategory or record.Category or record.Name or "Unknown"
-                    local isLabNeeded = labEnabled and LabManager:IsNeeded(rawName)
-
+                    
                     if isLabNeeded then
                         local scale = tonumber(record.AssetScale) or 1
                         local mutationBonus = (record.Mutations and #record.Mutations > 0) and 2.5 or 1
@@ -2365,18 +1852,9 @@ end
 -- ==============================================================================
 -- [ WORKER SCHEDULER TASK REGISTRATIONS ]
 -- ==============================================================================
-WorkerScheduler:Register("LabSync", 4.0, function()
-    LabManager:UpdateNeeds()
-    LabManager:ExecuteTrade()
-end)
-
 WorkerScheduler:Register("AutoUpgrades", 6.0, function()
     if getgenv().config.autoUpgradeTreadmill then tryUpgradeTreadmill() end
     if getgenv().config.autoUpgradeBase then tryUpgradeBase() end
-end)
-
-WorkerScheduler:Register("RaceRally", 0.35, function()
-    RaceController:Process()
 end)
 
 WorkerScheduler:Register("EventsCombat", 0.35, function()
@@ -4033,26 +3511,7 @@ createToggle("Auto Treadmill", "Gain treadmill speed when idle", currentSettings
     if not state then hopOffTreadmill() end
 end)
 
-local scrambleCategory = createCategory("Dr. Scramble Event", farmPg, 3, false)
-
-createToggle("Steal Missing Lab Eggs", "Auto steal missing recipe eggs", currentSettings.AutoStealLabEggs, scrambleCategory, 1, function(state)
-    getgenv().config.autoStealLabEggs = state
-    currentSettings.AutoStealLabEggs = state
-    saveStuff()
-    table.clear(State.blacklistedEggs)
-    if not state then
-        abortStealRoutine()
-        hopOffTreadmill()
-    end
-end)
-
-createToggle("Auto Lab Trade-In", "Auto trade in pets/eggs for recipes", currentSettings.AutoLabTradeIn, scrambleCategory, 2, function(state)
-    getgenv().config.autoLabTradeIn = state
-    currentSettings.AutoLabTradeIn = state
-    saveStuff()
-end)
-
-local bloomCategory = createCategory("Enchanted / Bloom Event", farmPg, 4, false)
+local bloomCategory = createCategory("Enchanted / Bloom Event", farmPg, 3, false)
 
 createToggle("Auto Bloom Event", "Auto catch butterflies during Bloom Event", currentSettings.AutoCatchButterfly, bloomCategory, 1, function(state)
     getgenv().config.autoCatchButterfly = state
@@ -4068,57 +3527,7 @@ createToggle("Auto Wisps Quest", "Auto advance & submit Wisp quest eggs", curren
     if not state then BloomManager.IsBusy = false end
 end)
 
-local raceCategory = createCategory("Automation Race Event", farmPg, 5, false)
-
-createToggle("Auto Race", "Automatically join and complete Race Rally", currentSettings.AutoRace, raceCategory, 1, function(state)
-    getgenv().config.autoRace = state
-    currentSettings.AutoRace = state
-    saveStuff()
-    if not state then
-        RaceController:StopDriving()
-        PriorityManager:Release("Race")
-    end
-end)
-
-createSlider("Race Speed", "Lower speed (down to 10) if not receiving rewards.", 10, 400, currentSettings.RaceSpeed, 5, raceCategory, 2, function(val)
-    getgenv().config.raceSpeed = val
-    currentSettings.RaceSpeed = val
-    RaceController.DropSpeed = 0
-    saveStuff()
-end)
-
-createToggle("Auto Use Power-Ups", "Collect and activate race power-up boxes", currentSettings.RacePowerUps, raceCategory, 3, function(state)
-    getgenv().config.racePowerUps = state
-    currentSettings.RacePowerUps = state
-    saveStuff()
-end)
-
-createToggle("Auto Claim Race Rewards", "Claim win and repeat milestones", currentSettings.RaceAutoClaim, raceCategory, 4, function(state)
-    getgenv().config.raceAutoClaim = state
-    currentSettings.RaceAutoClaim = state
-    saveStuff()
-end)
-
-createToggle("Auto Equip Best Racer", "Equip your fastest owned racer mount", currentSettings.RaceAutoEquip, raceCategory, 5, function(state)
-    getgenv().config.raceAutoEquip = state
-    currentSettings.RaceAutoEquip = state
-    saveStuff()
-end)
-
-createToggle("Auto Buy Race Shop", "Buy selected items with race tokens", currentSettings.RaceAutoBuy, raceCategory, 6, function(state)
-    getgenv().config.raceAutoBuy = state
-    currentSettings.RaceAutoBuy = state
-    saveStuff()
-end)
-
-local raceShopOptions = {"Nitro Mutation", "Cash Booster", "Speed Boost", "Treadmill Boost", "Racing Bat"}
-createMultiDropdown("Race Shop Items", "Select items to auto-purchase", raceShopOptions, currentSettings.RaceShopItems, raceCategory, 7, function(selectedMap)
-    getgenv().config.raceShopItems = selectedMap
-    currentSettings.RaceShopItems = selectedMap
-    saveStuff()
-end)
-
-local upgradesCategory = createCategory("Automation Upgrades", farmPg, 6, false)
+local upgradesCategory = createCategory("Automation Upgrades", farmPg, 4, false)
 
 createToggle("Auto Upgrade Treadmill", "Auto buy next tier treadmill", currentSettings.AutoUpgradeTreadmill, upgradesCategory, 1, function(state)
     getgenv().config.autoUpgradeTreadmill = state

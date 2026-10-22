@@ -127,10 +127,10 @@ local CONFIG = {
     HopGap = 0.06,
     HopGapMin = 0.05,
     HopGapMax = 0.20,
-    FlightAltitude = 72.0,    -- Ground level (was 120.7, prevents anti-cheat elevation flagging)
-    HopAltitude = 72.0,       -- Ground level (was 112.8, prevents anti-cheat elevation flagging)
+    FlightAltitude = 120.7,
+    HopAltitude = 112.8,
     GroundAltitude = 70.8,
-    AirGrabOffset = 0.5,      -- Ground level pickup offset (was 8.5)
+    AirGrabOffset = 8.5,
     CheckpointInterval = 1600,
     BoundaryCheckpointX = 600.2,
     SeparationLineX = 552.2,
@@ -138,7 +138,7 @@ local CONFIG = {
     FastStealHopSpeed = 180,
     FastStealGroundSpeed = 320,
     FastStealDirectSnapRadius = 45,
-    BaseDropPosition = Vector3.new(528.7, 71.8, -364.1)
+    BaseDropPosition = Vector3.new(528.7, 70.8, -364.1)
 }
 
 -- ==============================================================================
@@ -731,20 +731,9 @@ local EggDetector = { IsHolding = false }
 function EggDetector:CheckHolding()
     local dropGui = PlayerGui:FindFirstChild("DropHeldEgg")
     local runGui = PlayerGui:FindFirstChild("RunBackEffects")
-    if (dropGui and dropGui:IsA("ScreenGui") and dropGui.Enabled) or 
-       (runGui and runGui:IsA("ScreenGui") and runGui.Enabled) then
-        return true
-    end
-
-    for _, gui in ipairs(PlayerGui:GetChildren()) do
-        if gui:IsA("ScreenGui") and gui.Enabled and gui.Name ~= "HalloweenDirectGrabGUI" and gui.Name ~= "SyntaxHubGUI" then
-            local btn = gui:FindFirstChild("Drop", true)
-            if btn and (btn:IsA("TextButton") or btn:IsA("ImageButton")) and btn.Visible then
-                return true
-            end
-        end
-    end
-    return false
+    local dropActive = dropGui and dropGui:IsA("ScreenGui") and dropGui.Enabled
+    local runActive = runGui and runGui:IsA("ScreenGui") and runGui.Enabled
+    return (dropActive or runActive) == true
 end
 
 local function isHoldingEgg()
@@ -1283,6 +1272,25 @@ function HalloweenStealManager:SelectTargetEgg()
     return bestEgg
 end
 
+function HalloweenStealManager:IsHoldingHalloweenEgg()
+    local dropGui = PlayerGui:FindFirstChild("DropHeldEgg")
+    local runGui = PlayerGui:FindFirstChild("RunBackEffects")
+    if (dropGui and dropGui:IsA("ScreenGui") and dropGui.Enabled) or 
+       (runGui and runGui:IsA("ScreenGui") and runGui.Enabled) then
+        return true
+    end
+
+    for _, gui in ipairs(PlayerGui:GetChildren()) do
+        if gui:IsA("ScreenGui") and gui.Enabled and gui.Name ~= "HalloweenDirectGrabGUI" and gui.Name ~= "SyntaxHubGUI" then
+            local btn = gui:FindFirstChild("Drop", true)
+            if btn and (btn:IsA("TextButton") or btn:IsA("ImageButton")) and btn.Visible then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 function HalloweenStealManager:GrabEgg(targetEgg)
     if not targetEgg or not targetEgg.Parent then return false end
     local uid = targetEgg:GetAttribute("HalloweenEggUid") 
@@ -1294,7 +1302,7 @@ function HalloweenStealManager:GrabEgg(targetEgg)
         pcall(function() carryRemote:InvokeServer(tostring(uid)) end)
     end
 
-    if isHoldingEgg() then return true end
+    if self:IsHoldingHalloweenEgg() then return true end
 
     local prompt = targetEgg:FindFirstChildWhichIsA("ProximityPrompt", true)
     if prompt and prompt.Enabled then
@@ -1310,10 +1318,10 @@ function HalloweenStealManager:GrabEgg(targetEgg)
     end
 
     local deadline = os.clock() + 0.35
-    while os.clock() < deadline and not isHoldingEgg() do
+    while os.clock() < deadline and not self:IsHoldingHalloweenEgg() do
         Services.RunService.Heartbeat:Wait()
     end
-    return isHoldingEgg()
+    return self:IsHoldingHalloweenEgg()
 end
 
 function HalloweenStealManager:ExecuteDelivery(session)
@@ -1337,7 +1345,7 @@ function HalloweenStealManager:ExecuteDelivery(session)
 
     local waitStart = os.clock()
     while os.clock() - waitStart < self.DeliveryDelay do
-        if session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or not isHoldingEgg() then
+        if session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or not self:IsHoldingHalloweenEgg() then
             ShieldManager:UnmuteUGI()
             return false
         end
@@ -1366,12 +1374,12 @@ function HalloweenStealManager:ExecuteDelivery(session)
     root.AssemblyLinearVelocity = Vector3.zero
 
     local deadline = os.clock() + self.SecureTimeout
-    while os.clock() < deadline and isHoldingEgg() do
+    while os.clock() < deadline and self:IsHoldingHalloweenEgg() do
         Services.RunService.Heartbeat:Wait()
     end
 
     ShieldManager:UnmuteUGI()
-    return not isHoldingEgg()
+    return not self:IsHoldingHalloweenEgg()
 end
 
 function HalloweenStealManager:Process()
@@ -1390,7 +1398,7 @@ function HalloweenStealManager:Process()
     self.CurrentSession = self.CurrentSession + 1
     local session = self.CurrentSession
 
-    if isHoldingEgg() then
+    if self:IsHoldingHalloweenEgg() then
         self:ExecuteDelivery(session)
     else
         local targetEgg = self:SelectTargetEgg()
@@ -1406,7 +1414,7 @@ function HalloweenStealManager:Process()
                 grabbed = self:GrabEgg(targetEgg)
             end
 
-            if (grabbed or isHoldingEgg()) and session == self.CurrentSession then
+            if (grabbed or self:IsHoldingHalloweenEgg()) and session == self.CurrentSession then
                 self:ExecuteDelivery(session)
             end
         end
@@ -1496,27 +1504,11 @@ function PriorityManager:IsTaskEnabled(taskName)
     return false
 end
 
-function PriorityManager:IsTaskDemanding(taskName)
-    local resolved = self.TaskAliases[taskName] or taskName
-    if not self:IsTaskEnabled(resolved) then return false end
-    if resolved == "Auto Steal" then
-        return (isHoldingEgg() or State.isStealingActive or (getBestEgg and getBestEgg() ~= nil))
-    elseif resolved == "Halloween Steal" then
-        return getgenv().config.autoHalloweenSteal == true
-    elseif resolved == "Candy Cane Farm" then
-        return getgenv().config.autoCandyCane == true
-    elseif resolved == "Bloom Event" then
-        return (BloomManager and BloomManager.IsBusy) or State.isCatchingWisp
-    elseif resolved == "Auto Treadmill" then
-        return getgenv().config.autoTreadmill == true
-    end
-    return false
-end
-
 function PriorityManager:CanRun(taskName)
     local myRank = self:GetRank(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
 
+    -- If another task is actively claiming execution with higher priority, block
     if self.ActiveTask and self.ActiveTask ~= taskName and self.ActiveTask ~= resolved then
         local currentRank = self:GetRank(self.ActiveTask)
         if myRank > currentRank then
@@ -1524,13 +1516,25 @@ function PriorityManager:CanRun(taskName)
         end
     end
 
-    if resolved ~= "Auto Upgrades" then
-        for i = 1, myRank - 1 do
-            local higherTask = self.List[i]
-            if higherTask and higherTask ~= resolved and higherTask ~= "Auto Upgrades" then
-                if self:IsTaskDemanding(higherTask) then
-                    return false
-                end
+    -- If in Halloween dimension, main-world tasks (Steal, Treadmill, Bloom) cannot run
+    if (resolved == "Auto Steal" or resolved == "Auto Treadmill" or resolved == "Bloom Event") then
+        if HalloweenPortalManager and HalloweenPortalManager.IsInHalloweenDimension() then
+            return false
+        end
+    end
+
+    -- If any higher-priority task is actively busy / executing, block
+    for i = 1, myRank - 1 do
+        local higherTask = self.List[i]
+        if higherTask and higherTask ~= resolved then
+            if higherTask == "Auto Steal" and isStealEnabled() and (State.isStealingActive or isHoldingEgg()) then
+                return false
+            elseif higherTask == "Halloween Steal" and getgenv().config.autoHalloweenSteal and (HalloweenStealManager and HalloweenStealManager.IsActive) then
+                return false
+            elseif higherTask == "Candy Cane Farm" and getgenv().config.autoCandyCane and (HalloweenPortalManager and HalloweenPortalManager.IsInHalloweenDimension()) then
+                return false
+            elseif higherTask == "Bloom Event" and (BloomManager and BloomManager.IsBusy) then
+                return false
             end
         end
     end
@@ -1970,13 +1974,9 @@ local function executeFastStealDelivery(targetEgg, sessionId)
 
     local uid = targetEgg.Uid
     local laneZ = math.clamp(root.Position.Z, -425, -300)
-    local groundY = CONFIG.GroundAltitude + 1.2
-    local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, groundY, laneZ)
+    local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, 74.0, laneZ)
 
-    -- Never suppress walking animation: keep PlatformStand false and state Running
-    hum.PlatformStand = false
-    hum.Sit = false
-    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+    hum.PlatformStand = true
     setCollisions(false)
     ShieldManager:MuteUGI()
 
@@ -1995,8 +1995,8 @@ local function executeFastStealDelivery(targetEgg, sessionId)
         local _, cRoot = getAliveRig()
         if not cRoot then break end
 
-        cRoot.CFrame = CFrame.new(currentX, groundY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
-        cRoot.AssemblyLinearVelocity = Vector3.new(-hopStep * 6, 0, 0)
+        cRoot.CFrame = CFrame.new(currentX, CONFIG.HopAltitude, laneZ) * CFrame.Angles(0, math.rad(90), 0)
+        cRoot.AssemblyLinearVelocity = Vector3.zero
         task.wait(0.08)
     end
 
@@ -2124,14 +2124,7 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
 
     StealUIManager:Lock()
     ShieldManager:MuteUGI()
-    local groundY = CONFIG.GroundAltitude + 1.2
-
-    -- Preserve walking animations: PlatformStand false, state Running
-    if humanoid then 
-        humanoid.PlatformStand = false 
-        humanoid.Sit = false
-        pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
-    end
+    if humanoid then humanoid.PlatformStand = true end
 
     local function snapAltitude(targetY)
         local _, cRoot = getAliveRig()
@@ -2143,7 +2136,7 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
             task.wait(0.03)
         end
     end
-    snapAltitude(groundY)
+    snapAltitude(CONFIG.HopAltitude)
 
     while currentX - stepSize > boundaryX do
         if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
@@ -2165,8 +2158,8 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
         local preHopTime = os.clock()
 
         pcall(function()
-            cRoot.CFrame = CFrame.new(nextX, groundY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
-            cRoot.AssemblyLinearVelocity = Vector3.new(-stepSize * 6, 0, 0)
+            cRoot.CFrame = CFrame.new(nextX, CONFIG.HopAltitude, laneZ) * CFrame.Angles(0, math.rad(90), 0)
+            cRoot.AssemblyLinearVelocity = Vector3.zero
         end)
         task.wait(CONFIG.HopGap)
 
@@ -2191,12 +2184,8 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
             end
             lastCheckpointX = currentX
             local _, rRoot, rHum = getAliveRig()
-            if rHum then 
-                rHum.PlatformStand = false 
-                rHum.Sit = false
-                pcall(function() rHum:ChangeState(Enum.HumanoidStateType.Running) end)
-            end
-            snapAltitude(groundY)
+            if rHum then rHum.PlatformStand = true end
+            snapAltitude(CONFIG.HopAltitude)
             task.wait(CONFIG.HopGap)
         end
     end
@@ -2282,11 +2271,8 @@ local function travelPlaneSegment(targetPos, stopDist, speed, timeout, sessionId
         end
 
         local moveDir = delta.Unit
-        local groundY = (targetPos and targetPos.Y and targetPos.Y > 20) and (targetPos.Y + 1.2) or (CONFIG.GroundAltitude + 1.2)
-        -- Set horizontal velocity to trigger natural walking/running animation
         cRoot.AssemblyLinearVelocity = Vector3.new(moveDir.X * speed, 0, moveDir.Z * speed)
-        -- Ground-level CFrame (strictly avoids sky elevation to prevent anti-cheat flagging)
-        cRoot.CFrame = CFrame.new(currentPos.X, groundY, currentPos.Z) * CFrame.lookAt(Vector3.zero, moveDir)
+        cRoot.CFrame = CFrame.new(currentPos.X, CONFIG.FlightAltitude, currentPos.Z) * CFrame.lookAt(Vector3.zero, moveDir)
     end)
 
     while State.activeFlightConnection and State.activeFlightConnection.Connected do
@@ -2314,12 +2300,7 @@ local function flyOutboundElevated(targetPosition, stopDistance, sessionId, targ
         end
     end
 
-    -- Preserve walking animations: PlatformStand false, state Running
-    humanoid.PlatformStand = false
-    humanoid.Sit = false
-    pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
-
-    local targetGroundY = (targetPosition and targetPosition.Y and targetPosition.Y > 20) and (targetPosition.Y + 1.2) or (CONFIG.GroundAltitude + 1.2)
+    humanoid.PlatformStand = true
 
     local function snapAltitude(targetY)
         local _, cRoot = getAliveRig()
@@ -2331,12 +2312,12 @@ local function flyOutboundElevated(targetPosition, stopDistance, sessionId, targ
             task.wait(0.03)
         end
     end
-    snapAltitude(targetGroundY)
+    snapAltitude(CONFIG.FlightAltitude)
 
     local currentPosInit = root.Position
     if currentPosInit.X < CONFIG.BoundaryCheckpointX then
-        local centerDeliveryPos = Vector3.new(CONFIG.BaseDropPosition.X, targetGroundY, CONFIG.BaseDropPosition.Z)
-        local mouthPos = Vector3.new(CONFIG.BoundaryCheckpointX, targetGroundY, CONFIG.BaseDropPosition.Z)
+        local centerDeliveryPos = Vector3.new(CONFIG.BaseDropPosition.X, CONFIG.FlightAltitude, CONFIG.BaseDropPosition.Z)
+        local mouthPos = Vector3.new(CONFIG.BoundaryCheckpointX, CONFIG.FlightAltitude, CONFIG.BaseDropPosition.Z)
 
         local lateralDist = math.abs(currentPosInit.Z - CONFIG.BaseDropPosition.Z)
         if lateralDist > 12 or currentPosInit.X < CONFIG.BaseDropPosition.X then
@@ -2353,7 +2334,7 @@ local function flyOutboundElevated(targetPosition, stopDistance, sessionId, targ
 
     local reached = travelPlaneSegment(targetPosition, stopDistance, playerSpeed, dynamicTimeout, sessionId, targetUid)
     if reached and sessionId == State.currentStealSession and isStealEnabled() and not isMapClosed() then
-        snapAltitude(targetGroundY)
+        snapAltitude((targetPosition.Y or CONFIG.GroundAltitude) + CONFIG.AirGrabOffset)
     end
 
     cleanupFlightState()

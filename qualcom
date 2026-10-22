@@ -651,15 +651,26 @@ local function abortStealRoutine()
         end
         State.targetedSpecificUid = nil
     end
+
+    if PriorityManager then
+        PriorityManager:Release("Steal")
+        PriorityManager:Release("Auto Steal")
+    end
+
     ShieldManager:UnmuteUGI()
     ShieldManager:UndoSwap()
     StealUIManager:Unlock()
     cleanupFlightState()
-    if HalloweenStealManager and HalloweenStealManager.Abort then
-        HalloweenStealManager:Abort()
+    setCollisions(true)
+
+    local _, root, hum = getAliveRig()
+    if root then
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
     end
-    if HalloweenCombatManager and HalloweenCombatManager.Abort then
-        HalloweenCombatManager:Abort()
+    if hum then
+        hum.PlatformStand = false
+        hum.Sit = false
     end
 end
 
@@ -1974,18 +1985,17 @@ local function getStandingPosition(basePos)
     return Vector3.new(basePos.X, basePos.Y + hipHeight + rootSizeY, basePos.Z)
 end
 
-local function runAlongGroundToEgg(targetPos, speed, sessionId, targetUid)
+local function runAlongGroundSegment(targetPos, stopDist, sessionId, targetUid)
     local char, root, hum = getAliveRig()
     if not root or not hum then return false end
+    stopDist = stopDist or 3.5
 
-    -- Strictly use player's identified live speed (never artificially boost)
     local liveSpeed = getPlayerCurrentSpeed()
-    speed = liveSpeed
-
     setCollisions(false)
-    local targetStandPos = getStandingPosition(targetPos)
-    local delta = Vector3.new(targetStandPos.X - root.Position.X, 0, targetStandPos.Z - root.Position.Z)
-    local timeout = os.clock() + math.max(10, (delta.Magnitude / speed) + 4)
+    if hum then hum.PlatformStand = false end
+
+    local delta = Vector3.new(targetPos.X - root.Position.X, 0, targetPos.Z - root.Position.Z)
+    local timeout = os.clock() + math.max(8, (delta.Magnitude / math.max(liveSpeed, 16)) + 5)
     local arrived = false
     local lastLiveCheck = 0
 
@@ -2012,8 +2022,8 @@ local function runAlongGroundToEgg(targetPos, speed, sessionId, targetUid)
         end
 
         local currentPos = cRoot.Position
-        local flatDiff = Vector3.new(targetStandPos.X - currentPos.X, 0, targetStandPos.Z - currentPos.Z)
-        if flatDiff.Magnitude <= 3.5 then
+        local flatDiff = Vector3.new(targetPos.X - currentPos.X, 0, targetPos.Z - currentPos.Z)
+        if flatDiff.Magnitude <= stopDist then
             arrived = true
             cRoot.AssemblyLinearVelocity = Vector3.zero
             cRoot.AssemblyAngularVelocity = Vector3.zero
@@ -2021,9 +2031,10 @@ local function runAlongGroundToEgg(targetPos, speed, sessionId, targetUid)
             return
         end
 
+        local curSpeed = getPlayerCurrentSpeed()
         local dir = flatDiff.Unit
-        -- Natural physics velocity using player's own speed (zero artificial CFrame stepping)
-        cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * speed, cRoot.AssemblyLinearVelocity.Y, dir.Z * speed)
+        -- Pure physics velocity using player's own speed, keeping character naturally grounded
+        cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * curSpeed, cRoot.AssemblyLinearVelocity.Y, dir.Z * curSpeed)
         cRoot.CFrame = CFrame.new(currentPos.X, currentPos.Y, currentPos.Z) * CFrame.lookAt(Vector3.zero, dir)
     end)
 
@@ -2033,12 +2044,57 @@ local function runAlongGroundToEgg(targetPos, speed, sessionId, targetUid)
 
     local _, fRoot = getAliveRig()
     if fRoot then
+        fRoot.AssemblyLinearVelocity = Vector3.zero
+        fRoot.AssemblyAngularVelocity = Vector3.zero
+    end
+
+    return arrived and (sessionId == State.currentStealSession) and isStealEnabled()
+end
+
+local function runAlongGroundToEgg(targetPos, speed, sessionId, targetUid)
+    local char, root, hum = getAliveRig()
+    if not root or not hum then return false end
+
+    local currentPosInit = root.Position
+    local groundY = CONFIG.GroundAltitude + 1.0
+
+    -- Safe Zone T-Shape Routing:
+    -- If inside safe zone (X < BoundaryCheckpointX), route via delivery center & corridor mouth
+    -- to prevent clipping through corner walls and getting killed!
+    if currentPosInit.X < CONFIG.BoundaryCheckpointX then
+        local centerDeliveryPos = Vector3.new(CONFIG.BaseDropPosition.X, groundY, CONFIG.BaseDropPosition.Z)
+        local mouthPos = Vector3.new(CONFIG.BoundaryCheckpointX, groundY, CONFIG.BaseDropPosition.Z)
+
+        local lateralDist = math.abs(currentPosInit.Z - CONFIG.BaseDropPosition.Z)
+        if lateralDist > 12 or currentPosInit.X < CONFIG.BaseDropPosition.X then
+            local ok = runAlongGroundSegment(centerDeliveryPos, 4.0, sessionId, targetUid)
+            if not ok or sessionId ~= State.currentStealSession or not isStealEnabled() then
+                return false
+            end
+        end
+
+        local ok2 = runAlongGroundSegment(mouthPos, 4.0, sessionId, targetUid)
+        if not ok2 or sessionId ~= State.currentStealSession or not isStealEnabled() then
+            return false
+        end
+    end
+
+    -- From corridor mouth, travel directly down the corridor to the target egg
+    local targetStandPos = getStandingPosition(targetPos)
+    local reached = runAlongGroundSegment(targetStandPos, 3.5, sessionId, targetUid)
+    if not reached or sessionId ~= State.currentStealSession or not isStealEnabled() then
+        return false
+    end
+
+    -- Only align facing when successfully arrived and steal is still actively enabled!
+    local _, fRoot = getAliveRig()
+    if fRoot then
         fRoot.CFrame = CFrame.lookAt(targetStandPos, targetPos)
         fRoot.AssemblyLinearVelocity = Vector3.zero
         fRoot.AssemblyAngularVelocity = Vector3.zero
     end
-    task.wait(0.05)
-    return arrived and (sessionId == State.currentStealSession) and isStealEnabled()
+    task.wait(0.04)
+    return true
 end
 
 local function executeFastStealOutbound(targetPos, sessionId, targetUid)
@@ -2197,6 +2253,7 @@ local function findMyPlot()
 end
 
 local function instantGrabAtPosition(uid, targetPos, sessionId, isNest)
+    if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
     local _, root = getAliveRig()
     if root and targetPos then
         local offsetY = isNest and CONFIG.AirGrabOffset or 1.0
@@ -2869,6 +2926,14 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                         State.activeStealButtons[targetUid].Text = "Steal"
                     end
                     State.targetedSpecificUid = nil
+                end
+            else
+                State.isStealingActive = false
+                ShieldManager:UndoSwap()
+                cleanupFlightState()
+                if PriorityManager then
+                    PriorityManager:Release("Steal")
+                    PriorityManager:Release("Auto Steal")
                 end
             end
         end
@@ -4508,7 +4573,6 @@ createToggle("Auto Steal", "Automatically steal eggs from areas", currentSetting
     table.clear(State.blacklistedEggs)
     if not state then
         abortStealRoutine()
-        hopOffTreadmill()
     end
 end)
 

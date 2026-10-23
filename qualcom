@@ -2044,6 +2044,9 @@ function HalloweenStealManager:Process()
     self.CurrentSession = self.CurrentSession + 1
     local session = self.CurrentSession
 
+    ShieldManager:ApplyHumanoidSwap(char)
+    task.wait(0.06)
+
     if isHoldingEgg() then
         local delivered = self:ExecuteDelivery(session, self.LastGrabbedUid, self.LastGrabbedEgg)
         if delivered and isHalloweenStealPanelTarget() then
@@ -2098,6 +2101,7 @@ function HalloweenStealManager:Process()
             end
         end
     end
+    ShieldManager:UndoSwap()
     setCollisions(true)
     self.IsActive = false
 end
@@ -2109,6 +2113,7 @@ function HalloweenStealManager:Abort()
         pcall(function() self.ActiveTween:Cancel() end)
         self.ActiveTween = nil
     end
+    ShieldManager:UndoSwap()
     ShieldManager:UnmuteUGI()
     setCollisions(true)
     if PriorityManager then PriorityManager:Release("HalloweenSteal") end

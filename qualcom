@@ -116,6 +116,8 @@ local State = {
     activeFlightConnection = nil,
     activeCollisionsDisabled = {},
     targetedSpecificUid = nil,
+    targetedSpecificIsHalloween = false,
+    targetedSpecificHalloweenEgg = nil,
     blacklistedEggs = {},
     lastServerRollbackTime = 0,
     myPlot = nil,
@@ -253,9 +255,24 @@ local function isHalloweenMapClosed()
     return false
 end
 
+local function isNormalStealPanelTarget()
+    return State.targetedSpecificUid ~= nil and not State.targetedSpecificIsHalloween
+end
+
+local function isHalloweenStealPanelTarget()
+    return State.targetedSpecificUid ~= nil and State.targetedSpecificIsHalloween == true
+end
+
 local function isStealEnabled()
     if isMapClosed() then return false end
-    return getgenv().config.autoFarm == true or State.targetedSpecificUid ~= nil
+    if isHalloweenStealPanelTarget() then return false end
+    return getgenv().config.autoFarm == true or isNormalStealPanelTarget()
+end
+
+local function isHalloweenStealEnabled()
+    if isHalloweenMapClosed() then return false end
+    if isNormalStealPanelTarget() then return false end
+    return getgenv().config.autoHalloweenSteal == true or isHalloweenStealPanelTarget()
 end
 
 local function isFastStealArea(areaId)
@@ -1699,6 +1716,34 @@ function HalloweenStealManager:SelectTargetEgg()
     local folder = dim and dim:FindFirstChild("WorldEggs")
     if not folder then return nil end
 
+    -- Steal Panel Specific Halloween Egg Target
+    if isHalloweenStealPanelTarget() then
+        if State.targetedSpecificHalloweenEgg and State.targetedSpecificHalloweenEgg.Parent == folder then
+            return State.targetedSpecificHalloweenEgg
+        end
+        for _, egg in ipairs(folder:GetChildren()) do
+            if egg:IsA("Model") or egg:IsA("BasePart") then
+                local uid = tostring(egg:GetAttribute("HalloweenEggUid") or egg:GetAttribute("Uid") or egg:GetAttribute("EggUid") or egg.Name)
+                if uid == tostring(State.targetedSpecificUid) then
+                    State.targetedSpecificHalloweenEgg = egg
+                    return egg
+                end
+            end
+        end
+        if not self.IsActive and not isHoldingEgg() then
+            if State.activeStealButtons[State.targetedSpecificUid] then
+                State.activeStealButtons[State.targetedSpecificUid].BackgroundColor3 = activeTheme and activeTheme.Accent or Color3.fromRGB(92, 170, 255)
+                State.activeStealButtons[State.targetedSpecificUid].Text = "Steal"
+            end
+            State.targetedSpecificUid = nil
+            State.targetedSpecificIsHalloween = false
+            State.targetedSpecificHalloweenEgg = nil
+        end
+        return nil
+    end
+
+    if not getgenv().config.autoHalloweenSteal then return nil end
+
     local _, root = getAliveRig()
     if not root then return nil end
 
@@ -1774,87 +1819,6 @@ function HalloweenStealManager:GrabEgg(targetEgg)
     return isHoldingEgg()
 end
 
-function HalloweenStealManager:TravelGroundTowards(targetPos, stopDist, minDuration, session, requireHolding, targetEgg)
-    local char, root, hum = getAliveRig()
-    if not root or not hum then return false end
-    stopDist = stopDist or 140
-    minDuration = minDuration or 0
-
-    local startPos = root.Position
-    local initFlat = Vector3.new(targetPos.X - startPos.X, 0, targetPos.Z - startPos.Z)
-    local totalFlatDist = initFlat.Magnitude
-    local travelDist = math.max(0, totalFlatDist - stopDist)
-
-    if travelDist <= 5 and minDuration <= 0 then
-        return true
-    end
-
-    local baseSpeed = math.clamp(math.max(getPlayerCurrentSpeed(), 85), 85, 130)
-    local pacedSpeed = (minDuration > 0 and travelDist > 0) and (travelDist / minDuration) or baseSpeed
-    local moveSpeed = math.clamp(math.min(baseSpeed, pacedSpeed), 55, 130)
-    local maxTimeout = math.max(minDuration + 3.0, (travelDist / math.max(moveSpeed, 55)) + 4.0)
-    local startTime = os.clock()
-
-    setCollisions(false)
-    if hum then hum.PlatformStand = false end
-
-    while (os.clock() - startTime) < maxTimeout do
-        Services.RunService.Heartbeat:Wait()
-        if not self.IsActive or session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or isHalloweenMapClosed() then
-            break
-        end
-        if requireHolding and not isHoldingEgg() then
-            break
-        end
-        if not requireHolding and targetEgg and not targetEgg.Parent then
-            break
-        end
-
-        local _, cRoot, cHum = getAliveRig()
-        if not cRoot or not cHum then break end
-
-        setCollisions(false)
-        local curPos = cRoot.Position
-        local flatDiff = Vector3.new(targetPos.X - curPos.X, 0, targetPos.Z - curPos.Z)
-        local curDist = flatDiff.Magnitude
-        local elapsed = os.clock() - startTime
-
-        if curDist <= stopDist and elapsed >= minDuration then
-            cRoot.AssemblyLinearVelocity = Vector3.zero
-            cRoot.AssemblyAngularVelocity = Vector3.zero
-            return true
-        end
-
-        local progress = totalFlatDist > 1 and math.clamp(1 - ((curDist - stopDist) / math.max(travelDist, 1)), 0, 1) or 1
-        local expectedY = startPos.Y + ((targetPos.Y + 1.5) - startPos.Y) * progress
-        local yDiff = expectedY - curPos.Y
-        local velY = cRoot.AssemblyLinearVelocity.Y
-        if math.abs(yDiff) > 1.5 then
-            velY = math.clamp(yDiff * 6.0, -45, 45)
-        end
-
-        if curDist > 4 then
-            local dir = flatDiff.Unit
-            local activeSpeed = (curDist <= stopDist) and 18 or moveSpeed
-            cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * activeSpeed, velY, dir.Z * activeSpeed)
-            if curPos.Y < expectedY - 8 then
-                cRoot.CFrame = CFrame.new(curPos.X, expectedY, curPos.Z) * CFrame.lookAt(Vector3.zero, dir)
-            else
-                cRoot.CFrame = CFrame.new(curPos.X, curPos.Y, curPos.Z) * CFrame.lookAt(Vector3.zero, dir)
-            end
-        else
-            cRoot.AssemblyLinearVelocity = Vector3.new(0, velY, 0)
-        end
-    end
-
-    local _, fRoot = getAliveRig()
-    if fRoot then
-        fRoot.AssemblyLinearVelocity = Vector3.zero
-        fRoot.AssemblyAngularVelocity = Vector3.zero
-    end
-    return (session == self.CurrentSession) and getgenv().config.autoHalloweenSteal and not isHalloweenMapClosed()
-end
-
 function HalloweenStealManager:ExecuteDelivery(session)
     local char, root, hum = getAliveRig()
     if not root or not hum then return false end
@@ -1870,38 +1834,15 @@ function HalloweenStealManager:ExecuteDelivery(session)
         safePadPos = Vector3.new(barrier.Position.X, self.InsideSafePadPos.Y, barrier.Position.Z - 30)
     end
 
-    local carryDist = (Vector3.new(entrancePos.X, 0, entrancePos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
-    local carryArea = HalloweenAreaManager:GetArea(root.Position)
-    local isSwampCarry = (carryArea == HalloweenAreaManager.CanonicalNames.Zone2) or (carryDist >= 380 and carryDist < 850)
-    local isManorCarry = (carryArea == HalloweenAreaManager.CanonicalNames.Zone3) or (carryDist >= 850)
-
-    -- For Haunted Swamps & Abandoned Manor (or far steals), travel back along the ground toward the gate first
-    -- before snapping to the gate checkpoint so the server validates the carry trajectory & duration
-    if isSwampCarry or isManorCarry or carryDist >= 350 then
-        local returnMinTime = isManorCarry and 3.5 or 2.2
-        local ok = self:TravelGroundTowards(entrancePos, 160, returnMinTime, session, true, nil)
-        if not ok or session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or isHalloweenMapClosed() or not isHoldingEgg() then
-            ShieldManager:UnmuteUGI()
-            return false
-        end
-        task.wait(0.06)
-    end
-
-    local _, curRoot, curHum = getAliveRig()
-    if not curRoot or not curHum then
-        ShieldManager:UnmuteUGI()
-        return false
-    end
-    root, hum = curRoot, curHum
-
+    -- Immediately TP to the barrier checkpoint
     root.AssemblyLinearVelocity = Vector3.zero
     root.AssemblyAngularVelocity = Vector3.zero
     root.CFrame = CFrame.new(entrancePos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
 
-    local checkpointDelay = isManorCarry and 3.2 or (isSwampCarry and 2.8 or self.DeliveryDelay)
+    -- Wait at the barrier checkpoint before tweening across to deliver
     local waitStart = os.clock()
-    while os.clock() - waitStart < checkpointDelay do
-        if session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or isHalloweenMapClosed() or not isHoldingEgg() then
+    while os.clock() - waitStart < self.DeliveryDelay do
+        if session ~= self.CurrentSession or not isHalloweenStealEnabled() or not isHoldingEgg() then
             ShieldManager:UnmuteUGI()
             return false
         end
@@ -1910,13 +1851,16 @@ function HalloweenStealManager:ExecuteDelivery(session)
         Services.RunService.Heartbeat:Wait()
     end
 
+    -- Tween across the barrier into the delivery pad
     hum.PlatformStand = true
     local tweenInfo = TweenInfo.new(self.GateCrossDuration, Enum.EasingStyle.Linear)
     local tween = Services.TweenService:Create(root, tweenInfo, {
         CFrame = CFrame.new(safePadPos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
     })
+    self.ActiveTween = tween
     tween:Play()
     tween.Completed:Wait()
+    self.ActiveTween = nil
 
     hum.PlatformStand = false
     root.AssemblyLinearVelocity = Vector3.zero
@@ -1932,7 +1876,7 @@ function HalloweenStealManager:ExecuteDelivery(session)
 end
 
 function HalloweenStealManager:Process()
-    if not getgenv().config.autoHalloweenSteal or isHalloweenMapClosed() then return end
+    if not isHalloweenStealEnabled() then return end
     if self.IsActive then return end
 
     if not HalloweenPortalManager.IsInHalloweenDimension() then
@@ -1948,32 +1892,74 @@ function HalloweenStealManager:Process()
     local session = self.CurrentSession
 
     if isHoldingEgg() then
-        self:ExecuteDelivery(session)
+        local delivered = self:ExecuteDelivery(session)
+        if delivered and isHalloweenStealPanelTarget() then
+            local tUid = State.targetedSpecificUid
+            if tUid and State.activeStealButtons[tUid] then
+                State.activeStealButtons[tUid].BackgroundColor3 = activeTheme and activeTheme.Accent or Color3.fromRGB(92, 170, 255)
+                State.activeStealButtons[tUid].Text = "Steal"
+            end
+            State.targetedSpecificUid = nil
+            State.targetedSpecificIsHalloween = false
+            State.targetedSpecificHalloweenEgg = nil
+        end
     else
         local targetEgg = self:SelectTargetEgg()
         if targetEgg and targetEgg.Parent then
-            local eggPos = targetEgg:GetPivot().Position
-            local dist = (Vector3.new(eggPos.X, 0, eggPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
+            local targetUid = tostring(targetEgg:GetAttribute("HalloweenEggUid") or targetEgg:GetAttribute("Uid") or targetEgg:GetAttribute("EggUid") or targetEgg.Name)
+            local eggPos = targetEgg:IsA("Model") and targetEgg:GetPivot().Position or targetEgg.Position
             local targetArea = HalloweenAreaManager:GetArea(targetEgg)
             local isSwamp = (targetArea == HalloweenAreaManager.CanonicalNames.Zone2)
             local isManor = (targetArea == HalloweenAreaManager.CanonicalNames.Zone3)
 
-            -- If egg is in Haunted Swamps (Zone2), Abandoned Manor (Zone3), or 320+ studs away:
-            -- Travel along the ground until within 140 studs of the egg before snap TP & grab
-            if isSwamp or isManor or dist >= 320 then
-                local minOutboundTime = isManor and 3.8 or (isSwamp and 2.5 or 1.6)
-                local reached = self:TravelGroundTowards(eggPos, 140, minOutboundTime, session, false, targetEgg)
-                if not reached or not targetEgg.Parent or session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or isHalloweenMapClosed() then
-                    self.IsActive = false
-                    setCollisions(true)
-                    return
+            -- Haunted Swamps = 2 seconds fast tween towards target egg
+            -- Abandoned Manor = 3 seconds fast tween towards target egg
+            if isSwamp or isManor then
+                local tweenDuration = isManor and 3.0 or 2.0
+                local startPos = root.Position
+                local flatDiff = Vector3.new(eggPos.X - startPos.X, 0, eggPos.Z - startPos.Z)
+                local flatDist = flatDiff.Magnitude
+                local dir = flatDist > 0.1 and flatDiff.Unit or Vector3.new(0, 0, 1)
+
+                -- Modify speed to be faster during the 2s / 3s pre-TP tween
+                local modifiedSpeed = isManor and 260 or 220
+                local stepDist = math.min(math.max(flatDist - 15, 0), modifiedSpeed * tweenDuration)
+                local alpha = flatDist > 1 and math.clamp(stepDist / flatDist, 0, 1) or 1
+                local targetY = startPos.Y + ((eggPos.Y + 1.5) - startPos.Y) * alpha
+                local tweenGoalPos = Vector3.new(startPos.X + dir.X * stepDist, targetY, startPos.Z + dir.Z * stepDist)
+
+                setCollisions(false)
+                hum.PlatformStand = true
+                local preTween = Services.TweenService:Create(
+                    root,
+                    TweenInfo.new(tweenDuration, Enum.EasingStyle.Linear),
+                    { CFrame = CFrame.new(tweenGoalPos) * CFrame.lookAt(Vector3.zero, dir) }
+                )
+                self.ActiveTween = preTween
+                preTween:Play()
+
+                local tweenStart = os.clock()
+                while (os.clock() - tweenStart) < tweenDuration do
+                    Services.RunService.Heartbeat:Wait()
+                    if not self.IsActive or session ~= self.CurrentSession or not isHalloweenStealEnabled() or not targetEgg.Parent then
+                        pcall(function() preTween:Cancel() end)
+                        self.ActiveTween = nil
+                        hum.PlatformStand = false
+                        setCollisions(true)
+                        self.IsActive = false
+                        return
+                    end
+                    root.AssemblyLinearVelocity = Vector3.zero
                 end
-                task.wait(0.06)
+                pcall(function() preTween:Cancel() end)
+                self.ActiveTween = nil
+                hum.PlatformStand = false
             end
 
-            if targetEgg and targetEgg.Parent and session == self.CurrentSession and not isHalloweenMapClosed() then
-                eggPos = targetEgg:GetPivot().Position
-                -- Snap directly onto the egg
+            -- After the 2s (Swamp) or 3s (Manor) tween (or immediately for Graveyard):
+            -- TP directly onto the egg, grab it, and TP to the barrier checkpoint to deliver
+            if targetEgg and targetEgg.Parent and session == self.CurrentSession and isHalloweenStealEnabled() then
+                eggPos = targetEgg:IsA("Model") and targetEgg:GetPivot().Position or targetEgg.Position
                 local _, curRoot = getAliveRig()
                 if curRoot then
                     curRoot.AssemblyLinearVelocity = Vector3.zero
@@ -1988,8 +1974,19 @@ function HalloweenStealManager:Process()
                     grabbed = self:GrabEgg(targetEgg)
                 end
 
-                if (grabbed or isHoldingEgg()) and session == self.CurrentSession and not isHalloweenMapClosed() then
-                    self:ExecuteDelivery(session)
+                local delivered = false
+                if (grabbed or isHoldingEgg()) and session == self.CurrentSession and isHalloweenStealEnabled() then
+                    delivered = self:ExecuteDelivery(session)
+                end
+
+                if isHalloweenStealPanelTarget() and State.targetedSpecificUid == targetUid and (delivered or not targetEgg.Parent) then
+                    if State.activeStealButtons[targetUid] then
+                        State.activeStealButtons[targetUid].BackgroundColor3 = activeTheme and activeTheme.Accent or Color3.fromRGB(92, 170, 255)
+                        State.activeStealButtons[targetUid].Text = "Steal"
+                    end
+                    State.targetedSpecificUid = nil
+                    State.targetedSpecificIsHalloween = false
+                    State.targetedSpecificHalloweenEgg = nil
                 end
             end
         end
@@ -2001,6 +1998,10 @@ end
 function HalloweenStealManager:Abort()
     self.CurrentSession = self.CurrentSession + 1
     self.IsActive = false
+    if self.ActiveTween then
+        pcall(function() self.ActiveTween:Cancel() end)
+        self.ActiveTween = nil
+    end
     ShieldManager:UnmuteUGI()
     setCollisions(true)
     if PriorityManager then PriorityManager:Release("HalloweenSteal") end
@@ -2068,7 +2069,7 @@ function PriorityManager:IsTaskEnabled(taskName)
     if resolved == "Auto Steal" then
         return isStealEnabled() and not isMapClosed()
     elseif resolved == "Halloween Steal" then
-        return getgenv().config.autoHalloweenSteal == true and not isHalloweenMapClosed()
+        return isHalloweenStealEnabled() and not isHalloweenMapClosed()
     elseif resolved == "Candy Cane Farm" then
         return getgenv().config.autoCandyCane == true and not isHalloweenMapClosed()
     elseif resolved == "Bloom Event" then
@@ -2089,6 +2090,14 @@ function PriorityManager:CanRun(taskName)
 
     local myRank = self:GetRank(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
+
+    -- Manual Steal Panel selection always takes exclusive priority for its dimension
+    if isNormalStealPanelTarget() then
+        return resolved == "Auto Steal"
+    end
+    if isHalloweenStealPanelTarget() then
+        return resolved == "Halloween Steal"
+    end
 
     -- Auto Steal only blocks lower priority tasks when actively stealing or holding an egg
     if resolved ~= "Auto Steal" and resolved ~= "Race" and isStealEnabled() and (isHoldingEgg() or State.isStealingActive) then
@@ -3031,8 +3040,8 @@ getBestEgg = function()
     pcall(function() data = EggState.ReadFieldEggs() end)
     if not data or not data.Records then return nil end
 
-    -- Steal Panel Target Handling (Never clear while actively stealing or holding an egg!)
-    if State.targetedSpecificUid then
+    -- Steal Panel Target Handling (Normal Dimension only; never clear while actively stealing or holding an egg!)
+    if isNormalStealPanelTarget() then
         for uid, record in pairs(data.Records) do
             if uid == State.targetedSpecificUid or record.Uid == State.targetedSpecificUid then
                 record.Uid = record.Uid or uid
@@ -3057,6 +3066,8 @@ getBestEgg = function()
                 State.activeStealButtons[State.targetedSpecificUid].Text = "Steal"
             end
             State.targetedSpecificUid = nil
+            State.targetedSpecificIsHalloween = false
+            State.targetedSpecificHalloweenEgg = nil
         end
     end
 
@@ -3115,7 +3126,19 @@ end
 -- [ WORKER SCHEDULER TASK REGISTRATIONS ]
 -- ==============================================================================
 local function hasHalloweenWork()
-    local wantSteal = getgenv().config.autoHalloweenSteal == true
+    -- If user manually targeted a Normal Dimension egg in the Steal Panel, pause Halloween work so we exit dimension and steal it
+    if isNormalStealPanelTarget() then
+        State.halloweenIdleSince = nil
+        return false
+    end
+
+    -- If user manually targeted a Halloween Dimension egg in the Steal Panel, Halloween has priority work
+    if isHalloweenStealPanelTarget() and not isHalloweenMapClosed() then
+        State.halloweenIdleSince = nil
+        return true
+    end
+
+    local wantSteal = isHalloweenStealEnabled()
     local wantCombat = getgenv().config.autoCandyCane == true
     if not wantSteal and not wantCombat then
         State.halloweenIdleSince = nil
@@ -3176,7 +3199,7 @@ local function hasHalloweenWork()
 end
 
 WorkerScheduler:Register("HalloweenSteal", 0.25, function()
-    if not getgenv().config.autoHalloweenSteal or isHalloweenMapClosed() or not hasHalloweenWork() then
+    if not isHalloweenStealEnabled() or not hasHalloweenWork() then
         PriorityManager:Release("HalloweenSteal")
         return
     end
@@ -3247,13 +3270,15 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     local inHalloween = HalloweenPortalManager.IsInHalloweenDimension()
     local halloweenBusy = hasHalloweenWork()
 
-    -- If Halloween has no work (turned off, map closed, or no matching targets -> idle state),
-    -- and player is inside Halloween dimension, exit back to main world if Auto Steal or Auto Treadmill is enabled
+    -- If Halloween has no work (turned off, map closed, normal Steal Panel target selected, or idle),
+    -- and player is inside Halloween dimension, exit back to main world if Steal Panel target, Auto Steal, or Auto Treadmill is enabled
     if not halloweenBusy and inHalloween then
         PriorityManager:Release("HalloweenSteal")
         PriorityManager:Release("CandyCane")
-        if getgenv().config.autoFarm or getgenv().config.autoTreadmill then
-            State.halloweenIdleCooldownUntil = os.clock() + 8.0
+        if isNormalStealPanelTarget() or getgenv().config.autoFarm or getgenv().config.autoTreadmill then
+            if not isNormalStealPanelTarget() then
+                State.halloweenIdleCooldownUntil = os.clock() + 8.0
+            end
             State.halloweenIdleSince = nil
             HalloweenPortalManager.ExitDimension(5.0)
         end
@@ -4094,21 +4119,42 @@ renderStealPanel = function()
     table.clear(State.activeStealButtons)
 
     local data = EggState and typeof(EggState.ReadFieldEggs) == "function" and EggState.ReadFieldEggs()
-    if not data or not data.Records then return end
+    local records = (data and data.Records) or {}
 
-    if State.targetedSpecificUid and not isHoldingEgg() and not State.isStealingActive then
+    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    local hwFolder = dim and dim:FindFirstChild("WorldEggs")
+
+    if State.targetedSpecificUid and not isHoldingEgg() and not State.isStealingActive and not (HalloweenStealManager and HalloweenStealManager.IsActive) then
         local found = false
-        for uid, record in pairs(data.Records) do
-            if uid == State.targetedSpecificUid or record.Uid == State.targetedSpecificUid then
-                found = true
-                break
+        if State.targetedSpecificIsHalloween then
+            if hwFolder then
+                for _, egg in ipairs(hwFolder:GetChildren()) do
+                    local uid = tostring(egg:GetAttribute("HalloweenEggUid") or egg:GetAttribute("Uid") or egg:GetAttribute("EggUid") or egg.Name)
+                    if uid == tostring(State.targetedSpecificUid) then
+                        found = true
+                        break
+                    end
+                end
+            end
+        else
+            for uid, record in pairs(records) do
+                if uid == State.targetedSpecificUid or record.Uid == State.targetedSpecificUid then
+                    found = true
+                    break
+                end
             end
         end
-        if not found then State.targetedSpecificUid = nil end
+        if not found then
+            State.targetedSpecificUid = nil
+            State.targetedSpecificIsHalloween = false
+            State.targetedSpecificHalloweenEgg = nil
+        end
     end
 
     local eggItems = {}
-    for keyUid, record in pairs(data.Records) do
+
+    -- 1. Normal Dimension Eggs
+    for keyUid, record in pairs(records) do
         local uid = record.Uid or keyUid
         record.Uid = uid
         if not isBlacklisted(uid) and (record.State == "Slot" or record.State == "Dropped" or record.State == nil) then
@@ -4134,8 +4180,50 @@ renderStealPanel = function()
                 Rank = rarityRank,
                 Value = valuePerSec,
                 Icon = iconId,
-                Record = record
+                Record = record,
+                IsHalloween = false,
+                EggInstance = nil
             })
+        end
+    end
+
+    -- 2. Halloween Dimension Eggs
+    if hwFolder then
+        for _, egg in ipairs(hwFolder:GetChildren()) do
+            if egg:IsA("Model") or egg:IsA("BasePart") then
+                local uid = tostring(egg:GetAttribute("HalloweenEggUid") or egg:GetAttribute("Uid") or egg:GetAttribute("EggUid") or egg.Name)
+                if not isBlacklisted(uid) then
+                    local rawName = DynamicRarityResolver:GetEggSourceName(egg)
+                    local rarityName, rarityRank, baseVal, dispName = DynamicRarityResolver:ResolveRarity(egg)
+                    local pData = MasterRegistry.PetDatabase[rawName] or (DynamicRarityResolver.AssetsDirectory and DynamicRarityResolver.AssetsDirectory[rawName]) or {}
+
+                    local scale = tonumber(egg:GetAttribute("AssetScale")) or 1
+                    local factor = scale > 5 and ((scale / 5) ^ 1.2 * 19.637875755794113) or (scale ^ 1.85)
+                    local mutations = egg:GetAttribute("Mutations")
+                    local mutationBonus = (mutations and type(mutations) == "table" and #mutations > 0) and 2.5 or 1
+                    local earningRate = tonumber(baseVal) or tonumber(pData.EarningRate) or 0
+                    local valuePerSec = earningRate * factor * mutationBonus
+
+                    local iconId = tostring(pData.Icon or "")
+                    if iconId ~= "" and tonumber(iconId) then iconId = "rbxassetid://" .. iconId end
+
+                    local hwArea = HalloweenAreaManager:GetArea(egg)
+
+                    table.insert(eggItems, {
+                        Uid = uid,
+                        Name = tostring(dispName or rawName),
+                        Area = "🎃 " .. tostring(hwArea),
+                        Scale = scale,
+                        Rarity = rarityName,
+                        Rank = rarityRank,
+                        Value = valuePerSec,
+                        Icon = iconId,
+                        Record = nil,
+                        IsHalloween = true,
+                        EggInstance = egg
+                    })
+                end
+            end
         end
     end
 
@@ -4211,14 +4299,24 @@ renderStealPanel = function()
         actBtn.MouseButton1Click:Connect(function()
             if State.targetedSpecificUid == item.Uid then
                 State.targetedSpecificUid = nil
+                State.targetedSpecificIsHalloween = false
+                State.targetedSpecificHalloweenEgg = nil
                 abortStealRoutine()
+                if HalloweenStealManager and HalloweenStealManager.Abort then
+                    HalloweenStealManager:Abort()
+                end
                 actBtn.BackgroundColor3 = activeTheme.Accent
                 actBtn.Text = "Steal"
             else
                 if State.isStealingActive then
                     abortStealRoutine()
                 end
+                if HalloweenStealManager and HalloweenStealManager.IsActive then
+                    HalloweenStealManager:Abort()
+                end
                 State.targetedSpecificUid = item.Uid
+                State.targetedSpecificIsHalloween = (item.IsHalloween == true)
+                State.targetedSpecificHalloweenEgg = item.EggInstance
                 State.blacklistedEggs[item.Uid] = nil
                 for u, b in pairs(State.activeStealButtons) do
                     if u == item.Uid then
@@ -5399,7 +5497,7 @@ makeDraggable(tglBtn, tglBtn)
 task.spawn(function()
     while true do
         task.wait(2)
-        if stealPanelPg and stealPanelPg.Visible and State.isOpn and not State.isStealingActive and renderStealPanel then
+        if stealPanelPg and stealPanelPg.Visible and State.isOpn and not State.isStealingActive and not (HalloweenStealManager and HalloweenStealManager.IsActive) and renderStealPanel then
             pcall(renderStealPanel)
         end
     end

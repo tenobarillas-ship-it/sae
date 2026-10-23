@@ -1663,7 +1663,10 @@ HalloweenStealManager = {
     IsActive = false,
     CurrentSession = 0,
     CachedCarryRemote = nil,
+    CachedDropRemote = nil,
     CachedBarrier = nil,
+    LastGrabbedUid = nil,
+    LastGrabbedEgg = nil,
     GateEntrancePos = Vector3.new(-5811.0, -203.6, -7296.0),
     InsideSafePadPos = Vector3.new(-5810.3, -200.1, -7342.9),
     DeliveryDelay = 2.5,
@@ -1691,6 +1694,133 @@ function HalloweenStealManager:GetCarryRemote()
         end
     end
     return nil
+end
+
+function HalloweenStealManager:GetDropRemote()
+    if self.CachedDropRemote and self.CachedDropRemote.Parent then
+        return self.CachedDropRemote
+    end
+    local packages = Services.ReplicatedStorage:FindFirstChild("Packages")
+    local networking = packages and packages:FindFirstChild("Networking")
+    if networking then
+        for _, name in ipairs({
+            "RF/HalloweenDimension/AskDropEgg",
+            "RF/HalloweenDimension/DropEgg",
+            "RE/HalloweenDimension/AskDropEgg",
+            "RE/HalloweenDimension/DropEgg"
+        }) do
+            local r = networking:FindFirstChild(name)
+            if r then
+                self.CachedDropRemote = r
+                return r
+            end
+        end
+        for _, child in ipairs(networking:GetChildren()) do
+            if (child:IsA("RemoteFunction") or child:IsA("RemoteEvent")) and string.find(child.Name, "HalloweenDimension", 1, true) and string.find(string.lower(child.Name), "drop", 1, true) then
+                self.CachedDropRemote = child
+                return child
+            end
+        end
+    end
+    return nil
+end
+
+function HalloweenStealManager:DropEgg()
+    if not isHoldingEgg() then return true end
+
+    -- 1. Try HalloweenDimension specific drop remote if present
+    local dropRemote = self:GetDropRemote()
+    if dropRemote then
+        if dropRemote:IsA("RemoteFunction") then
+            pcall(function() dropRemote:InvokeServer({ Reason = "PlayerRequest" }) end)
+            if isHoldingEgg() then
+                pcall(function() dropRemote:InvokeServer() end)
+            end
+        elseif dropRemote:IsA("RemoteEvent") then
+            pcall(function() dropRemote:FireServer({ Reason = "PlayerRequest" }) end)
+            pcall(function() dropRemote:FireServer() end)
+        end
+    end
+
+    -- 2. Try standard AskFieldEggDrop / EggState.DropFieldEgg
+    if isHoldingEgg() then
+        dropHeldEggDirect()
+    end
+
+    -- 3. Try firing the Drop GUI button if still holding
+    if isHoldingEgg() then
+        for _, gui in ipairs(PlayerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui.Enabled and gui.Name ~= "SyntaxHubGUI" then
+                local btn = gui:FindFirstChild("Drop", true) or (gui.Name == "DropHeldEgg" and gui:FindFirstChildWhichIsA("GuiButton", true))
+                if btn and (btn:IsA("TextButton") or btn:IsA("ImageButton")) then
+                    if typeof(firesignal) == "function" then
+                        pcall(firesignal, btn.Activated)
+                        pcall(firesignal, btn.MouseButton1Click)
+                    elseif typeof(getconnections) == "function" then
+                        for _, c in ipairs(getconnections(btn.Activated)) do pcall(function() c:Fire() end) end
+                        for _, c in ipairs(getconnections(btn.MouseButton1Click)) do pcall(function() c:Fire() end) end
+                    end
+                end
+            end
+        end
+    end
+
+    local deadline = os.clock() + 0.45
+    while os.clock() < deadline and isHoldingEgg() do
+        Services.RunService.Heartbeat:Wait()
+    end
+    return not isHoldingEgg()
+end
+
+function HalloweenStealManager:RegrabAtGate(uid, targetEgg, entrancePos, session)
+    if isHoldingEgg() then return true end
+    local carryRemote = self:GetCarryRemote()
+    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    local folder = dim and dim:FindFirstChild("WorldEggs")
+
+    local deadline = os.clock() + 0.85
+    while os.clock() < deadline and not isHoldingEgg() do
+        if session ~= self.CurrentSession or not isHalloweenStealEnabled() then break end
+
+        local _, cRoot = getAliveRig()
+        if cRoot then
+            cRoot.CFrame = CFrame.new(entrancePos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
+            cRoot.AssemblyLinearVelocity = Vector3.zero
+        end
+
+        if carryRemote and uid then
+            pcall(function() carryRemote:InvokeServer(tostring(uid)) end)
+        end
+
+        if not isHoldingEgg() then
+            local candidate = (targetEgg and targetEgg.Parent) and targetEgg or nil
+            if not candidate and folder then
+                local bestDist = 40
+                for _, egg in ipairs(folder:GetChildren()) do
+                    if egg:IsA("Model") or egg:IsA("BasePart") then
+                        local eUid = egg:GetAttribute("HalloweenEggUid") or egg:GetAttribute("Uid") or egg:GetAttribute("EggUid")
+                        if uid and tostring(eUid) == tostring(uid) then
+                            candidate = egg
+                            break
+                        end
+                        local pos = egg:IsA("Model") and egg:GetPivot().Position or egg.Position
+                        local d = (pos - entrancePos).Magnitude
+                        if d < bestDist then
+                            bestDist = d
+                            candidate = egg
+                        end
+                    end
+                end
+            end
+            if candidate then
+                self:GrabEgg(candidate)
+            end
+        end
+
+        if isHoldingEgg() then break end
+        task.wait(0.05)
+    end
+    return isHoldingEgg()
 end
 
 function HalloweenStealManager:GetBarrierPart()
@@ -1819,9 +1949,12 @@ function HalloweenStealManager:GrabEgg(targetEgg)
     return isHoldingEgg()
 end
 
-function HalloweenStealManager:ExecuteDelivery(session)
+function HalloweenStealManager:ExecuteDelivery(session, uid, targetEgg)
     local char, root, hum = getAliveRig()
     if not root or not hum then return false end
+
+    uid = uid or self.LastGrabbedUid
+    targetEgg = targetEgg or self.LastGrabbedEgg
 
     ShieldManager:MuteUGI()
 
@@ -1834,27 +1967,47 @@ function HalloweenStealManager:ExecuteDelivery(session)
         safePadPos = Vector3.new(barrier.Position.X, self.InsideSafePadPos.Y, barrier.Position.Z - 30)
     end
 
-    -- Immediately TP to the barrier checkpoint
+    -- 1. Immediately TP to the barrier checkpoint
     root.AssemblyLinearVelocity = Vector3.zero
     root.AssemblyAngularVelocity = Vector3.zero
     root.CFrame = CFrame.new(entrancePos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
+    task.wait(0.08)
 
-    -- Wait at the barrier checkpoint before tweening across to deliver
+    if session ~= self.CurrentSession or not isHalloweenStealEnabled() then
+        ShieldManager:UnmuteUGI()
+        return false
+    end
+
+    -- 2. Drop the egg at the barrier checkpoint and immediately regrab it to reset server carry distance
+    self:DropEgg()
+    task.wait(0.06)
+    self:RegrabAtGate(uid, targetEgg, entrancePos, session)
+
+    -- 3. Wait briefly at the barrier checkpoint before tweening across to deliver
     local waitStart = os.clock()
     while os.clock() - waitStart < self.DeliveryDelay do
         if session ~= self.CurrentSession or not isHalloweenStealEnabled() or not isHoldingEgg() then
             ShieldManager:UnmuteUGI()
             return false
         end
-        root.CFrame = CFrame.new(entrancePos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
-        root.AssemblyLinearVelocity = Vector3.zero
+        local _, cRoot = getAliveRig()
+        if cRoot then
+            cRoot.CFrame = CFrame.new(entrancePos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
+            cRoot.AssemblyLinearVelocity = Vector3.zero
+        end
         Services.RunService.Heartbeat:Wait()
     end
 
-    -- Tween across the barrier into the delivery pad
-    hum.PlatformStand = true
+    -- 4. Tween across the barrier into the delivery pad
+    local _, finalRoot, finalHum = getAliveRig()
+    if not finalRoot or not finalHum then
+        ShieldManager:UnmuteUGI()
+        return false
+    end
+
+    finalHum.PlatformStand = true
     local tweenInfo = TweenInfo.new(self.GateCrossDuration, Enum.EasingStyle.Linear)
-    local tween = Services.TweenService:Create(root, tweenInfo, {
+    local tween = Services.TweenService:Create(finalRoot, tweenInfo, {
         CFrame = CFrame.new(safePadPos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
     })
     self.ActiveTween = tween
@@ -1862,8 +2015,8 @@ function HalloweenStealManager:ExecuteDelivery(session)
     tween.Completed:Wait()
     self.ActiveTween = nil
 
-    hum.PlatformStand = false
-    root.AssemblyLinearVelocity = Vector3.zero
+    finalHum.PlatformStand = false
+    finalRoot.AssemblyLinearVelocity = Vector3.zero
     setCollisions(true)
 
     local deadline = os.clock() + self.SecureTimeout
@@ -1892,7 +2045,7 @@ function HalloweenStealManager:Process()
     local session = self.CurrentSession
 
     if isHoldingEgg() then
-        local delivered = self:ExecuteDelivery(session)
+        local delivered = self:ExecuteDelivery(session, self.LastGrabbedUid, self.LastGrabbedEgg)
         if delivered and isHalloweenStealPanelTarget() then
             local tUid = State.targetedSpecificUid
             if tUid and State.activeStealButtons[tUid] then
@@ -1908,86 +2061,40 @@ function HalloweenStealManager:Process()
         if targetEgg and targetEgg.Parent then
             local targetUid = tostring(targetEgg:GetAttribute("HalloweenEggUid") or targetEgg:GetAttribute("Uid") or targetEgg:GetAttribute("EggUid") or targetEgg.Name)
             local eggPos = targetEgg:IsA("Model") and targetEgg:GetPivot().Position or targetEgg.Position
-            local targetArea = HalloweenAreaManager:GetArea(targetEgg)
-            local isSwamp = (targetArea == HalloweenAreaManager.CanonicalNames.Zone2)
-            local isManor = (targetArea == HalloweenAreaManager.CanonicalNames.Zone3)
 
-            -- Haunted Swamps = 2 seconds fast tween towards target egg
-            -- Abandoned Manor = 3 seconds fast tween towards target egg
-            if isSwamp or isManor then
-                local tweenDuration = isManor and 3.0 or 2.0
-                local startPos = root.Position
-                local flatDiff = Vector3.new(eggPos.X - startPos.X, 0, eggPos.Z - startPos.Z)
-                local flatDist = flatDiff.Magnitude
-                local dir = flatDist > 0.1 and flatDiff.Unit or Vector3.new(0, 0, 1)
+            self.LastGrabbedUid = targetUid
+            self.LastGrabbedEgg = targetEgg
 
-                -- Modify speed to be faster during the 2s / 3s pre-TP tween
-                local modifiedSpeed = isManor and 260 or 220
-                local stepDist = math.min(math.max(flatDist - 15, 0), modifiedSpeed * tweenDuration)
-                local alpha = flatDist > 1 and math.clamp(stepDist / flatDist, 0, 1) or 1
-                local targetY = startPos.Y + ((eggPos.Y + 1.5) - startPos.Y) * alpha
-                local tweenGoalPos = Vector3.new(startPos.X + dir.X * stepDist, targetY, startPos.Z + dir.Z * stepDist)
-
-                setCollisions(false)
-                hum.PlatformStand = true
-                local preTween = Services.TweenService:Create(
-                    root,
-                    TweenInfo.new(tweenDuration, Enum.EasingStyle.Linear),
-                    { CFrame = CFrame.new(tweenGoalPos) * CFrame.lookAt(Vector3.zero, dir) }
-                )
-                self.ActiveTween = preTween
-                preTween:Play()
-
-                local tweenStart = os.clock()
-                while (os.clock() - tweenStart) < tweenDuration do
-                    Services.RunService.Heartbeat:Wait()
-                    if not self.IsActive or session ~= self.CurrentSession or not isHalloweenStealEnabled() or not targetEgg.Parent then
-                        pcall(function() preTween:Cancel() end)
-                        self.ActiveTween = nil
-                        hum.PlatformStand = false
-                        setCollisions(true)
-                        self.IsActive = false
-                        return
-                    end
-                    root.AssemblyLinearVelocity = Vector3.zero
-                end
-                pcall(function() preTween:Cancel() end)
-                self.ActiveTween = nil
-                hum.PlatformStand = false
+            -- 1. TP directly onto the egg
+            local _, curRoot = getAliveRig()
+            if curRoot then
+                curRoot.AssemblyLinearVelocity = Vector3.zero
+                curRoot.AssemblyAngularVelocity = Vector3.zero
+                curRoot.CFrame = CFrame.new(Vector3.new(eggPos.X, eggPos.Y + 1.2, eggPos.Z))
+                task.wait(0.06)
             end
 
-            -- After the 2s (Swamp) or 3s (Manor) tween (or immediately for Graveyard):
-            -- TP directly onto the egg, grab it, and TP to the barrier checkpoint to deliver
-            if targetEgg and targetEgg.Parent and session == self.CurrentSession and isHalloweenStealEnabled() then
-                eggPos = targetEgg:IsA("Model") and targetEgg:GetPivot().Position or targetEgg.Position
-                local _, curRoot = getAliveRig()
-                if curRoot then
-                    curRoot.AssemblyLinearVelocity = Vector3.zero
-                    curRoot.AssemblyAngularVelocity = Vector3.zero
-                    curRoot.CFrame = CFrame.new(Vector3.new(eggPos.X, eggPos.Y + 1.2, eggPos.Z))
-                    task.wait(0.06)
-                end
+            -- 2. Grab the egg
+            local grabbed = self:GrabEgg(targetEgg)
+            if not grabbed then
+                task.wait(0.1)
+                grabbed = self:GrabEgg(targetEgg)
+            end
 
-                local grabbed = self:GrabEgg(targetEgg)
-                if not grabbed then
-                    task.wait(0.1)
-                    grabbed = self:GrabEgg(targetEgg)
-                end
+            -- 3. TP to barrier checkpoint -> Drop & Regrab -> Deliver
+            local delivered = false
+            if (grabbed or isHoldingEgg()) and session == self.CurrentSession and isHalloweenStealEnabled() then
+                delivered = self:ExecuteDelivery(session, targetUid, targetEgg)
+            end
 
-                local delivered = false
-                if (grabbed or isHoldingEgg()) and session == self.CurrentSession and isHalloweenStealEnabled() then
-                    delivered = self:ExecuteDelivery(session)
+            if isHalloweenStealPanelTarget() and State.targetedSpecificUid == targetUid and (delivered or not targetEgg.Parent) then
+                if State.activeStealButtons[targetUid] then
+                    State.activeStealButtons[targetUid].BackgroundColor3 = activeTheme and activeTheme.Accent or Color3.fromRGB(92, 170, 255)
+                    State.activeStealButtons[targetUid].Text = "Steal"
                 end
-
-                if isHalloweenStealPanelTarget() and State.targetedSpecificUid == targetUid and (delivered or not targetEgg.Parent) then
-                    if State.activeStealButtons[targetUid] then
-                        State.activeStealButtons[targetUid].BackgroundColor3 = activeTheme and activeTheme.Accent or Color3.fromRGB(92, 170, 255)
-                        State.activeStealButtons[targetUid].Text = "Steal"
-                    end
-                    State.targetedSpecificUid = nil
-                    State.targetedSpecificIsHalloween = false
-                    State.targetedSpecificHalloweenEgg = nil
-                end
+                State.targetedSpecificUid = nil
+                State.targetedSpecificIsHalloween = false
+                State.targetedSpecificHalloweenEgg = nil
             end
         end
     end

@@ -131,7 +131,9 @@ local State = {
     curCat = 1,
     activeOpenedDropdown = nil,
     spSortChoice = "Value (Money/s)",
-    spSortIndex = 1
+    spSortIndex = 1,
+    halloweenIdleSince = nil,
+    halloweenIdleCooldownUntil = 0
 }
 
 local CONFIG = {
@@ -234,6 +236,21 @@ end
 
 local function isMapClosed()
     return isNightPhase() or isWallSealed()
+end
+
+local function isHalloweenMapClosed()
+    if isMapClosed() then return true end
+    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    if dim then
+        local nightWall = dim:FindFirstChild("NightWall", true)
+        if nightWall then
+            local barrier = nightWall:FindFirstChild("Barrier") or nightWall:FindFirstChildWhichIsA("BasePart")
+            if barrier and barrier:IsA("BasePart") and barrier.CanCollide == true then
+                return true
+            end
+        end
+    end
+    return false
 end
 
 local function isStealEnabled()
@@ -1367,7 +1384,7 @@ function HalloweenCombatManager:GetClosestMonster()
 end
 
 function HalloweenCombatManager:Process()
-    if not getgenv().config.autoCandyCane then return end
+    if not getgenv().config.autoCandyCane or isHalloweenMapClosed() then return end
     if not HalloweenPortalManager.IsInHalloweenDimension() then
         HalloweenPortalManager.EnterDimension(5.0)
         return
@@ -1757,6 +1774,87 @@ function HalloweenStealManager:GrabEgg(targetEgg)
     return isHoldingEgg()
 end
 
+function HalloweenStealManager:TravelGroundTowards(targetPos, stopDist, minDuration, session, requireHolding, targetEgg)
+    local char, root, hum = getAliveRig()
+    if not root or not hum then return false end
+    stopDist = stopDist or 140
+    minDuration = minDuration or 0
+
+    local startPos = root.Position
+    local initFlat = Vector3.new(targetPos.X - startPos.X, 0, targetPos.Z - startPos.Z)
+    local totalFlatDist = initFlat.Magnitude
+    local travelDist = math.max(0, totalFlatDist - stopDist)
+
+    if travelDist <= 5 and minDuration <= 0 then
+        return true
+    end
+
+    local baseSpeed = math.clamp(math.max(getPlayerCurrentSpeed(), 85), 85, 130)
+    local pacedSpeed = (minDuration > 0 and travelDist > 0) and (travelDist / minDuration) or baseSpeed
+    local moveSpeed = math.clamp(math.min(baseSpeed, pacedSpeed), 55, 130)
+    local maxTimeout = math.max(minDuration + 3.0, (travelDist / math.max(moveSpeed, 55)) + 4.0)
+    local startTime = os.clock()
+
+    setCollisions(false)
+    if hum then hum.PlatformStand = false end
+
+    while (os.clock() - startTime) < maxTimeout do
+        Services.RunService.Heartbeat:Wait()
+        if not self.IsActive or session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or isHalloweenMapClosed() then
+            break
+        end
+        if requireHolding and not isHoldingEgg() then
+            break
+        end
+        if not requireHolding and targetEgg and not targetEgg.Parent then
+            break
+        end
+
+        local _, cRoot, cHum = getAliveRig()
+        if not cRoot or not cHum then break end
+
+        setCollisions(false)
+        local curPos = cRoot.Position
+        local flatDiff = Vector3.new(targetPos.X - curPos.X, 0, targetPos.Z - curPos.Z)
+        local curDist = flatDiff.Magnitude
+        local elapsed = os.clock() - startTime
+
+        if curDist <= stopDist and elapsed >= minDuration then
+            cRoot.AssemblyLinearVelocity = Vector3.zero
+            cRoot.AssemblyAngularVelocity = Vector3.zero
+            return true
+        end
+
+        local progress = totalFlatDist > 1 and math.clamp(1 - ((curDist - stopDist) / math.max(travelDist, 1)), 0, 1) or 1
+        local expectedY = startPos.Y + ((targetPos.Y + 1.5) - startPos.Y) * progress
+        local yDiff = expectedY - curPos.Y
+        local velY = cRoot.AssemblyLinearVelocity.Y
+        if math.abs(yDiff) > 1.5 then
+            velY = math.clamp(yDiff * 6.0, -45, 45)
+        end
+
+        if curDist > 4 then
+            local dir = flatDiff.Unit
+            local activeSpeed = (curDist <= stopDist) and 18 or moveSpeed
+            cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * activeSpeed, velY, dir.Z * activeSpeed)
+            if curPos.Y < expectedY - 8 then
+                cRoot.CFrame = CFrame.new(curPos.X, expectedY, curPos.Z) * CFrame.lookAt(Vector3.zero, dir)
+            else
+                cRoot.CFrame = CFrame.new(curPos.X, curPos.Y, curPos.Z) * CFrame.lookAt(Vector3.zero, dir)
+            end
+        else
+            cRoot.AssemblyLinearVelocity = Vector3.new(0, velY, 0)
+        end
+    end
+
+    local _, fRoot = getAliveRig()
+    if fRoot then
+        fRoot.AssemblyLinearVelocity = Vector3.zero
+        fRoot.AssemblyAngularVelocity = Vector3.zero
+    end
+    return (session == self.CurrentSession) and getgenv().config.autoHalloweenSteal and not isHalloweenMapClosed()
+end
+
 function HalloweenStealManager:ExecuteDelivery(session)
     local char, root, hum = getAliveRig()
     if not root or not hum then return false end
@@ -1772,13 +1870,38 @@ function HalloweenStealManager:ExecuteDelivery(session)
         safePadPos = Vector3.new(barrier.Position.X, self.InsideSafePadPos.Y, barrier.Position.Z - 30)
     end
 
+    local carryDist = (Vector3.new(entrancePos.X, 0, entrancePos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
+    local carryArea = HalloweenAreaManager:GetArea(root.Position)
+    local isSwampCarry = (carryArea == HalloweenAreaManager.CanonicalNames.Zone2) or (carryDist >= 380 and carryDist < 850)
+    local isManorCarry = (carryArea == HalloweenAreaManager.CanonicalNames.Zone3) or (carryDist >= 850)
+
+    -- For Haunted Swamps & Abandoned Manor (or far steals), travel back along the ground toward the gate first
+    -- before snapping to the gate checkpoint so the server validates the carry trajectory & duration
+    if isSwampCarry or isManorCarry or carryDist >= 350 then
+        local returnMinTime = isManorCarry and 3.5 or 2.2
+        local ok = self:TravelGroundTowards(entrancePos, 160, returnMinTime, session, true, nil)
+        if not ok or session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or isHalloweenMapClosed() or not isHoldingEgg() then
+            ShieldManager:UnmuteUGI()
+            return false
+        end
+        task.wait(0.06)
+    end
+
+    local _, curRoot, curHum = getAliveRig()
+    if not curRoot or not curHum then
+        ShieldManager:UnmuteUGI()
+        return false
+    end
+    root, hum = curRoot, curHum
+
     root.AssemblyLinearVelocity = Vector3.zero
     root.AssemblyAngularVelocity = Vector3.zero
     root.CFrame = CFrame.new(entrancePos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
 
+    local checkpointDelay = isManorCarry and 3.2 or (isSwampCarry and 2.8 or self.DeliveryDelay)
     local waitStart = os.clock()
-    while os.clock() - waitStart < self.DeliveryDelay do
-        if session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or not isHoldingEgg() then
+    while os.clock() - waitStart < checkpointDelay do
+        if session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or isHalloweenMapClosed() or not isHoldingEgg() then
             ShieldManager:UnmuteUGI()
             return false
         end
@@ -1793,16 +1916,11 @@ function HalloweenStealManager:ExecuteDelivery(session)
         CFrame = CFrame.new(safePadPos) * CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
     })
     tween:Play()
-
-    if barrier and typeof(firetouchinterest) == "function" then
-        pcall(firetouchinterest, root, barrier, 0)
-        task.wait(0.02)
-        pcall(firetouchinterest, root, barrier, 1)
-    end
-
     tween.Completed:Wait()
+
     hum.PlatformStand = false
     root.AssemblyLinearVelocity = Vector3.zero
+    setCollisions(true)
 
     local deadline = os.clock() + self.SecureTimeout
     while os.clock() < deadline and isHoldingEgg() do
@@ -1814,7 +1932,7 @@ function HalloweenStealManager:ExecuteDelivery(session)
 end
 
 function HalloweenStealManager:Process()
-    if not getgenv().config.autoHalloweenSteal then return end
+    if not getgenv().config.autoHalloweenSteal or isHalloweenMapClosed() then return end
     if self.IsActive then return end
 
     if not HalloweenPortalManager.IsInHalloweenDimension() then
@@ -1837,51 +1955,46 @@ function HalloweenStealManager:Process()
             local eggPos = targetEgg:GetPivot().Position
             local dist = (Vector3.new(eggPos.X, 0, eggPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
             local targetArea = HalloweenAreaManager:GetArea(targetEgg)
+            local isSwamp = (targetArea == HalloweenAreaManager.CanonicalNames.Zone2)
             local isManor = (targetArea == HalloweenAreaManager.CanonicalNames.Zone3)
 
-            -- If egg is in Abandoned Manor (Zone3) or 500+ studs away:
-            -- Physically travel 200 studs closer first using ground velocity before snap TP
-            if isManor or dist >= 500 then
-                local dir = (Vector3.new(eggPos.X, 0, eggPos.Z) - Vector3.new(root.Position.X, 0, root.Position.Z)).Unit
-                local travelDist = math.min(220, math.max(100, dist - 150))
-                local travelTarget = root.Position + dir * travelDist
-                local travelSpeed = math.max(getPlayerCurrentSpeed(), 32)
-                local startTime = os.clock()
-                local travelTimeout = (travelDist / travelSpeed) + 1.0
-
-                setCollisions(false)
-                while (os.clock() - startTime) < travelTimeout do
-                    Services.RunService.Heartbeat:Wait()
-                    local _, cRoot = getAliveRig()
-                    if not cRoot or not self.IsActive or session ~= self.CurrentSession then break end
-                    local curDist = (Vector3.new(travelTarget.X, 0, travelTarget.Z) - Vector3.new(cRoot.Position.X, 0, cRoot.Position.Z)).Magnitude
-                    if curDist <= 6 then break end
-                    cRoot.AssemblyLinearVelocity = Vector3.new(dir.X * travelSpeed, cRoot.AssemblyLinearVelocity.Y, dir.Z * travelSpeed)
-                    cRoot.CFrame = CFrame.new(cRoot.Position.X, cRoot.Position.Y, cRoot.Position.Z) * CFrame.lookAt(Vector3.zero, dir)
+            -- If egg is in Haunted Swamps (Zone2), Abandoned Manor (Zone3), or 320+ studs away:
+            -- Travel along the ground until within 140 studs of the egg before snap TP & grab
+            if isSwamp or isManor or dist >= 320 then
+                local minOutboundTime = isManor and 3.8 or (isSwamp and 2.5 or 1.6)
+                local reached = self:TravelGroundTowards(eggPos, 140, minOutboundTime, session, false, targetEgg)
+                if not reached or not targetEgg.Parent or session ~= self.CurrentSession or not getgenv().config.autoHalloweenSteal or isHalloweenMapClosed() then
+                    self.IsActive = false
+                    setCollisions(true)
+                    return
                 end
-                task.wait(0.08)
-            end
-
-            -- Snap directly onto the egg
-            local _, curRoot = getAliveRig()
-            if curRoot then
-                curRoot.AssemblyLinearVelocity = Vector3.zero
-                curRoot.AssemblyAngularVelocity = Vector3.zero
-                curRoot.CFrame = CFrame.new(Vector3.new(eggPos.X, eggPos.Y + 1.2, eggPos.Z))
                 task.wait(0.06)
             end
 
-            local grabbed = self:GrabEgg(targetEgg)
-            if not grabbed then
-                task.wait(0.1)
-                grabbed = self:GrabEgg(targetEgg)
-            end
+            if targetEgg and targetEgg.Parent and session == self.CurrentSession and not isHalloweenMapClosed() then
+                eggPos = targetEgg:GetPivot().Position
+                -- Snap directly onto the egg
+                local _, curRoot = getAliveRig()
+                if curRoot then
+                    curRoot.AssemblyLinearVelocity = Vector3.zero
+                    curRoot.AssemblyAngularVelocity = Vector3.zero
+                    curRoot.CFrame = CFrame.new(Vector3.new(eggPos.X, eggPos.Y + 1.2, eggPos.Z))
+                    task.wait(0.06)
+                end
 
-            if (grabbed or isHoldingEgg()) and session == self.CurrentSession then
-                self:ExecuteDelivery(session)
+                local grabbed = self:GrabEgg(targetEgg)
+                if not grabbed then
+                    task.wait(0.1)
+                    grabbed = self:GrabEgg(targetEgg)
+                end
+
+                if (grabbed or isHoldingEgg()) and session == self.CurrentSession and not isHalloweenMapClosed() then
+                    self:ExecuteDelivery(session)
+                end
             end
         end
     end
+    setCollisions(true)
     self.IsActive = false
 end
 
@@ -1889,6 +2002,7 @@ function HalloweenStealManager:Abort()
     self.CurrentSession = self.CurrentSession + 1
     self.IsActive = false
     ShieldManager:UnmuteUGI()
+    setCollisions(true)
     if PriorityManager then PriorityManager:Release("HalloweenSteal") end
     local _, root, hum = getAliveRig()
     if hum then hum.PlatformStand = false end
@@ -1954,9 +2068,9 @@ function PriorityManager:IsTaskEnabled(taskName)
     if resolved == "Auto Steal" then
         return isStealEnabled() and not isMapClosed()
     elseif resolved == "Halloween Steal" then
-        return getgenv().config.autoHalloweenSteal == true
+        return getgenv().config.autoHalloweenSteal == true and not isHalloweenMapClosed()
     elseif resolved == "Candy Cane Farm" then
-        return getgenv().config.autoCandyCane == true
+        return getgenv().config.autoCandyCane == true and not isHalloweenMapClosed()
     elseif resolved == "Bloom Event" then
         return (getgenv().config.autoCatchButterfly == true or getgenv().config.autoWispQuest == true) and not isMapClosed()
     elseif resolved == "Auto Upgrades" then
@@ -3000,13 +3114,82 @@ end
 -- ==============================================================================
 -- [ WORKER SCHEDULER TASK REGISTRATIONS ]
 -- ==============================================================================
+local function hasHalloweenWork()
+    local wantSteal = getgenv().config.autoHalloweenSteal == true
+    local wantCombat = getgenv().config.autoCandyCane == true
+    if not wantSteal and not wantCombat then
+        State.halloweenIdleSince = nil
+        return false
+    end
+
+    -- Never do any Halloween work if the map is closed (gate barrier is up / night phase)
+    if isHalloweenMapClosed() then
+        State.halloweenIdleSince = nil
+        return false
+    end
+
+    if HalloweenStealManager and HalloweenStealManager.IsActive then
+        State.halloweenIdleSince = nil
+        return true
+    end
+
+    local inHalloween = HalloweenPortalManager and HalloweenPortalManager.IsInHalloweenDimension()
+    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+
+    if inHalloween then
+        if isHoldingEgg() then
+            State.halloweenIdleSince = nil
+            return true
+        end
+        local stealTarget = wantSteal and HalloweenStealManager and HalloweenStealManager:SelectTargetEgg() or nil
+        local combatTarget = wantCombat and HalloweenCombatManager and HalloweenCombatManager:GetClosestMonster() or nil
+        if stealTarget ~= nil or combatTarget ~= nil then
+            State.halloweenIdleSince = nil
+            return true
+        end
+        if not State.halloweenIdleSince then
+            State.halloweenIdleSince = os.clock()
+        end
+        if (os.clock() - State.halloweenIdleSince) >= 2.0 then
+            return false
+        end
+        return true
+    else
+        if State.halloweenIdleCooldownUntil and os.clock() < State.halloweenIdleCooldownUntil then
+            return false
+        end
+        if dim then
+            local worldEggs = dim:FindFirstChild("WorldEggs")
+            local monsters = dim:FindFirstChild("Monsters")
+            local hasLoadedEggs = worldEggs and #worldEggs:GetChildren() > 0
+            local hasLoadedMonsters = monsters and #monsters:GetChildren() > 0
+            if (wantSteal and hasLoadedEggs) or (wantCombat and hasLoadedMonsters) then
+                local stealTarget = wantSteal and HalloweenStealManager and HalloweenStealManager:SelectTargetEgg() or nil
+                local combatTarget = wantCombat and HalloweenCombatManager and HalloweenCombatManager:GetClosestMonster() or nil
+                if stealTarget == nil and combatTarget == nil then
+                    return false
+                end
+            end
+        end
+        return true
+    end
+end
+
 WorkerScheduler:Register("HalloweenSteal", 0.25, function()
-    if not getgenv().config.autoHalloweenSteal then return end
+    if not getgenv().config.autoHalloweenSteal or isHalloweenMapClosed() or not hasHalloweenWork() then
+        PriorityManager:Release("HalloweenSteal")
+        return
+    end
     if not PriorityManager:CanRun("HalloweenSteal") then return end
 
     if not HalloweenPortalManager.IsInHalloweenDimension() then
         PriorityManager:Claim("HalloweenSteal")
         HalloweenPortalManager.EnterDimension(5.0)
+        PriorityManager:Release("HalloweenSteal")
+        return
+    end
+
+    if HalloweenStealManager:SelectTargetEgg() == nil and not isHoldingEgg() and not HalloweenStealManager.IsActive then
         PriorityManager:Release("HalloweenSteal")
         return
     end
@@ -3017,12 +3200,20 @@ WorkerScheduler:Register("HalloweenSteal", 0.25, function()
 end)
 
 WorkerScheduler:Register("CandyCaneFarm", 0.05, function()
-    if not getgenv().config.autoCandyCane then return end
+    if not getgenv().config.autoCandyCane or isHalloweenMapClosed() or not hasHalloweenWork() then
+        PriorityManager:Release("CandyCane")
+        return
+    end
     if not PriorityManager:CanRun("CandyCane") then return end
 
     if not HalloweenPortalManager.IsInHalloweenDimension() then
         PriorityManager:Claim("CandyCane")
         HalloweenPortalManager.EnterDimension(5.0)
+        PriorityManager:Release("CandyCane")
+        return
+    end
+
+    if HalloweenCombatManager:GetClosestMonster() == nil then
         PriorityManager:Release("CandyCane")
         return
     end
@@ -3054,11 +3245,18 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     applyGodMode(char)
 
     local inHalloween = HalloweenPortalManager.IsInHalloweenDimension()
-    local hasHalloweenActive = (getgenv().config.autoHalloweenSteal == true or getgenv().config.autoCandyCane == true)
+    local halloweenBusy = hasHalloweenWork()
 
-    -- If Halloween features are turned off, but player is in Halloween dimension, exit back to main world
-    if not hasHalloweenActive and inHalloween and (getgenv().config.autoFarm or getgenv().config.autoTreadmill) then
-        HalloweenPortalManager.ExitDimension(5.0)
+    -- If Halloween has no work (turned off, map closed, or no matching targets -> idle state),
+    -- and player is inside Halloween dimension, exit back to main world if Auto Steal or Auto Treadmill is enabled
+    if not halloweenBusy and inHalloween then
+        PriorityManager:Release("HalloweenSteal")
+        PriorityManager:Release("CandyCane")
+        if getgenv().config.autoFarm or getgenv().config.autoTreadmill then
+            State.halloweenIdleCooldownUntil = os.clock() + 8.0
+            State.halloweenIdleSince = nil
+            HalloweenPortalManager.ExitDimension(5.0)
+        end
         return
     end
 

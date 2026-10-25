@@ -2,7 +2,7 @@
 -- [ SYNTAX HUB - COMPLETE FINAL UNIFIED SCRIPT ]
 -- ==============================================================================
 
-local Services = {
+local Services = setmetatable({
     Players = game:GetService("Players"),
     Workspace = game:GetService("Workspace"),
     RunService = game:GetService("RunService"),
@@ -12,8 +12,21 @@ local Services = {
     SoundService = game:GetService("SoundService"),
     CollectionService = game:GetService("CollectionService"),
     HttpService = game:GetService("HttpService"),
-    UserInputService = game:GetService("UserInputService")
-}
+    UserInputService = game:GetService("UserInputService"),
+    ProximityPromptService = game:GetService("ProximityPromptService"),
+    Lighting = game:GetService("Lighting"),
+    CoreGui = game:GetService("CoreGui"),
+    StarterGui = game:GetService("StarterGui")
+}, {
+    __index = function(self, key)
+        local ok, svc = pcall(game.GetService, game, key)
+        if ok and svc then
+            rawset(self, key, svc)
+            return svc
+        end
+        return nil
+    end
+})
 
 local LocalPlayer = Services.Players.LocalPlayer or Services.Players.PlayerAdded:Wait()
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -3310,12 +3323,17 @@ local MovementManager = {
 }
 
 function MovementManager:Initialize()
-    Services.UserInputService.JumpRequest:Connect(function()
-        if getgenv().config.infiniteJump then
-            local _, _, hum = getAliveRig()
-            if hum then
-                hum:ChangeState(Enum.HumanoidStateType.Jumping)
-            end
+    pcall(function()
+        local uis = Services.UserInputService
+        if uis and uis.JumpRequest then
+            uis.JumpRequest:Connect(function()
+                if getgenv().config.infiniteJump then
+                    local _, _, hum = getAliveRig()
+                    if hum then
+                        hum:ChangeState(Enum.HumanoidStateType.Jumping)
+                    end
+                end
+            end)
         end
     end)
 end
@@ -3339,25 +3357,35 @@ local UtilityManager = {
 }
 
 function UtilityManager:Initialize()
-    Services.ProximityPromptService.PromptShown:Connect(function(prompt)
-        if getgenv().config.instantPrompts and prompt then
-            prompt.HoldDuration = 0
+    pcall(function()
+        local pps = Services.ProximityPromptService
+        if pps and pps.PromptShown then
+            pps.PromptShown:Connect(function(prompt)
+                if getgenv().config.instantPrompts and prompt then
+                    pcall(function() prompt.HoldDuration = 0 end)
+                end
+            end)
         end
     end)
 
     if not self.RejoinConnected then
         self.RejoinConnected = true
         pcall(function()
-            local promptGui = Services.CoreGui:WaitForChild("RobloxPromptGui", 5)
-            if promptGui then
-                local overlay = promptGui:WaitForChild("promptOverlay", 5)
-                if overlay then
-                    overlay.ChildAdded:Connect(function(child)
-                        if getgenv().config.autoRejoin and child.Name == "ErrorPrompt" then
-                            task.wait(1.0)
-                            Services.TeleportService:Teleport(game.PlaceId, LocalPlayer)
-                        end
-                    end)
+            local coreGui = Services.CoreGui
+            if coreGui then
+                local promptGui = coreGui:WaitForChild("RobloxPromptGui", 5)
+                if promptGui then
+                    local overlay = promptGui:WaitForChild("promptOverlay", 5)
+                    if overlay then
+                        overlay.ChildAdded:Connect(function(child)
+                            if getgenv().config.autoRejoin and child.Name == "ErrorPrompt" then
+                                task.wait(1.0)
+                                if Services.TeleportService then
+                                    Services.TeleportService:Teleport(game.PlaceId, LocalPlayer)
+                                end
+                            end
+                        end)
+                    end
                 end
             end
         end)

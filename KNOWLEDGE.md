@@ -143,3 +143,21 @@ The centralized `PriorityManager` oversees task execution, coordinating characte
 | **Ghouler Boss** | `RE/GhostBoss/Suction` | RemoteEvent | Fires vacuum suction at Ghost Boss |
 | **Banjo Cricket**| `RF/BanjoCricket/AskClaim` | RemoteFunction | Claims Banjo Cricket musical buff |
 | **Halloween Buy**| `RF/HalloweenDimension/AskBuyEgg` | RemoteFunction | Buys Halloween event shop eggs |
+
+---
+
+## 6. Known Initialization Issues & Scope Constraints
+
+### "Attempt to index nil with 'PromptShown'" Fix
+- **Symptom:** Script loading halted on line 3342 with `attempt to index nil with 'PromptShown'` inside `UtilityManager:Initialize()`.
+- **Root Cause:** The top-level `Services` dictionary did not define `ProximityPromptService`, causing `Services.ProximityPromptService` to return `nil`.
+- **Permanent Solution:**
+  1. Explicitly registered `ProximityPromptService`, `Lighting`, `CoreGui`, and `StarterGui` in `Services`.
+  2. Implemented a dynamic metatable on `Services` (`__index = function(self, key) ... return game:GetService(key) end`) to guarantee that any present or future Roblox service lookups never return `nil` if the service exists on the engine.
+  3. Wrapped all service-level event connections (`PromptShown`, `JumpRequest`, `ChildAdded`) in `pcall` defensive checks to prevent script halts on restricted or non-standard executor environments.
+
+### Lua 200 Local Variable Limit Audit
+- **Audit Findings:** The entire codebase was parsed and audited via AST analysis:
+  - Top-level chunk local variables: **58** (limit is 200).
+  - Maximum local variables in any nested function/scope: **20** (line 4286).
+  - **Verdict:** The script is nowhere near the 200 local variable threshold.

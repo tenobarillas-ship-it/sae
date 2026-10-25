@@ -161,3 +161,42 @@ The centralized `PriorityManager` oversees task execution, coordinating characte
   - Top-level chunk local variables: **58** (limit is 200).
   - Maximum local variables in any nested function/scope: **20** (line 4286).
   - **Verdict:** The script is nowhere near the 200 local variable threshold.
+
+---
+
+## 7. Auto Steal Hop-Drop-Regrab & Delivery Mechanics
+
+### Egg Dropping Architecture (`dropHeldEggDirect`)
+- **Direct Client Invocation:** The game client relies on `EggState.DropFieldEgg("PlayerRequest")` to update local character carry state, clear attachments, and notify the server.
+- **Remote Function Cascade:** If `EggState` is absent or pending require, falls back to multi-signature invokes on `Remotes.AskFieldEggDrop` (`"PlayerRequest"`, `{ Reason = "PlayerRequest" }`, and `()`).
+- **GUI Trigger Fallback:** If character remains flagged as holding an egg, searches `PlayerGui` for the `DropHeldEgg` / `Drop` button and triggers it via `UniversalCompat.ClickButton`.
+
+### Intermediate Checkpoint Delivery (`performGroundCheckpoint`)
+- **Hop-Drop-Regrab Sequence:** At each checkpoint interval along the lane ($currentX > 1050$), the character settles onto the ground, drops the held egg to reset physics anti-teleport checks, and regrabs it.
+- **Stealth Carry Restoration:** Uses `EggState.CarryFieldEgg(uid)` directly (matching ChiliHub line 17589) followed by `instantGrabAtPosition` as physical fallback, preventing low-speed delivery drops from failing mid-transit.
+
+---
+
+## 8. Complete GUI Structure & Sidebar Navigation
+
+The Liquid Glass UI interface in `qualcom` now mounts all categories across 6 dedicated tabs:
+
+1. **Farm Tab:**
+   - `Stealing & Egg Management` (Auto Steal, Fast Steal, Specific Egg Species multi-dropdown, Steal Missing Index Eggs, Auto Steal Minigame Egg, Auto Capture Event Egg, Take From Holder, Auto Catch Shooting Star, Target Areas, Min Rarity)
+   - `Halloween & Dimension Events` (Halloween Auto Steal, Instant Halloween Steal, Auto Buy Halloween Egg, Monster Farm, Auto Pumpkin, Ghost Dog Quest, Auto Fishing + Luck dropdown, Phantom Express, Vacuum Ghouler Boss, Soul Trading)
+   - `Enchanted & Bloom Events` (Butterfly Bloom, Travel Speed slider, Wisp Companion, Banjo Cricket, Trade Up, Craft Essence, Mutate Eggs)
+   - `Pet & Egg Management` (Auto Place Egg, Placement Order dropdown, Auto Hatch, Equip Best, Sell Pets + Max Rarity, Keep Mutated Pets, Sell Eggs, Fuse Machine, Favorite)
+   - `Training & Movement` (Auto Treadmill, Stay On Treadmill, Admin Treadmill, Speed Boost, WalkSpeed slider 16-300, Infinite Jump)
+   - `Automation Upgrades` (Treadmill Upgrade, Base Expansion, Claim Rewards)
+2. **Visuals Tab:**
+   - `Egg ESP & Filters` (ESP Eggs, Fixed Size, Own Base, Other Base, Min ESP Rarity)
+   - `Entity & Player ESP` (Guard ESP, Player ESP)
+3. **Utility Tab:**
+   - `Character Protections` (Anti-Trap Immunity, Anti-Ragdoll Recovery, Stealth Anti-AFK, Instant Prompts, Auto Rejoin On Disconnect)
+   - `Performance & Optimization` (Optimizer, Disable 3D Render, FPS Cap slider 30-240, Hide Game UI, Farm HUD)
+4. **Priority Tab:**
+   - Reorderable 12-task priority hierarchy with Move Up, Move Down, and Enable/Disable toggles.
+5. **Steal Panel Tab:**
+   - Real-time world egg scanner with individual targeted steal triggers.
+6. **Settings Tab:**
+   - Theme customization and UI transparency slider.

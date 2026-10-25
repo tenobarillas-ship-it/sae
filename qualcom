@@ -1274,10 +1274,28 @@ local function hopOffTreadmill()
 end
 
 local function dropHeldEggDirect()
-    if Remotes.AskFieldEggDrop then
-        pcall(function() Remotes.AskFieldEggDrop:InvokeServer({ Reason = "PlayerRequest" }) end)
-    elseif EggState and typeof(EggState.DropFieldEgg) == "function" then
+    -- 1. Game client EggState direct call (highest priority, matches ChiliHub)
+    if EggState and typeof(EggState.DropFieldEgg) == "function" then
         pcall(function() EggState.DropFieldEgg("PlayerRequest") end)
+    end
+
+    -- 2. Network remote fallbacks
+    if Remotes.AskFieldEggDrop then
+        pcall(function() Remotes.AskFieldEggDrop:InvokeServer("PlayerRequest") end)
+        pcall(function() Remotes.AskFieldEggDrop:InvokeServer({ Reason = "PlayerRequest" }) end)
+        pcall(function() Remotes.AskFieldEggDrop:InvokeServer() end)
+    end
+
+    -- 3. Click GUI Drop button fallback if still holding
+    if isHoldingEgg() then
+        for _, gui in ipairs(PlayerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui.Enabled and gui.Name ~= "SyntaxHubGUI" then
+                local btn = gui:FindFirstChild("Drop", true) or (gui.Name == "DropHeldEgg" and gui:FindFirstChildWhichIsA("GuiButton", true))
+                if btn and (btn:IsA("TextButton") or btn:IsA("ImageButton")) then
+                    UniversalCompat.ClickButton(btn)
+                end
+            end
+        end
     end
 end
 
@@ -4431,22 +4449,30 @@ local function performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
     task.wait(0.06)
 
     dropHeldEggDirect()
-    local dropWait = os.clock() + 0.5
+    local dropWait = os.clock() + 0.6
     while os.clock() < dropWait and isHoldingEgg() do
         if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
         Services.RunService.Heartbeat:Wait()
     end
     task.wait(0.04)
 
-    local eggFloorPos = getPhysicalEggPosition(uid, Vector3.new(currentX, checkY, laneZ))
-    local grabSuccess = false
-    local retryTimeout = os.clock() + 3.5
+    -- Regrab: try EggState.CarryFieldEgg first (ChiliHub line 17589), then physical grab
+    if uid and EggState and typeof(EggState.CarryFieldEgg) == "function" then
+        pcall(function() EggState.CarryFieldEgg(uid) end)
+        task.wait(0.12)
+    end
 
-    while os.clock() < retryTimeout do
-        if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
-        grabSuccess = instantGrabAtPosition(uid, eggFloorPos, sessionId, false)
-        if grabSuccess and isHoldingEgg() then break end
-        Services.RunService.Heartbeat:Wait()
+    if not isHoldingEgg() then
+        local eggFloorPos = getPhysicalEggPosition(uid, Vector3.new(currentX, checkY, laneZ))
+        local grabSuccess = false
+        local retryTimeout = os.clock() + 3.5
+
+        while os.clock() < retryTimeout do
+            if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
+            grabSuccess = instantGrabAtPosition(uid, eggFloorPos, sessionId, false)
+            if grabSuccess and isHoldingEgg() then break end
+            Services.RunService.Heartbeat:Wait()
+        end
     end
     task.wait(0.04)
     return isHoldingEgg()
@@ -4512,12 +4538,13 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
 
         if math.abs(lastCheckpointX - currentX) >= interval and currentX > 1050 then
             lastCheckpointX = currentX
-            -- Settle position momentarily without dropping held egg mid-route
-            pcall(function()
-                cRoot.CFrame = CFrame.new(currentX, groundY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
-                cRoot.AssemblyLinearVelocity = Vector3.zero
-            end)
-            task.wait(CONFIG.HopGap)
+            local ok = performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
+            if not ok and not isHoldingEgg() then
+                ShieldManager:UnmuteUGI()
+                StealUIManager:Unlock()
+                cleanupFlightState()
+                return false
+            end
         end
     end
 
@@ -5158,19 +5185,37 @@ activeTheme = Window:GetActiveTheme()
 -- ==============================================================================
 -- [ TAB 1: FARM CONTROLS & EVENT CATEGORIES ]
 -- ==============================================================================
+local rarityList = {
+    "All", "1 - Common", "2 - Uncommon", "3 - Rare", "4 - Epic",
+    "5 - Legendary", "6 - Mythic", "7 - Cosmic", "8 - Secret",
+    "9 - Eternal", "10 - Divine"
+}
+
+local areaList = {
+    "All", "Forest", "Lake", "Desert", "Jungle", "Snow", 
+    "Volcano", "Abyss Ocean", "Prehistoric", "Cosmic", 
+    "Cherry Blossom", "Titan Temple", "Light Dark", "Enchanted Forest"
+}
+
+local eggSpeciesList = {
+    "All", "Dog", "Cat", "Bunny", "Bear", "Wolf", "Dragon", "Phoenix", 
+    "Unicorn", "Hydra", "Demon", "Angel", "Ghost", "Pumpkin"
+}
+
+-- ==============================================================================
+-- [ TAB 1: FARM CONTROLS & EVENT CATEGORIES ]
+-- ==============================================================================
 local FarmTab = Window:CreateTab("Farm", "Farm")
 
--- Automation Steal Category
-local stealCategory = FarmTab:CreateCategory("Automation Steal", false, 1)
+-- 1. Stealing & Egg Management Category
+local stealCategory = FarmTab:CreateCategory("Stealing & Egg Management", false, 1)
 
 stealCategory:CreateToggle("Auto Steal", "Automatically steal eggs from areas", currentSettings.AutoFarm, function(state)
     getgenv().config.autoFarm = state
     currentSettings.AutoFarm = state
     saveStuff()
     table.clear(State.blacklistedEggs)
-    if not state then
-        abortStealRoutine()
-    end
+    if not state then abortStealRoutine() end
 end)
 
 stealCategory:CreateToggle("Fast Steal", "Only works on Titan temple and above areas.", currentSettings.FastSteal, function(state)
@@ -5180,17 +5225,47 @@ stealCategory:CreateToggle("Fast Steal", "Only works on Titan temple and above a
     if state then
         Window:ShowWarningModal("Fast Steal Warning", "Fast Steal is unreliable. Do not use if you are lagging or AFK farming.")
     else
-        if State.isStealingActive and not isHoldingEgg() then
-            abortStealRoutine()
-        end
+        if State.isStealingActive and not isHoldingEgg() then abortStealRoutine() end
     end
 end)
 
-local areaList = {
-    "All", "Forest", "Lake", "Desert", "Jungle", "Snow", 
-    "Volcano", "Abyss Ocean", "Prehistoric", "Cosmic", 
-    "Cherry Blossom", "Titan Temple", "Light Dark", "Enchanted Forest"
-}
+stealCategory:CreateMultiDropdown("Specific Egg Targeting", "Select specific egg species to target", eggSpeciesList, currentSettings.SpecificTargetEggs or {}, function(selectedMap)
+    getgenv().config.specificTargetEggs = selectedMap
+    currentSettings.SpecificTargetEggs = selectedMap
+    saveStuff()
+    table.clear(State.blacklistedEggs)
+end)
+
+stealCategory:CreateToggle("Steal Missing Index Eggs", "Target eggs not yet unlocked in Codex", currentSettings.StealMissingIndex, function(state)
+    getgenv().config.stealMissingIndex = state
+    currentSettings.StealMissingIndex = state
+    saveStuff()
+    table.clear(State.blacklistedEggs)
+end)
+
+stealCategory:CreateToggle("Auto Steal Minigame Egg", "Automates Red Light Green Light & T-Rex egg steals", currentSettings.AutoStealMinigame, function(state)
+    getgenv().config.autoStealMinigame = state
+    currentSettings.AutoStealMinigame = state
+    saveStuff()
+end)
+
+stealCategory:CreateToggle("Auto Capture Event Egg", "Capture roaming event egg in world", currentSettings.AutoCaptureEventEgg, function(state)
+    getgenv().config.autoCaptureEventEgg = state
+    currentSettings.AutoCaptureEventEgg = state
+    saveStuff()
+end)
+
+stealCategory:CreateToggle("Take From Holder", "Steal roaming event egg directly from holding player", currentSettings.TakeFromHolder, function(state)
+    getgenv().config.takeFromHolder = state
+    currentSettings.TakeFromHolder = state
+    saveStuff()
+end)
+
+stealCategory:CreateToggle("Auto Catch Shooting Star", "Detect and catch falling stars for rare loot", currentSettings.AutoCatchShootingStar, function(state)
+    getgenv().config.autoCatchShootingStar = state
+    currentSettings.AutoCatchShootingStar = state
+    saveStuff()
+end)
 
 stealCategory:CreateMultiDropdown("Target Areas", "Select one or multiple areas (empty = all)", areaList, currentSettings.TargetAreas, function(selectedMap)
     getgenv().config.targetAreas = selectedMap
@@ -5199,12 +5274,6 @@ stealCategory:CreateMultiDropdown("Target Areas", "Select one or multiple areas 
     table.clear(State.blacklistedEggs)
 end)
 
-local rarityList = {
-    "All", "1 - Common", "2 - Uncommon", "3 - Rare", "4 - Epic",
-    "5 - Legendary", "6 - Mythic", "7 - Cosmic", "8 - Secret",
-    "9 - Eternal", "10 - Divine"
-}
-
 stealCategory:CreateDropdown("Min Rarity", "Only steal eggs with rarity >= this", rarityList, currentSettings.MinRarity, function(selected)
     getgenv().config.minRarity = selected
     currentSettings.MinRarity = selected
@@ -5212,36 +5281,29 @@ stealCategory:CreateDropdown("Min Rarity", "Only steal eggs with rarity >= this"
     table.clear(State.blacklistedEggs)
 end)
 
--- Halloween Event Category
-local halloweenCategory = FarmTab:CreateCategory("Halloween Event 2026", false, 2)
+-- 2. Halloween & Dimension Events Category
+local halloweenCategory = FarmTab:CreateCategory("Halloween & Dimension Events", false, 2)
 
--- [TEMPORARILY HIDDEN: Auto Steal Halloween Eggs UI Controls]
-if false then
-    halloweenCategory:CreateToggle("Halloween Auto Steal", "Auto direct-remote grab & gate tween", currentSettings.AutoHalloweenSteal, function(state)
-        getgenv().config.autoHalloweenSteal = state
-        currentSettings.AutoHalloweenSteal = state
-        saveStuff()
-        if not state and HalloweenStealManager and HalloweenStealManager.Abort then
-            HalloweenStealManager:Abort()
-        end
-    end)
+halloweenCategory:CreateToggle("Halloween Auto Steal", "Auto direct-remote grab & gate tween in dimension", currentSettings.AutoHalloweenSteal, function(state)
+    getgenv().config.autoHalloweenSteal = state
+    currentSettings.AutoHalloweenSteal = state
+    saveStuff()
+    if not state and HalloweenStealManager and HalloweenStealManager.Abort then
+        HalloweenStealManager:Abort()
+    end
+end)
 
-    local halloweenAreaList = {
-        "All", "Graveyard", "Haunted Swamps", "Abandoned Manor"
-    }
+halloweenCategory:CreateToggle("Instant Halloween Steal", "High-speed delivery mode for Halloween dimension", currentSettings.InstantHalloweenSteal, function(state)
+    getgenv().config.instantHalloweenSteal = state
+    currentSettings.InstantHalloweenSteal = state
+    saveStuff()
+end)
 
-    halloweenCategory:CreateMultiDropdown("Target Areas", "Select Halloween areas to steal from", halloweenAreaList, currentSettings.HalloweenTargetAreas, function(selectedMap)
-        getgenv().config.halloweenTargetAreas = selectedMap
-        currentSettings.HalloweenTargetAreas = selectedMap
-        saveStuff()
-    end)
-
-    halloweenCategory:CreateDropdown("Min Rarity", "Only steal Halloween eggs with rarity >= this", rarityList, currentSettings.HalloweenMinRarity, function(selected)
-        getgenv().config.halloweenMinRarity = selected
-        currentSettings.HalloweenMinRarity = selected
-        saveStuff()
-    end)
-end
+halloweenCategory:CreateToggle("Auto Buy Halloween Egg", "Automatically buy event eggs when currency is available", currentSettings.AutoBuyHalloweenEgg, function(state)
+    getgenv().config.autoBuyHalloweenEgg = state
+    currentSettings.AutoBuyHalloweenEgg = state
+    saveStuff()
+end)
 
 halloweenCategory:CreateToggle("Candy Cane Monster Farm", "Auto weapon swap combat in dimension", currentSettings.AutoCandyCane, function(state)
     getgenv().config.autoCandyCane = state
@@ -5262,35 +5324,73 @@ halloweenCategory:CreateToggle("Auto Pumpkin", "Auto catch runaway pumpkins & de
     end
 end)
 
--- Automation Treadmill Category
-local treadmillCategory = FarmTab:CreateCategory("Automation Treadmill", false, 3)
-
-treadmillCategory:CreateToggle("Auto Treadmill", "Gain treadmill speed when idle", currentSettings.AutoTreadmill, function(state)
-    getgenv().config.autoTreadmill = state
-    currentSettings.AutoTreadmill = state
-    State.treadmillFailCount = 0
+halloweenCategory:CreateToggle("Auto Ghost Dog Quest", "Automates dialog, diving & surface turn-ins", currentSettings.AutoGhostDog, function(state)
+    getgenv().config.autoGhostDog = state
+    currentSettings.AutoGhostDog = state
     saveStuff()
-    if not state then hopOffTreadmill() end
 end)
 
--- Enchanted / Bloom Event Category
-local bloomCategory = FarmTab:CreateCategory("Enchanted / Bloom Event", false, 4)
+halloweenCategory:CreateToggle("Auto Fishing", "Auto cast and reel fishing rods in dimension", currentSettings.AutoFishing, function(state)
+    getgenv().config.autoFishing = state
+    currentSettings.AutoFishing = state
+    saveStuff()
+end)
 
-bloomCategory:CreateToggle("Auto Bloom Event", "Auto catch butterflies during Bloom Event", currentSettings.AutoCatchButterfly, function(state)
+local luckList = { "Max", "High", "Normal" }
+halloweenCategory:CreateDropdown("Fishing Luck", "Configurable luck parameter for cast", luckList, currentSettings.FishingLuck or "Max", function(val)
+    getgenv().config.fishingLuck = val
+    currentSettings.FishingLuck = val
+    saveStuff()
+end)
+
+halloweenCategory:CreateToggle("Auto Phantom Express", "Boards and farms Ghost Train event", currentSettings.AutoPhantomExpress, function(state)
+    getgenv().config.autoPhantomExpress = state
+    currentSettings.AutoPhantomExpress = state
+    saveStuff()
+end)
+
+halloweenCategory:CreateToggle("Auto Vacuum Ghouler Boss", "Aims vacuum weapon against Ghouler boss", currentSettings.AutoVacuumGhouler, function(state)
+    getgenv().config.autoVacuumGhouler = state
+    currentSettings.AutoVacuumGhouler = state
+    saveStuff()
+end)
+
+halloweenCategory:CreateToggle("Auto Trade Souls", "Exchanges collected souls at event stalls", currentSettings.AutoTradeSouls, function(state)
+    getgenv().config.autoTradeSouls = state
+    currentSettings.AutoTradeSouls = state
+    saveStuff()
+end)
+
+-- 3. Enchanted & Bloom Events Category
+local bloomCategory = FarmTab:CreateCategory("Enchanted & Bloom Events", false, 3)
+
+bloomCategory:CreateToggle("Auto Catch Butterfly", "Auto equip net and fly-catch butterflies", currentSettings.AutoCatchButterfly, function(state)
     getgenv().config.autoCatchButterfly = state
     currentSettings.AutoCatchButterfly = state
     saveStuff()
     if not state then BloomManager.IsBusy = false end
 end)
 
-bloomCategory:CreateToggle("Auto Wisps Quest", "Auto advance & submit Wisp quest eggs", currentSettings.AutoWispQuest, function(state)
+bloomCategory:CreateSlider("Butterfly Speed", "Travel speed while catching butterflies", 100, 600, currentSettings.ButterflySpeed or 320, 10, function(val)
+    getgenv().config.butterflySpeed = val
+    currentSettings.ButterflySpeed = val
+    saveStuff()
+end)
+
+bloomCategory:CreateToggle("Auto Wisp Companion", "Auto deliver requested eggs to companion wisps", currentSettings.AutoWispQuest, function(state)
     getgenv().config.autoWispQuest = state
     currentSettings.AutoWispQuest = state
     saveStuff()
     if not state then BloomManager.IsBusy = false end
 end)
 
-bloomCategory:CreateToggle("Auto Trade Up", "Trade butterflies into higher tiers at machine", currentSettings.AutoTradeUp, function(state)
+bloomCategory:CreateToggle("Auto Banjo Cricket", "Claims Banjo Cricket musical buffs", currentSettings.AutoBanjoCricket, function(state)
+    getgenv().config.autoBanjoCricket = state
+    currentSettings.AutoBanjoCricket = state
+    saveStuff()
+end)
+
+bloomCategory:CreateToggle("Auto Trade Up", "Trade 5 lower-tier butterflies into higher tiers", currentSettings.AutoTradeUp, function(state)
     getgenv().config.autoTradeUp = state
     currentSettings.AutoTradeUp = state
     saveStuff()
@@ -5302,14 +5402,125 @@ bloomCategory:CreateToggle("Auto Craft Essence", "Craft Enchanted Essence at Mut
     saveStuff()
 end)
 
-bloomCategory:CreateSlider("Butterfly Speed", "Travel speed while catching butterflies", 100, 600, currentSettings.ButterflySpeed or 320, 10, function(val)
-    getgenv().config.butterflySpeed = val
-    currentSettings.ButterflySpeed = val
+bloomCategory:CreateToggle("Auto Mutate Eggs", "Apply mutation essence to placed eggs", currentSettings.AutoMutate, function(state)
+    getgenv().config.autoMutate = state
+    currentSettings.AutoMutate = state
     saveStuff()
 end)
 
--- Automation Upgrades Category
-local upgradesCategory = FarmTab:CreateCategory("Automation Upgrades", false, 5)
+-- 4. Pet & Egg Management Category
+local petCategory = FarmTab:CreateCategory("Pet & Egg Management", false, 4)
+
+petCategory:CreateToggle("Auto Place Egg", "Automatically place backpack eggs into pen slots", currentSettings.AutoPlaceEgg, function(state)
+    getgenv().config.autoPlaceEgg = state
+    currentSettings.AutoPlaceEgg = state
+    saveStuff()
+end)
+
+local placeOrders = { "Highest Value", "Biggest", "Backpack Order" }
+petCategory:CreateDropdown("Placement Order", "Sort order for egg placement", placeOrders, currentSettings.PlaceOrder or "Highest Value", function(val)
+    getgenv().config.placeOrder = val
+    currentSettings.PlaceOrder = val
+    saveStuff()
+end)
+
+petCategory:CreateToggle("Auto Hatch", "Automatically hatch eggs from backpack", currentSettings.AutoHatch, function(state)
+    getgenv().config.autoHatch = state
+    currentSettings.AutoHatch = state
+    saveStuff()
+end)
+
+petCategory:CreateToggle("Auto Equip Best", "Equip pets with highest multiplier/speed", currentSettings.AutoEquipBest, function(state)
+    getgenv().config.autoEquipBest = state
+    currentSettings.AutoEquipBest = state
+    saveStuff()
+    if state and Remotes.WearBest then
+        pcall(function() Remotes.WearBest:InvokeServer() end)
+    end
+end)
+
+petCategory:CreateToggle("Auto Sell Pets", "Sell low rarity pets to maintain bag space", currentSettings.AutoSellPets, function(state)
+    getgenv().config.autoSellPets = state
+    currentSettings.AutoSellPets = state
+    saveStuff()
+end)
+
+petCategory:CreateDropdown("Sell Pet Max Rarity", "Sell pets at or below this rarity", rarityList, currentSettings.SellPetMaxRarity or "Common", function(val)
+    getgenv().config.sellPetMaxRarity = val
+    currentSettings.SellPetMaxRarity = val
+    saveStuff()
+end)
+
+petCategory:CreateToggle("Keep Mutated Pets", "Preserve mutated pets from auto-sell", currentSettings.KeepMutatedPets, function(state)
+    getgenv().config.keepMutatedPets = state
+    currentSettings.KeepMutatedPets = state
+    saveStuff()
+end)
+
+petCategory:CreateToggle("Auto Sell Eggs", "Sell unplaced backpack eggs below rarity limit", currentSettings.AutoSellEggs, function(state)
+    getgenv().config.autoSellEggs = state
+    currentSettings.AutoSellEggs = state
+    saveStuff()
+end)
+
+petCategory:CreateToggle("Auto Fuse Machine", "Load 3 matching pets to fuse into higher tiers", currentSettings.AutoFuseMachine, function(state)
+    getgenv().config.autoFuseMachine = state
+    currentSettings.AutoFuseMachine = state
+    saveStuff()
+end)
+
+petCategory:CreateToggle("Auto Favorite", "Lock high rarity & mutated pets", currentSettings.AutoFavorite, function(state)
+    getgenv().config.autoFavorite = state
+    currentSettings.AutoFavorite = state
+    saveStuff()
+end)
+
+-- 5. Training & Movement Category
+local treadmillCategory = FarmTab:CreateCategory("Training & Movement", false, 5)
+
+treadmillCategory:CreateToggle("Auto Treadmill", "Auto walk on plot treadmill for speed training", currentSettings.AutoTreadmill, function(state)
+    getgenv().config.autoTreadmill = state
+    currentSettings.AutoTreadmill = state
+    saveStuff()
+    if not state then hopOffTreadmill() end
+end)
+
+treadmillCategory:CreateToggle("Stay On Treadmill", "Hold exact position while training", currentSettings.StayOnTreadmill, function(state)
+    getgenv().config.stayOnTreadmill = state
+    currentSettings.StayOnTreadmill = state
+    saveStuff()
+end)
+
+treadmillCategory:CreateToggle("Auto Admin Treadmill", "Train on admin/VIP event treadmills", currentSettings.AutoAdminTreadmill, function(state)
+    getgenv().config.autoAdminTreadmill = state
+    currentSettings.AutoAdminTreadmill = state
+    saveStuff()
+end)
+
+treadmillCategory:CreateToggle("Speed Boost", "Enable custom walkspeed multiplier", currentSettings.SpeedBoost, function(state)
+    getgenv().config.speedBoost = state
+    currentSettings.SpeedBoost = state
+    saveStuff()
+    if not state then
+        local _, _, hum = getAliveRig()
+        if hum then hum.WalkSpeed = 16 end
+    end
+end)
+
+treadmillCategory:CreateSlider("WalkSpeed Value", "Multiplier for Speed Boost", 16, 300, currentSettings.BoostSpeed or 150, 5, function(val)
+    getgenv().config.boostSpeed = val
+    currentSettings.BoostSpeed = val
+    saveStuff()
+end)
+
+treadmillCategory:CreateToggle("Infinite Jump", "Jump repeatedly in mid-air", currentSettings.InfiniteJump, function(state)
+    getgenv().config.infiniteJump = state
+    currentSettings.InfiniteJump = state
+    saveStuff()
+end)
+
+-- 6. Automation Upgrades Category
+local upgradesCategory = FarmTab:CreateCategory("Automation Upgrades", false, 6)
 
 upgradesCategory:CreateToggle("Auto Upgrade Treadmill", "Auto buy next tier treadmill", currentSettings.AutoUpgradeTreadmill, function(state)
     getgenv().config.autoUpgradeTreadmill = state
@@ -5329,23 +5540,137 @@ upgradesCategory:CreateToggle("Auto Claim Rewards", "Auto collect offline money 
     saveStuff()
 end)
 
-upgradesCategory:CreateToggle("Auto Equip Best", "Auto equip highest income/speed pets", currentSettings.AutoEquipBest, function(state)
-    getgenv().config.autoEquipBest = state
-    currentSettings.AutoEquipBest = state
+-- ==============================================================================
+-- [ TAB 2: VISUALS & ESP CONTROLS ]
+-- ==============================================================================
+local VisualsTab = Window:CreateTab("Visuals", "Visuals")
+
+local eggEspCategory = VisualsTab:CreateCategory("Egg ESP & Filters", false, 1)
+
+eggEspCategory:CreateToggle("ESP Eggs", "Highlight field eggs with tier color codes", currentSettings.EspEggs, function(state)
+    getgenv().config.espEggs = state
+    currentSettings.EspEggs = state
+    saveStuff()
+    if not state then ESPManager:ClearESP() end
+end)
+
+eggEspCategory:CreateToggle("Fixed Size ESP", "Keep billboard size constant regardless of distance", currentSettings.EspFixedSize, function(state)
+    getgenv().config.espFixedSize = state
+    currentSettings.EspFixedSize = state
     saveStuff()
 end)
 
-upgradesCategory:CreateToggle("Anti-Trap Immunity", "Traps from other players cannot catch you", currentSettings.AntiTrap, function(state)
+eggEspCategory:CreateToggle("Own Base Eggs", "Show ESP for eggs in your own pen", currentSettings.EspOwnBase, function(state)
+    getgenv().config.espOwnBase = state
+    currentSettings.EspOwnBase = state
+    saveStuff()
+end)
+
+eggEspCategory:CreateToggle("Other Base Eggs", "Show ESP for eggs in other players bases", currentSettings.EspOtherBase, function(state)
+    getgenv().config.espOtherBase = state
+    currentSettings.EspOtherBase = state
+    saveStuff()
+end)
+
+eggEspCategory:CreateDropdown("Min ESP Rarity", "Filter out eggs below this rarity", rarityList, currentSettings.EspMinRarity or "All", function(val)
+    getgenv().config.espMinRarity = val
+    currentSettings.EspMinRarity = val
+    saveStuff()
+end)
+
+local entityEspCategory = VisualsTab:CreateCategory("Entity & Player ESP", false, 2)
+
+entityEspCategory:CreateToggle("ESP Guards", "Highlight plot guards with red outlines", currentSettings.EspGuards, function(state)
+    getgenv().config.espGuards = state
+    currentSettings.EspGuards = state
+    saveStuff()
+    if not state then ESPManager:ClearESP() end
+end)
+
+entityEspCategory:CreateToggle("ESP Players", "Highlight nearby players and show distances", currentSettings.EspPlayers, function(state)
+    getgenv().config.espPlayers = state
+    currentSettings.EspPlayers = state
+    saveStuff()
+    if not state then ESPManager:ClearESP() end
+end)
+
+-- ==============================================================================
+-- [ TAB 3: UTILITY & PERFORMANCE CONTROLS ]
+-- ==============================================================================
+local UtilityTab = Window:CreateTab("Utility", "Utility")
+
+local protectCategory = UtilityTab:CreateCategory("Character Protections", false, 1)
+
+protectCategory:CreateToggle("Anti-Trap Immunity", "Traps from other players cannot catch you", currentSettings.AntiTrap, function(state)
     getgenv().config.antiTrap = state
     currentSettings.AntiTrap = state
     CharacterProtection.AntiTrapEnabled = state
     saveStuff()
 end)
 
-upgradesCategory:CreateToggle("Anti-Ragdoll Recovery", "Instant recovery from knockdowns, guards, & bats", currentSettings.AntiRagdoll, function(state)
+protectCategory:CreateToggle("Anti-Ragdoll Recovery", "Instant recovery from knockdowns, guards, & bats", currentSettings.AntiRagdoll, function(state)
     getgenv().config.antiRagdoll = state
     currentSettings.AntiRagdoll = state
     CharacterProtection.AntiRagdollEnabled = state
+    saveStuff()
+end)
+
+protectCategory:CreateToggle("Stealth Anti-AFK", "Disable Idled disconnect connection (100% undetected)", currentSettings.AntiAfk, function(state)
+    getgenv().config.antiAfk = state
+    currentSettings.AntiAfk = state
+    saveStuff()
+end)
+
+protectCategory:CreateToggle("Instant Prompts", "Reduce proximity prompt duration to zero", currentSettings.InstantPrompts, function(state)
+    getgenv().config.instantPrompts = state
+    currentSettings.InstantPrompts = state
+    saveStuff()
+end)
+
+protectCategory:CreateToggle("Auto Rejoin On Disconnect", "Automatically reconnect to server if kicked or disconnected", currentSettings.AutoRejoin, function(state)
+    getgenv().config.autoRejoin = state
+    currentSettings.AutoRejoin = state
+    saveStuff()
+end)
+
+local perfCategory = UtilityTab:CreateCategory("Performance & Optimization", false, 2)
+
+perfCategory:CreateToggle("Optimizer", "Strip shadows, particles, and effects for high FPS", currentSettings.Optimizer, function(state)
+    getgenv().config.optimizer = state
+    currentSettings.Optimizer = state
+    saveStuff()
+    PerformanceManager:ApplyOptimizer(state)
+end)
+
+perfCategory:CreateToggle("Disable 3D Render", "Turn off 3D world rendering for ultra-low CPU/GPU usage", currentSettings.Disable3DRender, function(state)
+    getgenv().config.disable3DRender = state
+    currentSettings.Disable3DRender = state
+    saveStuff()
+    PerformanceManager:Set3DRendering(state)
+end)
+
+perfCategory:CreateSlider("FPS Cap", "Maximum framerate limit", 30, 240, currentSettings.FpsCap or 60, 10, function(val)
+    getgenv().config.fpsCap = val
+    currentSettings.FpsCap = val
+    saveStuff()
+    PerformanceManager:SetFpsCap(val)
+end)
+
+perfCategory:CreateToggle("Hide Game UI", "Hide CoreGui HUD to reduce UI rendering overhead", currentSettings.HideGameUI, function(state)
+    getgenv().config.hideGameUI = state
+    currentSettings.HideGameUI = state
+    saveStuff()
+    pcall(function()
+        local sg = Services.StarterGui
+        if sg then
+            sg:SetCoreGuiEnabled(Enum.CoreGuiType.All, not state)
+        end
+    end)
+end)
+
+perfCategory:CreateToggle("Farm HUD", "Show live on-screen statistics overlay", currentSettings.FarmHUD, function(state)
+    getgenv().config.farmHUD = state
+    currentSettings.FarmHUD = state
     saveStuff()
 end)
 

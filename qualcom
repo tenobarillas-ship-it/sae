@@ -11,7 +11,8 @@ local Services = {
     TeleportService = game:GetService("TeleportService"),
     SoundService = game:GetService("SoundService"),
     CollectionService = game:GetService("CollectionService"),
-    HttpService = game:GetService("HttpService")
+    HttpService = game:GetService("HttpService"),
+    UserInputService = game:GetService("UserInputService")
 }
 
 local LocalPlayer = Services.Players.LocalPlayer or Services.Players.PlayerAdded:Wait()
@@ -30,6 +31,9 @@ local currentSettings = {
     AutoClaimMastery = false,
     AutoCatchButterfly = false,
     AutoWispQuest = false,
+    AutoTradeUp = false,
+    AutoCraftEssence = false,
+    ButterflySpeed = 320,
     TargetAreas = { ["All"] = true },
     MinRarity = "All",
     AutoHalloweenSteal = false,
@@ -107,6 +111,9 @@ getgenv().config.autoUpgradeBase = currentSettings.AutoUpgradeBase
 getgenv().config.autoClaimMastery = currentSettings.AutoClaimMastery
 getgenv().config.autoCatchButterfly = currentSettings.AutoCatchButterfly
 getgenv().config.autoWispQuest = currentSettings.AutoWispQuest
+getgenv().config.autoTradeUp = currentSettings.AutoTradeUp
+getgenv().config.autoCraftEssence = currentSettings.AutoCraftEssence
+getgenv().config.butterflySpeed = currentSettings.ButterflySpeed
 getgenv().config.autoHalloweenSteal = currentSettings.AutoHalloweenSteal
 getgenv().config.halloweenTargetAreas = currentSettings.HalloweenTargetAreas
 getgenv().config.halloweenMinRarity = currentSettings.HalloweenMinRarity
@@ -328,7 +335,11 @@ local Remotes = {
     AskSnapshot = getRemote("RF/EggWorld/AskFieldEggSnapshot"),
     TierRaise = getRemote("RF/Treadmill/AskTierRaise"),
     BaseTierRaise = getRemote("RE/Homestead/AskBaseTierRaise"),
-    AskRigWipe = getRemote("RE/RigSync/AskRigWipe")
+    AskRigWipe = getRemote("RE/RigSync/AskRigWipe"),
+    ClaimNet = getRemote("RF/Butterflies/AskClaimNet"),
+    TradeUp = getRemote("RF/Butterflies/AskTradeUp"),
+    CraftEssence = getRemote("RF/Butterflies/AskCraftEssence"),
+    WispRequest = getRemote("RF/WispCompanion/Request")
 }
 
 local clientFolder = Services.ReplicatedStorage:WaitForChild("Client", 5)
@@ -974,19 +985,71 @@ local function getMinRequiredScore()
 end
 
 -- ==============================================================================
--- [ BLOOM & WISPS EVENT CONTROLLER ]
+-- [ BLOOM & ENCHANTED EVENT CONTROLLER ]
 -- ==============================================================================
-local BloomManager = { IsBusy = false }
+local BloomManager = { 
+    IsBusy = false,
+    NetClaimed = false,
+    LastTradeCraft = 0
+}
+
+local function getButterflyNetTool()
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+    for _, container in ipairs({char, backpack}) do
+        if container then
+            for _, item in ipairs(container:GetChildren()) do
+                if item:IsA("Tool") and (item:GetAttribute("ButterflyNet") == true or tostring(item:GetAttribute("ItemType")) == "ButterflyNet" or item.Name == "Butterfly Net") then
+                    return item
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function ensureButterflyNetEquipped()
+    local tool = getButterflyNetTool()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if tool and char and hum then
+        if tool.Parent ~= char then
+            pcall(function() hum:EquipTool(tool) end)
+        end
+        return tool
+    end
+
+    if Remotes.ClaimNet then
+        pcall(function() Remotes.ClaimNet:InvokeServer() end)
+        task.wait(0.2)
+        local claimed = getButterflyNetTool()
+        if claimed and char and hum and claimed.Parent ~= char then
+            pcall(function() hum:EquipTool(claimed) end)
+        end
+        return claimed
+    end
+    return nil
+end
 
 function BloomManager:GetButterflies()
     local list = {}
-    for _, b in ipairs(Services.CollectionService:GetTagged("Butterfly")) do table.insert(list, b) end
-    for _, b in ipairs(Services.CollectionService:GetTagged("BloomButterfly")) do table.insert(list, b) end
+    local swarm = Services.Workspace:FindFirstChild("ButterflyBloomSwarm")
+    if swarm then
+        for _, b in ipairs(swarm:GetChildren()) do
+            if b:IsA("Model") or b:IsA("BasePart") then
+                table.insert(list, b)
+            end
+        end
+    end
 
-    local bFolder = Services.Workspace:FindFirstChild("Butterflies") or Services.Workspace:FindFirstChild("BloomButterflies")
-    if bFolder then
-        for _, b in ipairs(bFolder:GetChildren()) do
-            if b:IsA("Model") or b:IsA("BasePart") then table.insert(list, b) end
+    if #list == 0 then
+        for _, b in ipairs(Services.CollectionService:GetTagged("Butterfly")) do table.insert(list, b) end
+        for _, b in ipairs(Services.CollectionService:GetTagged("BloomButterfly")) do table.insert(list, b) end
+        local bFolder = Services.Workspace:FindFirstChild("Butterflies") or Services.Workspace:FindFirstChild("BloomButterflies")
+        if bFolder then
+            for _, b in ipairs(bFolder:GetChildren()) do
+                if b:IsA("Model") or b:IsA("BasePart") then table.insert(list, b) end
+            end
         end
     end
     return list
@@ -998,8 +1061,8 @@ function BloomManager:ProcessButterflies(isStealActive, hasEgg)
         return
     end
 
-    local _, root = getAliveRig()
-    if not root then return end
+    local _, root, hum = getAliveRig()
+    if not root or not hum then return end
 
     local butterflies = self:GetButterflies()
     if #butterflies == 0 then
@@ -1009,49 +1072,131 @@ function BloomManager:ProcessButterflies(isStealActive, hasEgg)
 
     self.IsBusy = true
     hopOffTreadmill()
+    ensureButterflyNetEquipped()
+
+    local speed = tonumber(getgenv().config.butterflySpeed) or 320
 
     for _, b in ipairs(butterflies) do
         if not getgenv().config.autoCatchButterfly or isStealActive or isHoldingEgg() or hasEgg then
-            self.IsBusy = false
-            return
+            break
         end
 
         if b and b.Parent then
             local bPos = nil
-            pcall(function() bPos = b:GetPivot().Position end)
+            if b:IsA("BasePart") then
+                bPos = b.Position
+            elseif b:IsA("Model") then
+                local ok, pivot = pcall(b.GetPivot, b)
+                bPos = ok and pivot.Position or (b.PrimaryPart and b.PrimaryPart.Position)
+            end
+
             if bPos then
-                root.CFrame = CFrame.new(bPos)
-                root.AssemblyLinearVelocity = Vector3.zero
+                local delta = bPos - root.Position
+                local timeout = os.clock() + (delta.Magnitude / speed) + 0.8
 
-                local part = b:IsA("BasePart") and b or b:FindFirstChildWhichIsA("BasePart")
-                if part and typeof(firetouchinterest) == "function" then
-                    pcall(firetouchinterest, root, part, 0)
-                    task.wait(0.04)
-                    pcall(firetouchinterest, root, part, 1)
+                while (bPos - root.Position).Magnitude > 4.0 and os.clock() < timeout do
+                    if not getgenv().config.autoCatchButterfly or isStealActive or isHoldingEgg() then break end
+                    local _, curRoot = getAliveRig()
+                    if not curRoot or not b.Parent then break end
+
+                    local diff = bPos - curRoot.Position
+                    local dir = diff.Unit
+                    curRoot.AssemblyLinearVelocity = dir * speed
+                    curRoot.CFrame = CFrame.new(curRoot.Position + dir * math.min(speed * 0.03, diff.Magnitude))
+                    Services.RunService.Heartbeat:Wait()
                 end
 
-                local prompt = b:FindFirstChildWhichIsA("ProximityPrompt", true)
-                if prompt and prompt.Enabled then
-                    if typeof(fireproximityprompt) == "function" then
-                        pcall(fireproximityprompt, prompt)
-                    else
-                        prompt:InputHoldBegin()
-                        prompt:InputHoldEnd()
+                local _, curRoot = getAliveRig()
+                if curRoot and b.Parent then
+                    curRoot.CFrame = CFrame.new(bPos)
+                    curRoot.AssemblyLinearVelocity = Vector3.zero
+
+                    local part = b:IsA("BasePart") and b or b:FindFirstChildWhichIsA("BasePart")
+                    if part and typeof(firetouchinterest) == "function" then
+                        pcall(firetouchinterest, curRoot, part, 0)
+                        task.wait(0.02)
+                        pcall(firetouchinterest, curRoot, part, 1)
                     end
+
+                    local prompt = b:FindFirstChildWhichIsA("ProximityPrompt", true)
+                    if prompt and prompt.Enabled then
+                        prompt.RequiresLineOfSight = false
+                        prompt.MaxActivationDistance = 40
+                        prompt.HoldDuration = 0
+                        if typeof(fireproximityprompt) == "function" then
+                            pcall(fireproximityprompt, prompt, 0)
+                        else
+                            pcall(function()
+                                prompt:InputHoldBegin()
+                                prompt:InputHoldEnd()
+                            end)
+                        end
+                    end
+                    task.wait(0.06)
                 end
-                task.wait(0.15)
             end
         end
     end
+
+    local _, fRoot = getAliveRig()
+    if fRoot then fRoot.AssemblyLinearVelocity = Vector3.zero end
     self.IsBusy = false
 end
 
 function BloomManager:ProcessWisps(isStealActive, hasEgg)
     if not getgenv().config.autoWispQuest or isStealActive or isHoldingEgg() or hasEgg then return end
 
-    local _, root = getAliveRig()
-    if not root then return end
+    local _, root, hum = getAliveRig()
+    if not root or not hum then return end
 
+    local remote = Remotes.WispRequest or getRemote("RF/WispCompanion/Request")
+
+    local save = getSaveData()
+    local wispComp = save and save.WispCompanion
+
+    local accepted = type(wispComp) == "table" and wispComp.Accepted == true
+    local unlocked = type(wispComp) == "table" and wispComp.Unlocked == true
+
+    if remote and not accepted and not unlocked then
+        local world = Services.Workspace:FindFirstChild("World")
+        local spawnPart = world and world:FindFirstChild("Build") and world.Build:FindFirstChild("EnchantedForestZone") and world.Build.EnchantedForestZone:FindFirstChild("WispSpawn")
+        local targetPos = spawnPart and (spawnPart:IsA("BasePart") and spawnPart.Position or spawnPart:GetPivot().Position)
+        if targetPos then
+            self.IsBusy = true
+            hopOffTreadmill()
+            root.CFrame = CFrame.new(targetPos + Vector3.new(0, 2, 0))
+            root.AssemblyLinearVelocity = Vector3.zero
+            task.wait(0.2)
+            pcall(function() remote:InvokeServer("Accept") end)
+            task.wait(0.3)
+            self.IsBusy = false
+            return
+        end
+    elseif remote and accepted and not unlocked then
+        local stage = tonumber(wispComp and wispComp.Stage) or 1
+        pcall(function() remote:InvokeServer("Claim", stage) end)
+
+        if wispComp and wispComp.Returning then
+            pcall(function() remote:InvokeServer("BeginReturn") end)
+            local world = Services.Workspace:FindFirstChild("World")
+            local anchor = world and world:FindFirstChild("Build") and world.Build:FindFirstChild("EnchantedForestZone")
+            local treeAnchor = anchor and anchor:FindFirstChild("Zone13Props") and anchor.Zone13Props:FindFirstChild("EnchantedTree") and anchor.Zone13Props.EnchantedTree:FindFirstChild("WispAnchor")
+            local targetPos = treeAnchor and (treeAnchor:IsA("BasePart") and treeAnchor.Position or treeAnchor:GetPivot().Position)
+            if targetPos then
+                self.IsBusy = true
+                hopOffTreadmill()
+                root.CFrame = CFrame.new(targetPos + Vector3.new(0, 2, 0))
+                root.AssemblyLinearVelocity = Vector3.zero
+                task.wait(0.2)
+                pcall(function() remote:InvokeServer("Return") end)
+                task.wait(0.3)
+                self.IsBusy = false
+                return
+            end
+        end
+    end
+
+    -- Fallback proximity prompt check if remote not found
     local wispPrompt = nil
     for _, obj in ipairs(Services.Workspace:GetDescendants()) do
         if obj:IsA("ProximityPrompt") and (string.find(string.lower(obj.Name), "wisp", 1, true) or string.find(string.lower(obj.ActionText), "wisp", 1, true)) then
@@ -1068,14 +1213,40 @@ function BloomManager:ProcessWisps(isStealActive, hasEgg)
         root.AssemblyLinearVelocity = Vector3.zero
         task.wait(0.1)
 
+        wispPrompt.RequiresLineOfSight = false
+        wispPrompt.MaxActivationDistance = 40
+        wispPrompt.HoldDuration = 0
         if typeof(fireproximityprompt) == "function" then
-            pcall(fireproximityprompt, wispPrompt)
+            pcall(fireproximityprompt, wispPrompt, 0)
         else
-            wispPrompt:InputHoldBegin()
-            wispPrompt:InputHoldEnd()
+            pcall(function()
+                wispPrompt:InputHoldBegin()
+                wispPrompt:InputHoldEnd()
+            end)
         end
-        task.wait(0.4)
+        task.wait(0.3)
         self.IsBusy = false
+    end
+end
+
+function BloomManager:ProcessTradeAndCraft()
+    if os.clock() - self.LastTradeCraft < 2.0 then return end
+    self.LastTradeCraft = os.clock()
+
+    if getgenv().config.autoTradeUp then
+        local tradeRemote = Remotes.TradeUp or getRemote("RF/Butterflies/AskTradeUp")
+        if tradeRemote then
+            for _, tier in ipairs({"Green", "Blue", "Purple"}) do
+                pcall(function() tradeRemote:InvokeServer("ButterflyMachine", tier) end)
+            end
+        end
+    end
+
+    if getgenv().config.autoCraftEssence then
+        local craftRemote = Remotes.CraftEssence or getRemote("RF/Butterflies/AskCraftEssence")
+        if craftRemote then
+            pcall(function() craftRemote:InvokeServer("MutationShrine") end)
+        end
     end
 end
 
@@ -2570,45 +2741,49 @@ end
 -- [ AUTOMATED UPGRADE CONTROLLERS ]
 -- ==============================================================================
 local function tryUpgradeTreadmill()
-    if not Remotes.TierRaise or not isAtBasePlot() or os.clock() < State.treadmillUpgradeCooldown then return end
+    if not Remotes.TierRaise or os.clock() < State.treadmillUpgradeCooldown then return end
     State.treadmillUpgradeCooldown = os.clock() + 5
+
+    local save = getSaveData()
+    local myMoney = math.max(getPlayerMoney(), tonumber(save and save.Money) or 0)
 
     local dataFolder = Services.ReplicatedStorage:FindFirstChild("Data")
     local treadmillsModule = dataFolder and dataFolder:FindFirstChild("Treadmills")
     if not treadmillsModule then return end
 
     local ok, tData = pcall(require, treadmillsModule)
-    if not ok or type(tData) ~= "table" or type(tData.Directory) ~= "table" then return end
+    if not ok or type(tData) ~= "table" then return end
 
-    local sorted = {}
-    for name, cfg in pairs(tData.Directory) do
-        table.insert(sorted, { Name = tostring(name), Price = tonumber(cfg.Price) or 0 })
-    end
-    table.sort(sorted, function(a, b) return a.Price < b.Price end)
-
-    local save = getSaveData()
-    local myMoney = getPlayerMoney()
-    local currentTierName = save and (save.EquippedTreadmill or save.Treadmill)
-
-    local nextTier = nil
-    if not currentTierName then
-        nextTier = sorted[1]
-    else
-        for i, item in ipairs(sorted) do
-            if item.Name == currentTierName and sorted[i + 1] then
-                nextTier = sorted[i + 1]
-                break
+    local currentLevel = tonumber(save and save.TreadmillUpgradeLevel) or 0
+    if type(tData.GetByUpgradeLevel) == "function" then
+        local okNext, nextTier = pcall(tData.GetByUpgradeLevel, currentLevel + 1)
+        if okNext and type(nextTier) == "table" then
+            local nextId = nextTier._id
+            local price = tonumber(nextTier.Price) or math.huge
+            if type(nextId) == "string" and myMoney >= price then
+                pcall(function() Remotes.TierRaise:InvokeServer(nextId) end)
+                return
             end
         end
     end
 
-    if nextTier and myMoney >= nextTier.Price then
-        pcall(function() Remotes.TierRaise:InvokeServer(nextTier.Name) end)
+    if type(tData.Directory) == "table" then
+        local sorted = {}
+        for name, cfg in pairs(tData.Directory) do
+            table.insert(sorted, { Name = tostring(name), Price = tonumber(cfg.Price) or 0, Level = tonumber(cfg.UpgradeLevel) or tonumber(cfg.Level) or 0 })
+        end
+        table.sort(sorted, function(a, b) return a.Price < b.Price end)
+        for _, item in ipairs(sorted) do
+            if item.Level > currentLevel and myMoney >= item.Price then
+                pcall(function() Remotes.TierRaise:InvokeServer(item.Name) end)
+                break
+            end
+        end
     end
 end
 
 local function tryUpgradeBase()
-    if not Remotes.BaseTierRaise or not isAtBasePlot() or os.clock() < State.baseUpgradeCooldown then return end
+    if not Remotes.BaseTierRaise or os.clock() < State.baseUpgradeCooldown then return end
     State.baseUpgradeCooldown = os.clock() + 5
 
     local dataFolder = Services.ReplicatedStorage:FindFirstChild("Data")
@@ -2619,16 +2794,14 @@ local function tryUpgradeBase()
     if not ok or type(bData) ~= "table" or type(bData.BASES) ~= "table" then return end
 
     local save = getSaveData()
-    if not save then return end
-
-    local currentLevel = tonumber(save.BaseUpgradeLevel) or 0
+    local currentLevel = tonumber(save and save.BaseUpgradeLevel) or 0
     local maxLevel = type(bData.GetMaxBaseLevel) == "function" and tonumber(bData.GetMaxBaseLevel()) or #bData.BASES
 
     if currentLevel >= maxLevel then return end
 
     local nextTier = bData.BASES[currentLevel + 1]
     local cost = nextTier and (tonumber(nextTier.Cost) or tonumber(nextTier.Price)) or nil
-    local myMoney = getPlayerMoney()
+    local myMoney = math.max(getPlayerMoney(), tonumber(save and save.Money) or 0)
 
     if cost and myMoney >= cost then
         pcall(function() Remotes.BaseTierRaise:FireServer() end)
@@ -3190,7 +3363,9 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
     if not root then return false end
 
     local boundaryX = CONFIG.BoundaryCheckpointX
-    local stepSize = CONFIG.HopDistance
+    local playerSpeed = getPlayerCurrentSpeed()
+    local baseStep = CONFIG.HopDistance
+    local stepSize = (playerSpeed < 100) and math.max(34, playerSpeed * 0.45) or math.min(baseStep, math.max(60, playerSpeed * 0.75))
     local interval = CONFIG.CheckpointInterval
     local safeTarget = CONFIG.BaseDropPosition
 
@@ -3234,10 +3409,11 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
 
         if pulled then
             CONFIG.HopGap = math.min(CONFIG.HopGapMax, CONFIG.HopGap + 0.02)
+            stepSize = math.max(34, stepSize * 0.75)
             task.wait(0.1)
         else
             currentX = nextX
-            CONFIG.HopGap = math.max(CONFIG.HopGapMin, CONFIG.HopGap - 0.01)
+            CONFIG.HopGap = math.max(CONFIG.HopGapMin, CONFIG.HopGap - 0.005)
         end
 
         if math.abs(lastCheckpointX - currentX) >= interval and currentX > 1050 then
@@ -3669,6 +3845,7 @@ WorkerScheduler:Register("EventsCombat", 0.35, function()
     if not hasEgg and PriorityManager:CanRun("Bloom") then
         BloomManager:ProcessButterflies(State.isStealingActive, hasEgg)
         BloomManager:ProcessWisps(State.isStealingActive, hasEgg)
+        BloomManager:ProcessTradeAndCraft()
     end
 end)
 
@@ -3860,8 +4037,19 @@ WorkerScheduler:Start()
 -- [ GUI BUILDER & CONTROLS SETUP - SYNTAXIS iOS SIDEBAR SYSTEM ]
 -- ==============================================================================
 local safeContainer = nil
-if gethui then pcall(function() safeContainer = gethui() end) end
-if not safeContainer then safeContainer = LocalPlayer:WaitForChild("PlayerGui") end
+if typeof(gethui) == "function" then
+    local ok, res = pcall(gethui)
+    if ok and typeof(res) == "Instance" then safeContainer = res end
+end
+if not safeContainer then
+    pcall(function()
+        local cg = game:GetService("CoreGui")
+        if cg and typeof(cg) == "Instance" then safeContainer = cg end
+    end)
+end
+if not safeContainer then
+    safeContainer = LocalPlayer:WaitForChild("PlayerGui")
+end
 
 pcall(function()
     for _, child in ipairs(safeContainer:GetChildren()) do
@@ -5954,6 +6142,24 @@ createToggle("Auto Wisps Quest", "Auto advance & submit Wisp quest eggs", curren
     if not state then BloomManager.IsBusy = false end
 end)
 
+createToggle("Auto Trade Up", "Trade butterflies into higher tiers at machine", currentSettings.AutoTradeUp, bloomCategory, 3, function(state)
+    getgenv().config.autoTradeUp = state
+    currentSettings.AutoTradeUp = state
+    saveStuff()
+end)
+
+createToggle("Auto Craft Essence", "Craft Enchanted Essence at Mutation Shrine", currentSettings.AutoCraftEssence, bloomCategory, 4, function(state)
+    getgenv().config.autoCraftEssence = state
+    currentSettings.AutoCraftEssence = state
+    saveStuff()
+end)
+
+createSlider("Butterfly Speed", "Travel speed while catching butterflies", 100, 600, currentSettings.ButterflySpeed or 320, 10, bloomCategory, 5, function(val)
+    getgenv().config.butterflySpeed = val
+    currentSettings.ButterflySpeed = val
+    saveStuff()
+end)
+
 local upgradesCategory = createCategory("Automation Upgrades", farmPg, 5, false)
 
 createToggle("Auto Upgrade Treadmill", "Auto buy next tier treadmill", currentSettings.AutoUpgradeTreadmill, upgradesCategory, 1, function(state)
@@ -6259,18 +6465,36 @@ end)
 
 local function makeDraggable(handle, target)
     if not handle or not target then return end
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+
     handle.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            local startPos = target.Position
-            local startInputPos = input.Position
+            dragging = true
+            dragStart = input.Position
+            startPos = target.Position
 
-            local moveConn
-            moveConn = input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.Change then
-                    local delta = input.Position - startInputPos
-                    target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-                elseif input.UserInputState == Enum.UserInputState.End then
-                    moveConn:Disconnect()
+            local changedConn
+            local endedConn
+
+            changedConn = Services.UserInputService.InputChanged:Connect(function(moveInput)
+                if dragging and (moveInput.UserInputType == Enum.UserInputType.MouseMovement or moveInput.UserInputType == Enum.UserInputType.Touch) then
+                    local delta = moveInput.Position - dragStart
+                    target.Position = UDim2.new(
+                        startPos.X.Scale,
+                        startPos.X.Offset + delta.X,
+                        startPos.Y.Scale,
+                        startPos.Y.Offset + delta.Y
+                    )
+                end
+            end)
+
+            endedConn = Services.UserInputService.InputEnded:Connect(function(endInput)
+                if endInput.UserInputType == Enum.UserInputType.MouseButton1 or endInput.UserInputType == Enum.UserInputType.Touch then
+                    dragging = false
+                    if changedConn then changedConn:Disconnect() end
+                    if endedConn then endedConn:Disconnect() end
                 end
             end)
         end

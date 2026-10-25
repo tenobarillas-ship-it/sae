@@ -29,6 +29,34 @@
 
 ## 2. Platform & Executor Compatibility Rules
 
+### Platform Breakdown: Delta Mobile vs PC Executors
+- **Delta Mobile (Android):** Employs full C-level closures for `fireproximityprompt(prompt, 0)` and `firetouchinterest(part1, part2, 0/1)`. Exploit hooks operate in a unified 32/64-bit ARM environment.
+- **PC Executors (Wave, Synapse Z, Solara, Celery, Macsploit, etc.):**
+  - **Proximity Prompts:** Often lack `fireproximityprompt` completely (`nil`), or require 2 arguments (`prompt, 0`), or throw exceptions if called without `pcall`. Direct engine calls (`prompt:InputHoldBegin()`) fail unless `RequiresLineOfSight` is disabled, distance checks pass, and hold durations are allowed at least 1-2 frames.
+  - **Touch Interests:** Many budget PC executors have stubbed `firetouchinterest` implementations that do not replicate `Touched` events across distances. If a character floats above a monster (e.g. 14 studs), `firetouchinterest` does not hit unless the weapon handle physically intersects the target's bounding box.
+  - **Button Clicks:** `getconnections` is frequently stubbed or lacks `:Fire()`. Official Roblox `VirtualInputManager` is required as a rock-solid engine fallback.
+
+### Universal Compatibility & Polyfill Layer (`UniversalCompat`)
+All script automation modules now route through `UniversalCompat` rather than making raw executor calls:
+
+1. **`UniversalCompat.FireProximityPrompt(prompt)`**:
+   - Zeroes `prompt.HoldDuration = 0`, disables `prompt.RequiresLineOfSight = false`, and increases `prompt.MaxActivationDistance = 50`.
+   - Method A: Multi-signature pcall cascade: `fireproximityprompt(prompt, 0)`, `(prompt, 1)`, and `(prompt)`.
+   - Method B: Safe engine hold: `prompt:InputHoldBegin()`, yields `task.wait(0.03)`, and `prompt:InputHoldEnd()`.
+   - Method C: `VirtualInputManager:SendKeyEvent` simulation fallback using the prompt's `KeyboardKeyCode`.
+
+2. **`UniversalCompat.FireTouch(part1, part2)`**:
+   - Method A: Dual-stage `firetouchinterest(part1, part2, 0)` $\rightarrow$ `wait` $\rightarrow$ `(part1, part2, 1)`.
+   - Method B: Forces `CanTouch = true` on both parts.
+   - For Monster Combat on PC: Sweeps weapon handle momentarily into `monsterPart.CFrame` during attack strokes so the engine fires physical contact even without executor touch injection.
+   - For Portals: Applies slight downward velocity (`Vector3.new(0, -0.5, 0)`) when snapping to portal CFrames so physics broadphase collision registers the step.
+
+3. **`UniversalCompat.ClickButton(btn)`**:
+   - Tri-level click dispatcher:
+     1. `firesignal(btn.Activated)` / `firesignal(btn.MouseButton1Click)`
+     2. `getconnections` loop invoking `c:Fire()` or `c.Function()`
+     3. `VirtualInputManager:SendMouseButtonEvent` at button center (`AbsolutePosition + AbsoluteSize/2`).
+
 ### Safe Container Parenting (`GetSafeParent`)
 Roblox executors have varying levels of GUI protection and context permissions:
 1. **Delta Mobile (Android):** Uses `gethui()`.
@@ -98,11 +126,11 @@ Roblox executors have varying levels of GUI protection and context permissions:
 - **Target Areas:** Forest, Lake, Desert, Jungle, Snow, Volcano, Abyss Ocean, Prehistoric, Cosmic, Cherry Blossom, Titan Temple, Light Dark, Enchanted Forest.
 - **Fast Steal:** Applicable to Titan Temple, Light Dark, and Enchanted Forest. Uses direct approach and instant proximity prompt triggers.
 - **Low-Speed Dynamic Hopping (`executeCheckpointedHopsHome`):**
-  - Uses discrete altitude hops (`FlightAltitude = 71.5`, `HopAltitude = 71.8`).
+  - Uses discrete altitude hops (`groundY = CONFIG.GroundAltitude + 1.0`).
   - Hop step size dynamically scales with player WalkSpeed:
-    $$\text{stepSize} = \text{math.clamp}(\text{speed} \times \text{dt} \times \text{factor}, \text{minStep}, \text{maxStep})$$
-  - Prevents server-side rewind rollbacks on lower-speed players.
-  - Final drop position: `Vector3.new(528.7, 70.8, -364.1)`.
+    $$\text{stepSize} = (\text{playerSpeed} < 100) \mathbin{?} \max(34, \text{playerSpeed} \times 0.45) : \min(\text{baseStep}, \max(60, \text{playerSpeed} \times 0.75))$$
+  - **Critical Fix:** Dropped the destructive mid-route checkpoint dropping (`performGroundCheckpoint`). Previously, dropping the egg mid-route caused low-speed players and PC executors to fail the prompt re-grab and lose eggs on the conveyor floor. Continuous dynamic hopping now maintains egg possession throughout the entire transit and drops the egg **strictly** upon reaching the home base plot drop target (`CONFIG.BaseDropPosition`).
+  - Server rollback detection: if `pulled` occurs, immediately slows step size and increases `HopGap` to seamlessly recover.
 
 ### 2. Steal Panel
 - Live scanner showing: Name, Rarity tier, Value ($/s), Scale multiplier, and Area.
@@ -180,3 +208,4 @@ Roblox executors have varying levels of GUI protection and context permissions:
 | `8bd71b0eaaad4a598be3528dc100fd2277caaa05` | `fix: auto upgrades, bloom event, low-speed delivery...` | Removed plot check from upgrades, fixed Net claim |
 | `bca0e25f55161b1200145862f52d09c883589bf2` | `refactor(gui): integrate modular GUILib...` | Decoupled ~2,500 lines of GUI boilerplate into GUILib |
 | `e762c321a1038d6e7e3beb8b6b3185e009277f1e` | `fix(priority): resolve task hierarchy preemption...` | Complete priority preemption & bidirectional supervisor |
+| `bc4ca8615c00b895b78cbe33f89ea12dd7b9d10a` | `fix(executor-compat): universal polyfills for PC...` | UniversalCompat layer for PC executors (prompts, touch, buttons) & safe low-speed delivery |

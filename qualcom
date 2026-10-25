@@ -151,6 +151,10 @@ local currentSettings = {
     AutoUpgradeTreadmill = false,
     AutoUpgradeBase = false,
     AutoClaimMastery = false,
+    AutoEquipBest = false,
+    AntiTrap = true,
+    AntiRagdoll = true,
+    AntiAfk = true,
     AutoCatchButterfly = false,
     AutoWispQuest = false,
     AutoTradeUp = false,
@@ -230,6 +234,10 @@ getgenv().config.autoTreadmill = currentSettings.AutoTreadmill
 getgenv().config.autoUpgradeTreadmill = currentSettings.AutoUpgradeTreadmill
 getgenv().config.autoUpgradeBase = currentSettings.AutoUpgradeBase
 getgenv().config.autoClaimMastery = currentSettings.AutoClaimMastery
+getgenv().config.autoEquipBest = currentSettings.AutoEquipBest
+getgenv().config.antiTrap = currentSettings.AntiTrap
+getgenv().config.antiRagdoll = currentSettings.AntiRagdoll
+getgenv().config.antiAfk = currentSettings.AntiAfk
 getgenv().config.autoCatchButterfly = currentSettings.AutoCatchButterfly
 getgenv().config.autoWispQuest = currentSettings.AutoWispQuest
 getgenv().config.autoTradeUp = currentSettings.AutoTradeUp
@@ -460,8 +468,114 @@ local Remotes = {
     ClaimNet = getRemote("RF/Butterflies/AskClaimNet"),
     TradeUp = getRemote("RF/Butterflies/AskTradeUp"),
     CraftEssence = getRemote("RF/Butterflies/AskCraftEssence"),
-    WispRequest = getRemote("RF/WispCompanion/Request")
+    WispRequest = getRemote("RF/WispCompanion/Request"),
+    WearBest = getRemote("RF/Haul/WearBest"),
+    AskPlaceEgg = getRemote("RF/EggWorld/AskPlaceEgg"),
+    AskRedeemAll = getRemote("RF/Codex/AskRedeemAll"),
+    AskRedeemLimitedEgg = getRemote("RF/Codex/AskRedeemLimitedEgg"),
+    AskCollectOffline = getRemote("RF/AwayEarnings/AskCollect"),
+    AskUseMutationConsumable = getRemote("RF/BossMastery/AskUseMutationConsumable")
 }
+
+
+-- ==============================================================================
+-- [ CHARACTER PROTECTION & IMMUNITY SYSTEM ]
+-- Adopted & optimized from ChiliHub: Anti-Trap, Anti-Ragdoll, Anti-AFK
+-- ==============================================================================
+
+local CharacterProtection = {
+    AntiTrapEnabled = true,
+    AntiRagdollEnabled = true,
+    AntiAfkEnabled = true
+}
+
+function CharacterProtection:Init()
+    -- 1. Anti-AFK (Disables Roblox 20-minute idle disconnect)
+    pcall(function()
+        if typeof(getconnections) == "function" then
+            for _, conn in ipairs(getconnections(LocalPlayer.Idled)) do
+                pcall(function() conn:Disable() end)
+            end
+        end
+        LocalPlayer.Idled:Connect(function()
+            if self.AntiAfkEnabled then
+                pcall(function()
+                    local vu = game:GetService("VirtualUser")
+                    vu:CaptureController()
+                    vu:ClickButton2(Vector2.new())
+                end)
+            end
+        end)
+    end)
+
+    -- 2. Anti-Trap (Neutralizes enemy & other players' traps via CollectionService)
+    local function neutralizeTrap(trap)
+        if not trap or not trap.Parent then return end
+        local owner = trap:GetAttribute("Owner")
+        if owner and tostring(owner) == LocalPlayer.Name then return end -- Keep player's own traps working!
+
+        for _, part in ipairs(trap:GetDescendants()) do
+            if part:IsA("BasePart") then
+                pcall(function() part.CanTouch = false end)
+            end
+        end
+        if trap:IsA("BasePart") then
+            pcall(function() trap.CanTouch = false end)
+        end
+        trap.DescendantAdded:Connect(function(part)
+            if part:IsA("BasePart") then
+                pcall(function() part.CanTouch = false end)
+            end
+        end)
+    end
+
+    pcall(function()
+        for _, trap in ipairs(Services.CollectionService:GetTagged("PlacedTrap")) do
+            neutralizeTrap(trap)
+        end
+        Services.CollectionService:GetInstanceAddedSignal("PlacedTrap"):Connect(function(trap)
+            task.defer(neutralizeTrap, trap)
+        end)
+    end)
+
+    -- 3. Anti-Ragdoll (Instantly recovers character if knocked down by monsters, guards, or bats)
+    local ragdollStateTypes = {
+        [Enum.HumanoidStateType.Physics] = true,
+        [Enum.HumanoidStateType.Ragdoll] = true,
+        [Enum.HumanoidStateType.FallingDown] = true
+    }
+    local ragdollConstraintClasses = {
+        BallSocketConstraint = true,
+        NoCollisionConstraint = true,
+        HingeConstraint = true
+    }
+
+    local function setupCharAntiRagdoll(char)
+        if not char then return end
+        local hum = char:WaitForChild("Humanoid", 5)
+        if not hum then return end
+
+        hum.StateChanged:Connect(function(_, newState)
+            if self.AntiRagdollEnabled and ragdollStateTypes[newState] then
+                pcall(function()
+                    for _, desc in ipairs(char:GetDescendants()) do
+                        if ragdollConstraintClasses[desc.ClassName] then
+                            pcall(function() desc:Destroy() end)
+                        elseif desc:IsA("Motor6D") and not desc.Enabled then
+                            desc.Enabled = true
+                        end
+                    end
+                    hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+                end)
+            end
+        end)
+    end
+
+    if LocalPlayer.Character then setupCharAntiRagdoll(LocalPlayer.Character) end
+    LocalPlayer.CharacterAdded:Connect(setupCharAntiRagdoll)
+end
+
+CharacterProtection:Init()
 
 local clientFolder = Services.ReplicatedStorage:WaitForChild("Client", 5)
 local eggStateModule = clientFolder and clientFolder:WaitForChild("EggState", 5)
@@ -2983,6 +3097,34 @@ local function tryUpgradeTreadmill()
     end
 end
 
+local function tryClaimRewards()
+    if not getgenv().config.autoClaimMastery then return end
+    if Remotes.AskCollectOffline then
+        task.spawn(function()
+            pcall(function() Remotes.AskCollectOffline:InvokeServer({ Kind = "Claim" }) end)
+        end)
+    end
+    if Remotes.AskRedeemAll then
+        task.spawn(function()
+            pcall(function() Remotes.AskRedeemAll:InvokeServer() end)
+        end)
+    end
+    if Remotes.AskRedeemLimitedEgg then
+        task.spawn(function()
+            pcall(function() Remotes.AskRedeemLimitedEgg:InvokeServer() end)
+        end)
+    end
+end
+
+local function tryEquipBest()
+    if not getgenv().config.autoEquipBest then return end
+    if Remotes.WearBest then
+        task.spawn(function()
+            pcall(function() Remotes.WearBest:InvokeServer() end)
+        end)
+    end
+end
+
 local function tryUpgradeBase()
     if not Remotes.BaseTierRaise or os.clock() < State.baseUpgradeCooldown then return end
     State.baseUpgradeCooldown = os.clock() + 5
@@ -3941,6 +4083,8 @@ WorkerScheduler:Register("AutoUpgrades", 6.0, function()
     if not PriorityManager:CanRun("Upgrades") then return end
     if getgenv().config.autoUpgradeTreadmill then tryUpgradeTreadmill() end
     if getgenv().config.autoUpgradeBase then tryUpgradeBase() end
+    if getgenv().config.autoClaimMastery then tryClaimRewards() end
+    if getgenv().config.autoEquipBest then tryEquipBest() end
 end)
 
 WorkerScheduler:Register("EventsCombat", 0.35, function()
@@ -4334,6 +4478,32 @@ end)
 upgradesCategory:CreateToggle("Auto Upgrade Base", "Auto buy homestead base expansion", currentSettings.AutoUpgradeBase, function(state)
     getgenv().config.autoUpgradeBase = state
     currentSettings.AutoUpgradeBase = state
+    saveStuff()
+end)
+
+upgradesCategory:CreateToggle("Auto Claim Rewards", "Auto collect offline money & codex/index rewards", currentSettings.AutoClaimMastery, function(state)
+    getgenv().config.autoClaimMastery = state
+    currentSettings.AutoClaimMastery = state
+    saveStuff()
+end)
+
+upgradesCategory:CreateToggle("Auto Equip Best", "Auto equip highest income/speed pets", currentSettings.AutoEquipBest, function(state)
+    getgenv().config.autoEquipBest = state
+    currentSettings.AutoEquipBest = state
+    saveStuff()
+end)
+
+upgradesCategory:CreateToggle("Anti-Trap Immunity", "Traps from other players cannot catch you", currentSettings.AntiTrap, function(state)
+    getgenv().config.antiTrap = state
+    currentSettings.AntiTrap = state
+    CharacterProtection.AntiTrapEnabled = state
+    saveStuff()
+end)
+
+upgradesCategory:CreateToggle("Anti-Ragdoll Recovery", "Instant recovery from knockdowns, guards, & bats", currentSettings.AntiRagdoll, function(state)
+    getgenv().config.antiRagdoll = state
+    currentSettings.AntiRagdoll = state
+    CharacterProtection.AntiRagdollEnabled = state
     saveStuff()
 end)
 

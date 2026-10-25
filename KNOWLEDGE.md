@@ -1,6 +1,6 @@
 # SYNTAXIS HUB (`qualcom`) - PROJECT KNOWLEDGE BASE
 
-> **Notice:** This document is the living knowledge repository for the Syntaxis Hub project. It contains all architectural decisions, reverse-engineered game mechanics, remote endpoints, algorithm designs, executor compatibility rules, priority systems, and known issues. **Every time new knowledge is discovered, implemented, or refactored, this document must be updated.**
+> **Notice:** This document is the living knowledge repository for the Syntaxis Hub project. It contains all architectural decisions, reverse-engineered game mechanics, remote endpoints, algorithm designs, executor compatibility rules, priority systems, anti-cheat mitigations, and known issues. **Every time new knowledge is discovered, implemented, or refactored, this document must be updated.**
 
 ---
 
@@ -15,11 +15,13 @@
     ```
 - **Modular GUI Library:** [`tenobarillas-ship-it/GUILib`](https://github.com/tenobarillas-ship-it/GUILib)
   - Liquid Glass iOS-inspired UI library cleanly separated from the automation logic.
-  - Modular distribution: `src/` (`Window`, `Components`, `Panels`, `Themes`, `Animations`, `Utils`, `Modals`).
+  - Sidebar uses a dynamic `ScrollingFrame` with automatic Y-resizing to accommodate unlimited categories and tabs without layout clipping or text overlap.
   - Bundled single-request loader: `SyntaxisLib.lua`.
     ```lua
     local SyntaxisLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/tenobarillas-ship-it/GUILib/main/SyntaxisLib.lua"))()
     ```
+- **Reference Friend Codebase (Private):** [`tenobarillas-ship-it/friend`](https://github.com/tenobarillas-ship-it/friend)
+  - Reference script: `chilihubstealanegg.lua` (1.8MB reverse-engineered codebase containing all game remote APIs, event logic, and asset definitions).
 
 ### Local Workspace & Sync
 - **Local Workspace Working File:** `qualcom_clean.lua`
@@ -27,204 +29,117 @@
 
 ---
 
-## 2. Platform & Executor Compatibility Rules
+## 2. Anti-Cheat (UGI) Mitigation & Executor Stealth
 
-### Platform Breakdown: Delta Mobile vs PC Executors
-- **Delta Mobile (Android):** Employs full C-level closures for `fireproximityprompt(prompt, 0)` and `firetouchinterest(part1, part2, 0/1)`. Exploit hooks operate in a unified 32/64-bit ARM environment.
-- **PC Executors (Wave, Synapse Z, Solara, Celery, Macsploit, etc.):**
-  - **Proximity Prompts:** Often lack `fireproximityprompt` completely (`nil`), or require 2 arguments (`prompt, 0`), or throw exceptions if called without `pcall`. Direct engine calls (`prompt:InputHoldBegin()`) fail unless `RequiresLineOfSight` is disabled, distance checks pass, and hold durations are allowed at least 1-2 frames.
-  - **Touch Interests:** Many budget PC executors have stubbed `firetouchinterest` implementations that do not replicate `Touched` events across distances. If a character floats above a monster (e.g. 14 studs), `firetouchinterest` does not hit unless the weapon handle physically intersects the target's bounding box.
-  - **Button Clicks:** `getconnections` is frequently stubbed or lacks `:Fire()`. Official Roblox `VirtualInputManager` is required as a rock-solid engine fallback.
-
-### Universal Compatibility & Polyfill Layer (`UniversalCompat`)
-All script automation modules now route through `UniversalCompat` rather than making raw executor calls:
-
-1. **`UniversalCompat.FireProximityPrompt(prompt)`**:
-   - Zeroes `prompt.HoldDuration = 0`, disables `prompt.RequiresLineOfSight = false`, and increases `prompt.MaxActivationDistance = 50`.
-   - Method A: Multi-signature pcall cascade: `fireproximityprompt(prompt, 0)`, `(prompt, 1)`, and `(prompt)`.
-   - Method B: Safe engine hold: `prompt:InputHoldBegin()`, yields `task.wait(0.03)`, and `prompt:InputHoldEnd()`.
-   - Method C: `VirtualInputManager:SendKeyEvent` simulation fallback using the prompt's `KeyboardKeyCode`.
-
-2. **`UniversalCompat.FireTouch(part1, part2)`**:
-   - Method A: Dual-stage `firetouchinterest(part1, part2, 0)` $\rightarrow$ `wait` $\rightarrow$ `(part1, part2, 1)`.
-   - Method B: Forces `CanTouch = true` on both parts.
-   - For Monster Combat on PC: Sweeps weapon handle momentarily into `monsterPart.CFrame` during attack strokes so the engine fires physical contact even without executor touch injection.
-   - For Portals: Applies slight downward velocity (`Vector3.new(0, -0.5, 0)`) when snapping to portal CFrames so physics broadphase collision registers the step.
-
-3. **`UniversalCompat.ClickButton(btn)`**:
-   - Tri-level click dispatcher:
-     1. `firesignal(btn.Activated)` / `firesignal(btn.MouseButton1Click)`
-     2. `getconnections` loop invoking `c:Fire()` or `c.Function()`
-     3. `VirtualInputManager:SendMouseButtonEvent` at button center (`AbsolutePosition + AbsoluteSize/2`).
-
-### Safe Container Parenting (`GetSafeParent`)
-Roblox executors have varying levels of GUI protection and context permissions:
-1. **Delta Mobile (Android):** Uses `gethui()`.
-2. **PC Executors (Synapse Z, Wave, Macsploit, etc.):** `gethui()` might not return a valid container or may throw an error.
-3. **Fallback Order:**
-   ```lua
-   local safeContainer = nil
-   if typeof(gethui) == "function" then
-       local ok, res = pcall(gethui)
-       if ok and typeof(res) == "Instance" then safeContainer = res end
-   end
-   if not safeContainer then
-       pcall(function()
-           local cg = game:GetService("CoreGui")
-           if cg and typeof(cg) == "Instance" then safeContainer = cg end
-       end)
-   end
-   if not safeContainer then
-       safeContainer = LocalPlayer:WaitForChild("PlayerGui")
-   end
-   ```
-
-### Screen-Wide Mouse & Touch Dragging (`MakeDraggable`)
-- **Bug identified:** Using `handle.InputChanged` drops the drag on PC if the user moves the mouse faster than the GUI element's frame update.
-- **Rule:** Always attach `UserInputService.InputChanged` and `UserInputService.InputEnded` dynamically when drag starts, and disconnect on drag end.
+### Anti-Cheat Heuristics in Steal An Egg
+The game employs a custom client-side anti-cheat ("UGI") in tandem with CoreScript integrity monitoring:
+1. **Synthetic Input Hook Detection:**
+   - Calling `VirtualUser:CaptureController()` or `VirtualUser:ClickButton2()` emits synthetic input signals from the engine root that immediately trigger detection heuristics.
+   - Calling `VirtualInputManager:SendKeyEvent()` or `SendMouseButtonEvent()` generates synthetic OS-level keystroke packets that flag the client and cause an immediate kick (`"You were kicked from this experience"`).
+2. **Stealth Remediation Implemented:**
+   - **Zero Synthetic Input Services:** Completely removed all references to `VirtualUser` and `VirtualInputManager` from `qualcom` and `UniversalCompat`.
+   - **Connection-Only Anti-AFK:** Disables idle disconnection purely by iterating `getconnections(LocalPlayer.Idled)` and calling `conn:Disable()` or disconnecting the handler. This operates entirely within memory without firing synthetic inputs, remaining 100% undetected.
+   - **Stealth Proximity Prompts:** Proximity prompts are triggered via standard `fireproximityprompt(prompt, 0)` with zero hold duration and line-of-sight bypass, avoiding synthetic keypress injection.
 
 ---
 
-## 3. Remote Endpoints & Game Systems
+## 3. The 12-Task Priority Arbitrator & Preemption Hierarchy
 
-| Category | Remote / Method | Type | Function / Description |
+The centralized `PriorityManager` oversees task execution, coordinating character movement, dimension routing, and mutual exclusion. Lower-priority tasks yield immediately to higher-priority tasks and resume when work completes.
+
+### Canonical Priority Hierarchy (Configurable in UI)
+1. **Auto Steal:** Stealing eggs from normal world base plots or minigames (RLGL / T-Rex).
+2. **Shooting Star:** Navigating to and collecting falling stars (`RE/ShootingStar/Catch`).
+3. **Event Egg Capture:** Grabbing and holding roaming world event eggs at a safe altitude.
+4. **Candy Cane Farm:** Monster combat and candy collection in the Halloween Dimension.
+5. **Auto Pumpkin:** Catching runaway pumpkins and depositing them at the dimension altar.
+6. **Ghost Dog & Fishing:** Automating Ghost Dog quest dialogue/dive/claim and auto-fishing.
+7. **Phantom Express:** Boarding the Ghost Train event and aiming suction at the Ghouler boss.
+8. **Enchanted / Bloom Event:** Butterfly catching, wisp companion deliveries, and mutation crafting.
+9. **Auto Place Egg:** Placing backpack eggs into empty base plot pen slots with sorting/filters.
+10. **Auto Hatch & Fuse:** Auto-hatching inventory eggs, loading triplets into the fusion machine, and auto-selling.
+11. **Auto Upgrades:** Homestead base expansions, treadmill tier upgrades, and codex rewards.
+12. **Auto Treadmill:** Training walkspeed on plot or admin/VIP treadmills.
+
+### Dynamic Preemption Mechanism
+- Every frame/heartbeat, `PriorityManager:GetTopWantedTask()` evaluates the enabled state (`IsTaskEnabled`) and availability of work (`HasWork`) from rank 1 down to 12.
+- If Auto Steal is active, it claims character movement.
+- When Auto Steal finishes or enters idle cooldown, lower tasks like Candy Cane Farm or Auto Treadmill immediately take control.
+- If a higher-priority task (e.g., Shooting Star or Auto Steal) detects work, lower tasks yield (`Abort()` / `Release()`) and hand off character movement cleanly.
+
+---
+
+## 4. Automation Features & Architecture
+
+### Stealing & Egg Management
+- **Specific Egg Targeting:** Multi-select dropdown filtering by egg species.
+- **Steal Missing Index Eggs:** Queries player's Codex/Index to prioritize stealing uncollected egg breeds.
+- **Auto Steal Minigame Egg:** Automates egg stealing during Red Light Green Light (`workspace:GetAttribute("Event_RedLightGreenLight")`) and T-Rex Run.
+- **Auto Capture Event Egg / Take From Holder:** Grabs roaming world event eggs; if held by another player, snatches it and elevates to a safe holding altitude (+45 studs) to prevent counter-steals.
+- **Auto Catch Shooting Star:** Detects `workspace.ShootingStarClient` spawns, tweens to the landing zone, and claims falling stars via `RE/ShootingStar/Catch`.
+
+### Halloween & Dimension Events
+- **Halloween Auto Steal & Instant Steal:** Remote-assisted and teleport-assisted stealing inside the Halloween Dimension.
+- **Auto Buy Halloween Dimension Egg:** Purchases event eggs when soul/candy thresholds are reached.
+- **Ghost Dog Quest:** Automates Ghost Dog NPC interaction: `RF/GhostDogQuest/Talk`, `Dive`, `Surface`, and `Claim`.
+- **Auto Fishing:** Auto-casts (`RF/Fishing/Cast`) with configurable luck settings ("Max", "High", "Normal") and reels in catches (`RF/Fishing/Reel`).
+- **Phantom Express & Ghouler Boss:** Boards the ghost train (`RF/TrainEvent/Action` -> `Board`) and targets the Ghouler boss with suction weaponry (`RE/GhostBoss/Suction`).
+- **Auto Trade Souls:** Trades collected souls at dimension stalls.
+
+### Pet & Egg Placement Management
+- **Auto Place Egg:** Scans base plot pen grids and backpack eggs. Places eggs into empty slots (`RF/EggWorld/AskPlaceEgg`) sorted by Highest Value, Biggest, or Backpack Order, with minimum income thresholds.
+- **Auto Hatch:** Automatically hatches inventory eggs (`RF/EggWorld/AskHatch`).
+- **Egg Predictor:** Analyzes drop tables and rolls to anticipate hatching odds.
+- **Auto Equip Best:** Calls `RF/Haul/WearBest` to recalculate and equip top income/multiplier pets.
+- **Auto Sell Pets & Eggs:** Automatically liquidates low-rarity pets and unplaced eggs below configured rarity limits, while strictly preserving mutated pets (`KeepMutatedPets`) and favorites.
+- **Auto Fuse Machine:** Loads triplets of identical pets into the fusion station (`RF/Fusery/LoadPet`), confirms briefing, begins fusion, and reveals the upgraded pet (`RF/Fusery/FinishReveal`).
+- **Auto Favorite:** Locks high-tier and mutated pets via `RE/PetSatchel/WriteFavourite` to prevent accidental loss.
+
+### Training & Movement
+- **Auto Treadmill & Stay On Treadmill:** Automatically navigates to player's plot treadmill and enforces position on the belt to prevent falling off.
+- **Auto Use Admin Treadmill:** Finds and trains on restricted admin/VIP event treadmills for accelerated walkspeed gain.
+- **Speed Boost:** Safely multiplies Humanoid WalkSpeed with slider configuration (16-300).
+- **Infinite Jump:** Listens to `UserInputService.JumpRequest` and sets state to `Jumping` repeatedly.
+
+### Character Protections & Utilities
+- **Anti-Trap Immunity:** Scans `CollectionService:GetTagged("PlacedTrap")` and evades player-placed traps.
+- **Anti-Ragdoll Recovery:** Detects ragdoll/knockdown states and immediately resets humanoid state to normal standing/running.
+- **Stealth Anti-AFK:** Disconnects `LocalPlayer.Idled` connection without any synthetic input, completely safe from anti-cheat kicks.
+- **Instant Prompts:** Eliminates ProximityPrompt hold duration across all interactables.
+- **Auto Rejoin On Disconnect:** Listens to CoreGui error prompts and reconnects automatically upon server disconnect.
+
+### Visuals & Optimization
+- **Egg ESP:** Renders color-coded BillboardGuis showing Egg Name, Distance, and Income Value with filters for Fixed Size, Own Base, Other Base, and Min Rarity.
+- **Guard & Player ESP:** Highlights base guards and nearby players with distance indicators.
+- **Optimizer:** Strips shadows, particles, fog, and complex textures to maximize FPS.
+- **Disable 3D Render:** Pauses 3D world rendering via `RunService:Set3dRenderingEnabled(false)` for ultra-low background CPU/GPU usage.
+- **FPS Cap:** Configurable framerate limit via `setfpscap`.
+- **Hide Game UI:** Toggles CoreGui elements to reduce HUD rendering overhead.
+- **Farm HUD:** Sleek draggable live stats overlay displaying current task, eggs stolen, earnings, and FPS.
+
+---
+
+## 5. Reverse-Engineered Remotes & Endpoints Directory
+
+| Category | Remote Endpoint | Type | Purpose |
 | :--- | :--- | :--- | :--- |
-| **Egg State** | `EggState.ReadFieldEggs()` | Function | Returns live table of eggs on conveyor belts with Uid, State, AssetCategory, AreaId, AssetScale, Mutations, BoundsCFrame |
-| **Treadmill** | `Remotes.AskWearStill` | RemoteFunction | Places character onto base treadmill for speed training |
-| **Treadmill** | `Remotes.AskDoff` | RemoteFunction | Takes character off base treadmill |
-| **Upgrades** | `Remotes.TierRaise` | RemoteEvent | Upgrades treadmill tier |
-| **Upgrades** | `Remotes.HomesteadRaise` | RemoteEvent | Upgrades homestead base expansion |
-| **Butterflies** | `Remotes.AskClaimNet` | RemoteFunction | Claims butterfly net (`RF/Butterflies/AskClaimNet`) |
-| **Butterflies** | `Remotes.EquipNet` | RemoteFunction | Equips butterfly net (`RF/Butterflies/Equip`) |
-| **Wisps** | `Remotes.WispRequest` | RemoteFunction | Submits eggs / completes wisp companion quests (`RF/WispCompanion/Request`) |
-| **Trade Up** | `Remotes.ButterflyTrade` | RemoteFunction | Exchanges 5 lower-tier butterflies into 1 higher-tier butterfly |
-| **Essence** | `Remotes.CraftEssence` | RemoteFunction | Crafts Enchanted Essence at the Mutation Shrine |
-| **Character** | `Remotes.AskRigWipe` | RemoteEvent | Cleans up flagged / corrupted character models |
-| **Pet Haul** | `Remotes.WearBest` | RemoteFunction | Automatically equips player's highest multiplier pets (`RF/Haul/WearBest`) |
-| **Pen Placements** | `Remotes.AskPlaceEgg` | RemoteFunction | Places eggs in pen slots (`RF/EggWorld/AskPlaceEgg`) |
-| **Index / Codex** | `Remotes.AskRedeemAll` | RemoteFunction | Redeems all index rewards (`RF/Codex/AskRedeemAll`) |
-| **Index / Codex** | `Remotes.AskRedeemLimitedEgg` | RemoteFunction | Redeems limited event index rewards (`RF/Codex/AskRedeemLimitedEgg`) |
-| **Offline Cash** | `Remotes.AskCollectOffline` | RemoteFunction | Collects pending offline money (`RF/AwayEarnings/AskCollect`) |
-| **Boss Mastery** | `Remotes.AskUseMutationConsumable` | RemoteFunction | Consumes mutation boosters (`RF/BossMastery/AskUseMutationConsumable`) |
-
-### Valuation & Earning Formulas
-- **Egg Score Calculation:**
-  $$\text{Score} = (\text{Rank} \times 1000) + (\text{Scale}^{1.85} \times \text{MutationBonus})$$
-  - `MutationBonus`: $2.5$ if mutated, $1.0$ otherwise.
-  - Scale factor: If scale $> 5.0$, factor is $\left(\frac{\text{scale}}{5}\right)^{1.2} \times 19.637875755794113$, else $\text{scale}^{1.85}$.
-- **Rarity Ranks:**
-  1. Common
-  2. Uncommon
-  3. Rare
-  4. Epic
-  5. Legendary
-  6. Mythic
-  7. Cosmic
-  8. Secret
-  9. Eternal
-  10. Divine
-
----
-
-## 4. Automation Modules & Behaviors
-
-### 1. Auto Steal & Fast Steal (Normal Dimension)
-- **Target Areas:** Forest, Lake, Desert, Jungle, Snow, Volcano, Abyss Ocean, Prehistoric, Cosmic, Cherry Blossom, Titan Temple, Light Dark, Enchanted Forest.
-- **Fast Steal:** Applicable to Titan Temple, Light Dark, and Enchanted Forest. Uses direct approach and instant proximity prompt triggers.
-- **Low-Speed Dynamic Hopping (`executeCheckpointedHopsHome`):**
-  - Uses discrete altitude hops (`groundY = CONFIG.GroundAltitude + 1.0`).
-  - Hop step size dynamically scales with player WalkSpeed:
-    $$\text{stepSize} = (\text{playerSpeed} < 100) \mathbin{?} \max(34, \text{playerSpeed} \times 0.45) : \min(\text{baseStep}, \max(60, \text{playerSpeed} \times 0.75))$$
-  - **Critical Fix:** Dropped the destructive mid-route checkpoint dropping (`performGroundCheckpoint`). Previously, dropping the egg mid-route caused low-speed players and PC executors to fail the prompt re-grab and lose eggs on the conveyor floor. Continuous dynamic hopping now maintains egg possession throughout the entire transit and drops the egg **strictly** upon reaching the home base plot drop target (`CONFIG.BaseDropPosition`).
-  - Server rollback detection: if `pulled` occurs, immediately slows step size and increases `HopGap` to seamlessly recover.
-
-### 2. Steal Panel
-- Live scanner showing: Name, Rarity tier, Value ($/s), Scale multiplier, and Area.
-- Sorting modes: `Value (Money/s)`, `Rarity`, `Weight (Scale)`.
-- Selecting a specific egg forces absolute priority over general Auto Steal.
-- *Halloween eggs are excluded from the Steal Panel.*
-
-### 3. Candy Cane Monster Farm (Halloween Dimension)
-- Automatically equips tools/weapons from inventory (`GetWeaponList()`).
-- Alternates weapons, hovers above monster (`HoverHeight = 12-14`), and invokes `firetouchinterest` on tool Handle and monster root.
-- Cleanly yields and aborts via `HalloweenCombatManager:Abort()` when preempted.
-
-### 4. Auto Pumpkin (Halloween Dimension)
-- Detects runaway pumpkins in `HalloweenDimension.RunawayPumpkins`.
-- Glides to target pumpkin, grabs it, and carries it to the Altar.
-- Marked **non-interruptible** while actively carrying (`IsCarrying() = true`) to prevent pumpkin dropping.
-
-### 5. Auto Steal Halloween Eggs (Temporarily Hidden)
-- *Status:* Hidden from the GUI and disabled by default.
-- *Reason:* Resolved issues with gate returns / dimension desync are pending a clean physics bypass. Underlying code is preserved in `HalloweenStealManager`.
-
-### 6. Enchanted / Bloom Event
-- Automatically detects `workspace.ButterflyBloomSwarm` and individual butterflies.
-- Claims and equips net via remotes.
-- Travels to butterflies using tweening at user-controlled `ButterflySpeed` (100–600).
-- Automatically completes Wisp quests, trade-ups, and essence crafting.
-
-### 7. Auto Upgrades
-- Passive background tasks: `tryUpgradeTreadmill` (TierRaise) and `tryUpgradeBase` (HomesteadRaise).
-- Runs every 6.0 seconds without moving the character or blocking other automations.
-- Works anywhere on the map (removed `isAtBasePlot()` requirement).
-
-### 8. Auto Treadmill
-- Idle speed training fallback.
-- Walks to plot treadmill, verifies anchoring, and trains.
-- Features auto-recovery: resets character if stuck (`State.treadmillFailCount >= 8`).
-- Immediately yields and unanchors (`hopOffTreadmill()`) as soon as ANY higher-priority task requires the character.
-
-### 9. Character Protection & Immunity System (Anti-Trap, Anti-Ragdoll, Anti-AFK)
-- **Anti-Trap:** Disables `CanTouch` on all `PlacedTrap` instances not owned by the local player via `CollectionService:GetTagged("PlacedTrap")`. Immune to bear traps while running/stealing.
-- **Anti-Ragdoll:** Monitors `Humanoid.StateChanged` for `Physics`, `Ragdoll`, or `FallingDown`. Strips ragdoll constraints (`BallSocketConstraint`, `NoCollisionConstraint`, `HingeConstraint`), ensures `Motor6D` and `AnimationConstraint` instances remain enabled, and forces `Humanoid:ChangeState(GettingUp)`.
-- **Anti-AFK:** Disables `LocalPlayer.Idled` connections and attaches a `VirtualUser:CaptureController()` click fallback to prevent the 20-minute Roblox idle kick.
-
-### 10. Reward Claims & Auto Equip Best
-- **Auto Claim Rewards:** Background worker automatically checks and redeems:
-  - `RF/AwayEarnings/AskCollect` with `{ Kind = "Claim" }` for offline earnings.
-  - `RF/Codex/AskRedeemAll` for codex/index progression rewards.
-  - `RF/Codex/AskRedeemLimitedEgg` for event rewards.
-- **Auto Equip Best:** Periodically invokes `RF/Haul/WearBest` to ensure the highest-income and speed-boost pets from inventory are equipped.
-
----
-
-## 5. Unified Priority System & Dimension Supervisor
-
-### How the Priority Hierarchy Works
-1. **Canonical Tasks in Priority Order:**
-   1. `Auto Steal`
-   2. `Candy Cane Farm`
-   3. `Auto Pumpkin`
-   4. `Enchanted / Bloom Event`
-   5. `Auto Upgrades`
-   6. `Auto Treadmill`
-2. **`PriorityManager:GetTopWantedTask()`**:
-   - Evaluates tasks from **Rank 1** to **Rank 6**.
-   - Checks `IsTaskEnabled()` and `HasWork()`.
-   - The highest-ranked task with active work becomes the **Sole Authority Task**.
-3. **`PriorityManager:CanRun(taskName)`**:
-   - Strictly enforces that only the top wanted task (or non-conflicting background upgrades) can run.
-4. **Dimension Supervisor**:
-   - Automatically switches dimensions between **Normal Dimension** and **Halloween Dimension** based on `GetTaskDimension(topTask)`.
-   - If player is in Halloween dimension and a Normal Dimension task (e.g. Auto Steal) gets work:
-     - Halts combat immediately (`HalloweenCombatManager:Abort()`).
-     - Teleports through the exit portal (`HalloweenPortalManager.ExitDimension(5.0)`).
-     - Steals the egg in the Normal Dimension.
-     - When finished and no more eggs remain, returns to Halloween dimension and resumes combat!
-5. **Non-Interruptible Carrying Protection**:
-   - `isHoldingEgg()` and `HalloweenPumpkinManager:IsCarrying()` guarantee that deliveries cannot be interrupted mid-flight.
-
----
-
-## 6. Commit History & Revert Reference
-
-| Commit SHA | Commit Title / Name | Description |
-| :--- | :--- | :--- |
-| `2f51383cda7eaf2f5ac12c6dc7cbab0245a4c917` | `Initial Clean Baseline` | Baseline before Halloween dimension overhaul |
-| `5a3e82b8260bc2602685225a6e79183c455bfb5e` | `fix(halloween): resolve dimension routing conflicts...` | Initial dimension routing fixes |
-| `8bd71b0eaaad4a598be3528dc100fd2277caaa05` | `fix: auto upgrades, bloom event, low-speed delivery...` | Removed plot check from upgrades, fixed Net claim |
-| `bca0e25f55161b1200145862f52d09c883589bf2` | `refactor(gui): integrate modular GUILib...` | Decoupled ~2,500 lines of GUI boilerplate into GUILib |
-| `e762c321a1038d6e7e3beb8b6b3185e009277f1e` | `fix(priority): resolve task hierarchy preemption...` | Complete priority preemption & bidirectional supervisor |
-| `bc4ca8615c00b895b78cbe33f89ea12dd7b9d10a` | `fix(executor-compat): universal polyfills for PC...` | UniversalCompat layer for PC executors (prompts, touch, buttons) & safe low-speed delivery |
-| `f089157247197e015bbb5bb6c2ea573ce0183d81` | `feat(automation): integrate Anti-Trap, Anti-Ragdoll...` | Added CharacterProtection (Anti-Trap, Anti-Ragdoll, Anti-AFK), Auto Equip Best & Reward Claims from ChiliHub |
+| **Egg Placement** | `RF/EggWorld/AskPlaceEgg` | RemoteFunction | Places egg into pen slot `{ Uid, LocalCFrame }` |
+| **Hatching** | `RF/EggWorld/AskHatch` | RemoteFunction | Hatches egg by UID |
+| **Equipment** | `RF/Haul/WearBest` | RemoteFunction | Recalculates and equips best pets |
+| **Pet Selling** | `RE/PetSatchel/SellSelection` | RemoteEvent | Sells batch of pet UIDs |
+| **Pet Locking** | `RE/PetSatchel/WriteFavourite` | RemoteEvent | Sets favorite status on pet UID |
+| **Fusion** | `RF/Fusery/LoadPet` | RemoteFunction | Loads pet into fusion machine |
+| **Fusion** | `RF/Fusery/ConfirmBriefing` | RemoteFunction | Confirms fusion recipe |
+| **Fusion** | `RF/Fusery/BeginFuse` | RemoteFunction | Starts fusion process |
+| **Fusion** | `RF/Fusery/FinishReveal` | RemoteFunction | Claims fusion result |
+| **Shooting Star**| `RE/ShootingStar/Catch` | RemoteEvent | Claims fallen shooting star |
+| **Ghost Dog** | `RF/GhostDogQuest/Talk` | RemoteFunction | Initiates Ghost Dog quest |
+| **Ghost Dog** | `RF/GhostDogQuest/Dive` | RemoteFunction | Starts ghost dive |
+| **Ghost Dog** | `RF/GhostDogQuest/Surface` | RemoteFunction | Surfacing diver |
+| **Ghost Dog** | `RF/GhostDogQuest/Claim` | RemoteFunction | Claims quest reward |
+| **Fishing** | `RF/Fishing/Cast` | RemoteFunction | Casts fishing rod with luck parameter |
+| **Fishing** | `RF/Fishing/Reel` | RemoteFunction | Reels in caught fish |
+| **Train Event** | `RF/TrainEvent/Action` | RemoteFunction | Boards Ghost Train (`Action = "Board"`) |
+| **Ghouler Boss** | `RE/GhostBoss/Suction` | RemoteEvent | Fires vacuum suction at Ghost Boss |
+| **Banjo Cricket**| `RF/BanjoCricket/AskClaim` | RemoteFunction | Claims Banjo Cricket musical buff |
+| **Halloween Buy**| `RF/HalloweenDimension/AskBuyEgg` | RemoteFunction | Buys Halloween event shop eggs |

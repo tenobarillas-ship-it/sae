@@ -43,29 +43,29 @@ The game employs a custom client-side anti-cheat ("UGI") in tandem with CoreScri
 
 ---
 
-## 3. The 12-Task Priority Arbitrator & Preemption Hierarchy
+## 3. The 13-Task Movement Priority Arbitrator & Dimension Coordination
 
-The centralized `PriorityManager` oversees task execution, coordinating character movement, dimension routing, and mutual exclusion. Lower-priority tasks yield immediately to higher-priority tasks and resume when work completes.
+### Strict Movement-Task Specialization
+In accordance with system design requirements, the Priority Panel is strictly specialized as a **Movement-Task Manager**. Only automations requiring character physical movement, positioning, teleportation, or route navigation participate in the Priority Panel.
 
-### Canonical Priority Hierarchy (Configurable in UI)
-1. **Auto Steal:** Stealing eggs from normal world base plots or minigames (RLGL / T-Rex).
-2. **Shooting Star:** Navigating to and collecting falling stars (`RE/ShootingStar/Catch`).
-3. **Event Egg Capture:** Grabbing and holding roaming world event eggs at a safe altitude.
-4. **Candy Cane Farm:** Monster combat and candy collection in the Halloween Dimension.
-5. **Auto Pumpkin:** Catching runaway pumpkins and depositing them at the dimension altar.
-6. **Ghost Dog & Fishing:** Automating Ghost Dog quest dialogue/dive/claim and auto-fishing.
-7. **Phantom Express:** Boarding the Ghost Train event and aiming suction at the Ghouler boss.
-8. **Enchanted / Bloom Event:** Butterfly catching, wisp companion deliveries, and mutation crafting.
-9. **Auto Place Egg:** Placing backpack eggs into empty base plot pen slots with sorting/filters.
-10. **Auto Hatch & Fuse:** Auto-hatching inventory eggs, loading triplets into the fusion machine, and auto-selling.
-11. **Auto Upgrades:** Homestead base expansions, treadmill tier upgrades, and codex rewards.
-12. **Auto Treadmill:** Training walkspeed on plot or admin/VIP treadmills.
+Stationary background tasks (such as Auto Upgrades, Auto Claim Mastery, Auto Equip Best, Auto Sell, Auto Fuse, Auto Mutate, and Seasonal Store interactions) run asynchronously via `WorkerScheduler` and **never compete for or block character movement**.
 
-### Dynamic Preemption Mechanism
-- Every frame/heartbeat, `PriorityManager:GetTopWantedTask()` evaluates the enabled state (`IsTaskEnabled`) and availability of work (`HasWork`) from rank 1 down to 12.
-- If Auto Steal is active, it claims character movement.
-- When Auto Steal finishes or enters idle cooldown, lower tasks like Candy Cane Farm or Auto Treadmill immediately take control.
-- If a higher-priority task (e.g., Shooting Star or Auto Steal) detects work, lower tasks yield (`Abort()` / `Release()`) and hand off character movement cleanly.
+### The 13 Canonical Movement-Dependent Automations:
+| Rank | Canonical Name | Target Dimension | Character Movement Behavior |
+| :---: | :--- | :---: | :--- |
+| **1** | `"Auto Steal"` | Normal | Outbound glide/hop along ground to target egg, instant grab, lane hop return with mid-route checkpoints, boundary checkpoint, safe corridor micro-hops, and delivery hopper drop. |
+| **2** | `"Auto Steal Halloween Eggs"` | Halloween | Dimension transfer into Halloween, navigation across Graveyard/Swamps/Manor, egg grab, boundary return, and delivery. |
+| **3** | `"Auto Catch Shooting Star"` | Normal | Detects falling `ShootingStarClient` in workspace, paths to landing coordinate, and invokes `RE/ShootingStar/Catch`. |
+| **4** | `"Auto Capture Event Egg"` | Normal | Continuously tracks and chases roaming event egg in workspace, closing distance to interact or equip. |
+| **5** | `"Auto Butterfly Bloom"` | Normal | Paths to spawned butterflies in Enchanted Forest, collects nectar, and fulfills wisp quests. |
+| **6** | `"Candy Cane Monster Farm"` | Halloween | Navigates to nearest seasonal monster in Halloween dimension, equips combat gear, and executes combat sequence. |
+| **7** | `"Auto Pumpkin"` | Halloween | Paths to runaway pumpkins in Halloween dimension, grabs and carries them to delivery drop-off. |
+| **8** | `"Auto Ghost Dog Quest"` | Halloween | Navigates character directly to Ghost Dog NPC in Halloween dimension to fulfill quest stages (Talk, Cast, Dive, Surface, Claim). |
+| **9** | `"Auto Fishing"` | Halloween | Navigates character to Halloween fishing waters/dock, equips rod tool, casts line, and reels catches. |
+| **10** | `"Auto Phantom Express"` | Halloween | Navigates character to the train station platform in Halloween dimension and boards the train. |
+| **11** | `"Auto Vacuum Ghouler Boss"` | Halloween | Navigates within combat radius of GhostBoss/GhoulerBoss and engages vacuum suction remote. |
+| **12** | `"Auto Use Admin Treadmill"` | Normal | Detects active `AdminTreadmill` spawn in workspace, travels to treadmill platform, and mounts belt for high multiplier. |
+| **13** | `"Auto Treadmill"` | Normal | Default idle task. Navigates to base treadmill when no higher-priority movement tasks are active. |
 
 ---
 
@@ -166,14 +166,29 @@ The centralized `PriorityManager` oversees task execution, coordinating characte
 
 ## 7. Auto Steal Hop-Drop-Regrab & Delivery Mechanics
 
-### Egg Dropping Architecture (`dropHeldEggDirect`)
-- **Direct Client Invocation:** The game client relies on `EggState.DropFieldEgg("PlayerRequest")` to update local character carry state, clear attachments, and notify the server.
-- **Remote Function Cascade:** If `EggState` is absent or pending require, falls back to multi-signature invokes on `Remotes.AskFieldEggDrop` (`"PlayerRequest"`, `{ Reason = "PlayerRequest" }`, and `()`).
-- **GUI Trigger Fallback:** If character remains flagged as holding an egg, searches `PlayerGui` for the `DropHeldEgg` / `Drop` button and triggers it via `UniversalCompat.ClickButton`.
+### The Anti-Cheat Carry Constraint
+The server enforces strict limits on continuous egg-carrying distance and velocity without ground interaction. If a character teleports directly into the base with an egg or travels across the boundary without dropping and regrabbing, the delivery fails ("Delivery was rewound, too fast for your speed").
 
-### Intermediate Checkpoint Delivery (`performGroundCheckpoint`)
-- **Hop-Drop-Regrab Sequence:** At each checkpoint interval along the lane ($currentX > 1050$), the character settles onto the ground, drops the held egg to reset physics anti-teleport checks, and regrabs it.
-- **Stealth Carry Restoration:** Uses `EggState.CarryFieldEgg(uid)` directly (matching ChiliHub line 17589) followed by `instantGrabAtPosition` as physical fallback, preventing low-speed delivery drops from failing mid-transit.
+### Complete 4-Phase Delivery Sequence:
+1. **Phase 1: Periodic Mid-Route Checkpoints**
+   - As the player travels from the farm zone down to the boundary (`CONFIG.BoundaryCheckpointX` = 600.2), intermediate ground checkpoints are performed at configured intervals (`CONFIG.CheckpointInterval`).
+   - Ground checkpoints settle position at ground altitude, clear velocities, execute direct drop (`dropHeldEggDirect`), wait for `not isHoldingEgg()`, and regrab via `EggState.CarryFieldEgg(uid)` (with fallback to physical prompt grab).
+2. **Phase 2: Mandatory Boundary Checkpoint at `BoundaryCheckpointX` (600.2)**
+   - Before crossing from the open farm lane into the player base plot, a final boundary checkpoint is mandatory.
+   - Character settles at `(boundaryX, groundY, laneZ)`, drops the egg, verifies drop, regrabs, and verifies holding.
+3. **Phase 3: Safe Zone Corridor Micro-Hops**
+   - The script **NEVER** executes an instantaneous 450-stud teleport across the base border.
+   - Instead, the character steps through the base corridor using progressive micro-hops (35–45 studs per hop) with brief `HopGap` stabilization pauses until reaching `CONFIG.BaseDropPosition.X` (~150).
+4. **Phase 4: Delivery Location Drop & Settle Sequence**
+   - Character settles at the delivery hopper position.
+   - Executes `dropHeldEggDirect()` (client `EggState.DropFieldEgg("PlayerRequest")` + network remotes + GUI drop button).
+   - Monitors `not isHoldingEgg()` with up to 2 seconds confirmation timeout and retry drop.
+
+### Multi-Source `isHoldingEgg()` Detection
+To prevent premature delivery attempts or false-positive state synchronization:
+1. `EggDetector:CheckHolding()`: Checks active visibility of `DropHeldEgg` and `RunBackEffects` ScreenGuis.
+2. `EggState.CarryUid`: Queries client game engine `EggState` to see if an egg UID is registered as held.
+3. Character Rig Inspection: Inspects character model for active `Tool` with egg UID or parts containing `EggWeld`.
 
 ---
 
@@ -200,3 +215,13 @@ The Liquid Glass UI interface in `qualcom` now mounts all categories across 6 de
    - Real-time world egg scanner with individual targeted steal triggers.
 6. **Settings Tab:**
    - Theme customization and UI transparency slider.
+
+## 9. Halloween Dimension Portal Stability & Dimension Supervisor
+
+### Root Cause of Immediate Portal Ejection Bug
+Previously, the Dimension Supervisor inside the 250ms `StealAndTreadmill` worker aggressively checked if `topTask` was Normal dimension or `nil`. Whenever a player entered the Halloween Dimension manually to explore, or when idle tasks like `Auto Treadmill` were active, `targetDim == "Normal" and inHalloween` triggered immediately, calling `HalloweenPortalManager.ExitDimension(5.0)` within 250ms and kicking the player out.
+
+### Technical Resolution:
+1. **Zero Ejection on Idle / Nil Tasks:** If `topTask == nil`, or if `topTask` is an idle task (`Auto Treadmill`, `Auto Use Admin Treadmill`), the supervisor **never** initiates an automated exit. Players can freely enter and explore Halloween Dimension without being booted.
+2. **Active Work Requirement for Preemption:** Dimension transitions only occur when an active, runnable movement task (`PriorityManager:CanRun(task) == true`) with confirmed pending work (`PriorityManager:HasWork(task) == true`) demands character relocation.
+3. **Graceful Preemption:** If an active Halloween task is running and a higher-priority Normal task (e.g., `Auto Steal` spotting a target egg) claims priority, combat and pumpkin tasks are aborted safely before dimension transfer.

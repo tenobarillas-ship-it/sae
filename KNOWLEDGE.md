@@ -100,6 +100,12 @@ Roblox executors have varying levels of GUI protection and context permissions:
 | **Trade Up** | `Remotes.ButterflyTrade` | RemoteFunction | Exchanges 5 lower-tier butterflies into 1 higher-tier butterfly |
 | **Essence** | `Remotes.CraftEssence` | RemoteFunction | Crafts Enchanted Essence at the Mutation Shrine |
 | **Character** | `Remotes.AskRigWipe` | RemoteEvent | Cleans up flagged / corrupted character models |
+| **Pet Haul** | `Remotes.WearBest` | RemoteFunction | Automatically equips player's highest multiplier pets (`RF/Haul/WearBest`) |
+| **Pen Placements** | `Remotes.AskPlaceEgg` | RemoteFunction | Places eggs in pen slots (`RF/EggWorld/AskPlaceEgg`) |
+| **Index / Codex** | `Remotes.AskRedeemAll` | RemoteFunction | Redeems all index rewards (`RF/Codex/AskRedeemAll`) |
+| **Index / Codex** | `Remotes.AskRedeemLimitedEgg` | RemoteFunction | Redeems limited event index rewards (`RF/Codex/AskRedeemLimitedEgg`) |
+| **Offline Cash** | `Remotes.AskCollectOffline` | RemoteFunction | Collects pending offline money (`RF/AwayEarnings/AskCollect`) |
+| **Boss Mastery** | `Remotes.AskUseMutationConsumable` | RemoteFunction | Consumes mutation boosters (`RF/BossMastery/AskUseMutationConsumable`) |
 
 ### Valuation & Earning Formulas
 - **Egg Score Calculation:**
@@ -169,6 +175,18 @@ Roblox executors have varying levels of GUI protection and context permissions:
 - Features auto-recovery: resets character if stuck (`State.treadmillFailCount >= 8`).
 - Immediately yields and unanchors (`hopOffTreadmill()`) as soon as ANY higher-priority task requires the character.
 
+### 9. Character Protection & Immunity System (Anti-Trap, Anti-Ragdoll, Anti-AFK)
+- **Anti-Trap:** Disables `CanTouch` on all `PlacedTrap` instances not owned by the local player via `CollectionService:GetTagged("PlacedTrap")`. Immune to bear traps while running/stealing.
+- **Anti-Ragdoll:** Monitors `Humanoid.StateChanged` for `Physics`, `Ragdoll`, or `FallingDown`. Strips ragdoll constraints (`BallSocketConstraint`, `NoCollisionConstraint`, `HingeConstraint`), ensures `Motor6D` and `AnimationConstraint` instances remain enabled, and forces `Humanoid:ChangeState(GettingUp)`.
+- **Anti-AFK:** Disables `LocalPlayer.Idled` connections and attaches a `VirtualUser:CaptureController()` click fallback to prevent the 20-minute Roblox idle kick.
+
+### 10. Reward Claims & Auto Equip Best
+- **Auto Claim Rewards:** Background worker automatically checks and redeems:
+  - `RF/AwayEarnings/AskCollect` with `{ Kind = "Claim" }` for offline earnings.
+  - `RF/Codex/AskRedeemAll` for codex/index progression rewards.
+  - `RF/Codex/AskRedeemLimitedEgg` for event rewards.
+- **Auto Equip Best:** Periodically invokes `RF/Haul/WearBest` to ensure the highest-income and speed-boost pets from inventory are equipped.
+
 ---
 
 ## 5. Unified Priority System & Dimension Supervisor
@@ -209,3 +227,4 @@ Roblox executors have varying levels of GUI protection and context permissions:
 | `bca0e25f55161b1200145862f52d09c883589bf2` | `refactor(gui): integrate modular GUILib...` | Decoupled ~2,500 lines of GUI boilerplate into GUILib |
 | `e762c321a1038d6e7e3beb8b6b3185e009277f1e` | `fix(priority): resolve task hierarchy preemption...` | Complete priority preemption & bidirectional supervisor |
 | `bc4ca8615c00b895b78cbe33f89ea12dd7b9d10a` | `fix(executor-compat): universal polyfills for PC...` | UniversalCompat layer for PC executors (prompts, touch, buttons) & safe low-speed delivery |
+| `f089157247197e015bbb5bb6c2ea573ce0183d81` | `feat(automation): integrate Anti-Trap, Anti-Ragdoll...` | Added CharacterProtection (Anti-Trap, Anti-Ragdoll, Anti-AFK), Auto Equip Best & Reward Claims from ChiliHub |

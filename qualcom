@@ -43,10 +43,9 @@ local currentSettings = {
     AutoPumpkin = false,
     TaskPriorities = {
         "Auto Steal",
-        -- "Halloween Steal", -- [TEMPORARILY HIDDEN]
         "Candy Cane Farm",
         "Auto Pumpkin",
-        "Bloom Event",
+        "Enchanted / Bloom Event",
         "Auto Upgrades",
         "Auto Treadmill"
     }
@@ -2562,40 +2561,62 @@ PriorityManager = {
     ActiveTask = nil,
     List = {
         "Auto Steal",
-        -- "Halloween Steal", -- [TEMPORARILY HIDDEN]
         "Candy Cane Farm",
         "Auto Pumpkin",
-        "Bloom Event",
+        "Enchanted / Bloom Event",
         "Auto Upgrades",
         "Auto Treadmill"
     },
     TaskAliases = {
         ["Steal"] = "Auto Steal",
+        ["Auto Steal"] = "Auto Steal",
         ["HalloweenSteal"] = "Halloween Steal",
+        ["Halloween Steal"] = "Halloween Steal",
         ["CandyCane"] = "Candy Cane Farm",
+        ["Candy Cane Farm"] = "Candy Cane Farm",
+        ["Auto Candy Cane"] = "Candy Cane Farm",
         ["Pumpkin"] = "Auto Pumpkin",
         ["AutoPumpkin"] = "Auto Pumpkin",
-        ["Bloom"] = "Bloom Event",
+        ["Auto Pumpkin"] = "Auto Pumpkin",
+        ["Bloom"] = "Enchanted / Bloom Event",
+        ["Bloom Event"] = "Enchanted / Bloom Event",
+        ["Enchanted"] = "Enchanted / Bloom Event",
+        ["Enchanted / Bloom Event"] = "Enchanted / Bloom Event",
         ["Upgrades"] = "Auto Upgrades",
-        ["Treadmill"] = "Auto Treadmill"
+        ["Auto Upgrades"] = "Auto Upgrades",
+        ["Treadmill"] = "Auto Treadmill",
+        ["Auto Treadmill"] = "Auto Treadmill"
     }
 }
 
 function PriorityManager:Initialize(savedPriorities)
+    local canonicalList = {
+        "Auto Steal",
+        "Candy Cane Farm",
+        "Auto Pumpkin",
+        "Enchanted / Bloom Event",
+        "Auto Upgrades",
+        "Auto Treadmill"
+    }
+
+    local valid = {}
+    for _, name in ipairs(canonicalList) do valid[name] = true end
+
     if type(savedPriorities) == "table" and #savedPriorities > 0 then
-        local valid = {}
-        for _, name in ipairs(self.List) do valid[name] = true end
         local newList = {}
-        for _, name in ipairs(savedPriorities) do
+        for _, rawName in ipairs(savedPriorities) do
+            local name = self.TaskAliases[rawName] or rawName
             if valid[name] then
                 table.insert(newList, name)
                 valid[name] = nil
             end
         end
-        for _, name in ipairs(self.List) do
+        for _, name in ipairs(canonicalList) do
             if valid[name] then table.insert(newList, name) end
         end
         self.List = newList
+    else
+        self.List = canonicalList
     end
 end
 
@@ -2609,6 +2630,16 @@ function PriorityManager:GetRank(taskName)
     return 999
 end
 
+function PriorityManager:GetTaskDimension(taskName)
+    local resolved = self.TaskAliases[taskName] or taskName
+    if resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Halloween Steal" then
+        return "Halloween"
+    elseif resolved == "Auto Steal" or resolved == "Enchanted / Bloom Event" or resolved == "Auto Treadmill" then
+        return "Normal"
+    end
+    return "Any"
+end
+
 function PriorityManager:IsTaskEnabled(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
     if resolved == "Auto Steal" then
@@ -2619,14 +2650,126 @@ function PriorityManager:IsTaskEnabled(taskName)
         return getgenv().config.autoCandyCane == true and not isHalloweenMapClosed()
     elseif resolved == "Auto Pumpkin" then
         return getgenv().config.autoPumpkin == true and not isHalloweenMapClosed()
-    elseif resolved == "Bloom Event" then
-        return (getgenv().config.autoCatchButterfly == true or getgenv().config.autoWispQuest == true) and not isMapClosed()
+    elseif resolved == "Enchanted / Bloom Event" then
+        return (getgenv().config.autoCatchButterfly == true or getgenv().config.autoWispQuest == true or getgenv().config.autoTradeUp == true or getgenv().config.autoCraftEssence == true) and not isMapClosed()
     elseif resolved == "Auto Upgrades" then
         return (getgenv().config.autoUpgradeTreadmill == true or getgenv().config.autoUpgradeBase == true)
     elseif resolved == "Auto Treadmill" then
-        return getgenv().config.autoTreadmill == true
+        return getgenv().config.autoTreadmill == true and not isMapClosed()
     end
     return false
+end
+
+function PriorityManager:HasWork(taskName)
+    local resolved = self.TaskAliases[taskName] or taskName
+
+    if resolved == "Auto Steal" then
+        if isMapClosed() or not isStealEnabled() then return false end
+        if isNormalStealPanelTarget() then return true end
+        if State.isStealingActive or isHoldingEgg() then return true end
+        if typeof(getBestEgg) == "function" then
+            return getBestEgg() ~= nil
+        end
+        return false
+
+    elseif resolved == "Halloween Steal" then
+        if isHalloweenMapClosed() or not isHalloweenStealEnabled() then return false end
+        if HalloweenStealManager and (HalloweenStealManager.IsActive or isHoldingEgg()) then return true end
+        if HalloweenStealManager and HalloweenStealManager.SelectTargetEgg then
+            return HalloweenStealManager:SelectTargetEgg() ~= nil
+        end
+        return false
+
+    elseif resolved == "Candy Cane Farm" then
+        if isHalloweenMapClosed() or getgenv().config.autoCandyCane ~= true then return false end
+        local inHalloween = HalloweenPortalManager and HalloweenPortalManager.IsInHalloweenDimension()
+        if inHalloween then
+            local monster = HalloweenCombatManager and HalloweenCombatManager.GetClosestMonster and HalloweenCombatManager:GetClosestMonster()
+            return monster ~= nil
+        else
+            local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+            if dim then
+                local monsters = dim:FindFirstChild("Monsters")
+                if monsters and #monsters:GetChildren() > 0 then
+                    return true
+                end
+            end
+            return true
+        end
+
+    elseif resolved == "Auto Pumpkin" then
+        if isHalloweenMapClosed() or getgenv().config.autoPumpkin ~= true then return false end
+        if HalloweenPumpkinManager and (HalloweenPumpkinManager.IsBusy or HalloweenPumpkinManager:IsCarrying()) then
+            return true
+        end
+        local inHalloween = HalloweenPortalManager and HalloweenPortalManager.IsInHalloweenDimension()
+        if inHalloween then
+            local target = HalloweenPumpkinManager and HalloweenPumpkinManager.GetTarget and HalloweenPumpkinManager:GetTarget()
+            return target ~= nil
+        else
+            local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+            if dim then
+                local pumpkins = dim:FindFirstChild("RunawayPumpkins")
+                if pumpkins and #pumpkins:GetChildren() > 0 then
+                    return true
+                end
+            end
+            return true
+        end
+
+    elseif resolved == "Enchanted / Bloom Event" then
+        if isMapClosed() then return false end
+        local wantButterfly = getgenv().config.autoCatchButterfly == true
+        local wantWisp = getgenv().config.autoWispQuest == true
+        local wantTrade = getgenv().config.autoTradeUp == true
+        local wantCraft = getgenv().config.autoCraftEssence == true
+        if not (wantButterfly or wantWisp or wantTrade or wantCraft) then return false end
+
+        if wantButterfly and BloomManager and BloomManager.GetButterflies and #BloomManager:GetButterflies() > 0 then
+            return true
+        end
+        if wantWisp or wantTrade or wantCraft then
+            return true
+        end
+        return false
+
+    elseif resolved == "Auto Upgrades" then
+        if not (getgenv().config.autoUpgradeTreadmill or getgenv().config.autoUpgradeBase) then return false end
+        return os.clock() >= State.treadmillUpgradeCooldown or os.clock() >= State.baseUpgradeCooldown
+
+    elseif resolved == "Auto Treadmill" then
+        if isMapClosed() or getgenv().config.autoTreadmill ~= true then return false end
+        return true
+    end
+
+    return false
+end
+
+function PriorityManager:GetTopWantedTask()
+    if isNormalStealPanelTarget() then
+        return "Auto Steal"
+    end
+    if isHalloweenStealPanelTarget() then
+        return "Halloween Steal"
+    end
+
+    if isHoldingEgg() or State.isStealingActive then
+        return "Auto Steal"
+    end
+    if HalloweenStealManager and (HalloweenStealManager.IsActive or isHoldingEgg()) then
+        return "Halloween Steal"
+    end
+    if HalloweenPumpkinManager and (HalloweenPumpkinManager.IsBusy or HalloweenPumpkinManager:IsCarrying()) then
+        return "Auto Pumpkin"
+    end
+
+    for _, taskName in ipairs(self.List) do
+        if self:IsTaskEnabled(taskName) and self:HasWork(taskName) then
+            return taskName
+        end
+    end
+
+    return nil
 end
 
 function PriorityManager:CanRun(taskName)
@@ -2635,36 +2778,24 @@ function PriorityManager:CanRun(taskName)
         return false
     end
 
-    local myRank = self:GetRank(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
 
-    -- Manual Steal Panel selection always takes exclusive priority for its dimension
-    if isNormalStealPanelTarget() then
-        return resolved == "Auto Steal"
-    end
-    if isHalloweenStealPanelTarget() then
-        return resolved == "Halloween Steal"
+    if resolved == "Auto Upgrades" then
+        return self:IsTaskEnabled("Auto Upgrades")
     end
 
-    -- Auto Steal only blocks lower priority tasks when actively stealing or holding an egg
-    if resolved ~= "Auto Steal" and resolved ~= "Race" and isStealEnabled() and (isHoldingEgg() or State.isStealingActive) then
+    local topTask = self:GetTopWantedTask()
+    if not topTask then
         return false
     end
 
-    -- If another task is currently claiming execution
-    if self.ActiveTask and self.ActiveTask ~= taskName and self.ActiveTask ~= resolved then
-        local currentRank = self:GetRank(self.ActiveTask)
-        if myRank >= currentRank then
-            return false
-        end
-    end
-
-    return true
+    return (resolved == topTask)
 end
 
 function PriorityManager:Claim(taskName)
+    local resolved = self.TaskAliases[taskName] or taskName
     if self:CanRun(taskName) then
-        self.ActiveTask = self.TaskAliases[taskName] or taskName
+        self.ActiveTask = resolved
         return true
     end
     return false
@@ -3675,93 +3806,11 @@ getBestEgg = function()
 end
 
 -- ==============================================================================
--- [ WORKER SCHEDULER TASK REGISTRATIONS ]
+-- [ WORKER SCHEDULER TASK REGISTRATIONS & DIMENSION SUPERVISOR ]
 -- ==============================================================================
-local function hasHalloweenWork()
-    -- If user manually targeted a Normal Dimension egg in the Steal Panel, pause Halloween work so we exit dimension and steal it
-    if isNormalStealPanelTarget() then
-        State.halloweenIdleSince = nil
-        return false
-    end
-
-    -- If user manually targeted a Halloween Dimension egg in the Steal Panel, Halloween has priority work
-    if isHalloweenStealPanelTarget() and not isHalloweenMapClosed() then
-        State.halloweenIdleSince = nil
-        return true
-    end
-
-    local wantSteal = isHalloweenStealEnabled()
-    local wantCombat = getgenv().config.autoCandyCane == true
-    local wantPumpkin = getgenv().config.autoPumpkin == true
-    if not wantSteal and not wantCombat and not wantPumpkin then
-        State.halloweenIdleSince = nil
-        return false
-    end
-
-    -- Never do any Halloween work if the map is closed (gate barrier is up / night phase)
-    if isHalloweenMapClosed() then
-        State.halloweenIdleSince = nil
-        return false
-    end
-
-    if HalloweenStealManager and HalloweenStealManager.IsActive then
-        State.halloweenIdleSince = nil
-        return true
-    end
-
-    if HalloweenPumpkinManager and HalloweenPumpkinManager.IsBusy then
-        State.halloweenIdleSince = nil
-        return true
-    end
-
-    local inHalloween = HalloweenPortalManager and HalloweenPortalManager.IsInHalloweenDimension()
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-
-    if inHalloween then
-        if isHoldingEgg() or (wantPumpkin and HalloweenPumpkinManager and HalloweenPumpkinManager:IsCarrying()) then
-            State.halloweenIdleSince = nil
-            return true
-        end
-        local stealTarget = wantSteal and HalloweenStealManager and HalloweenStealManager:SelectTargetEgg() or nil
-        local combatTarget = wantCombat and HalloweenCombatManager and HalloweenCombatManager:GetClosestMonster() or nil
-        local pumpkinTarget = wantPumpkin and HalloweenPumpkinManager and HalloweenPumpkinManager:GetTarget() or nil
-        if stealTarget ~= nil or combatTarget ~= nil or pumpkinTarget ~= nil then
-            State.halloweenIdleSince = nil
-            return true
-        end
-        if not State.halloweenIdleSince then
-            State.halloweenIdleSince = os.clock()
-        end
-        if (os.clock() - State.halloweenIdleSince) >= 2.0 then
-            return false
-        end
-        return true
-    else
-        if State.halloweenIdleCooldownUntil and os.clock() < State.halloweenIdleCooldownUntil then
-            return false
-        end
-        if dim then
-            local worldEggs = dim:FindFirstChild("WorldEggs")
-            local monsters = dim:FindFirstChild("Monsters")
-            local pumpkinsFolder = dim:FindFirstChild("RunawayPumpkins")
-            local hasLoadedEggs = worldEggs and #worldEggs:GetChildren() > 0
-            local hasLoadedMonsters = monsters and #monsters:GetChildren() > 0
-            local hasLoadedPumpkins = pumpkinsFolder and #pumpkinsFolder:GetChildren() > 0
-            if (wantSteal and hasLoadedEggs) or (wantCombat and hasLoadedMonsters) or (wantPumpkin and hasLoadedPumpkins) then
-                local stealTarget = wantSteal and HalloweenStealManager and HalloweenStealManager:SelectTargetEgg() or nil
-                local combatTarget = wantCombat and HalloweenCombatManager and HalloweenCombatManager:GetClosestMonster() or nil
-                local pumpkinTarget = wantPumpkin and HalloweenPumpkinManager and HalloweenPumpkinManager:GetTarget() or nil
-                if stealTarget == nil and combatTarget == nil and pumpkinTarget == nil then
-                    return false
-                end
-            end
-        end
-        return true
-    end
-end
 
 WorkerScheduler:Register("HalloweenSteal", 0.25, function()
-    if not isHalloweenStealEnabled() or not hasHalloweenWork() then
+    if not isHalloweenStealEnabled() then
         PriorityManager:Release("HalloweenSteal")
         return
     end
@@ -3785,11 +3834,16 @@ WorkerScheduler:Register("HalloweenSteal", 0.25, function()
 end)
 
 WorkerScheduler:Register("CandyCaneFarm", 0.05, function()
-    if not getgenv().config.autoCandyCane or isHalloweenMapClosed() or not hasHalloweenWork() then
+    if not getgenv().config.autoCandyCane or isHalloweenMapClosed() then
         PriorityManager:Release("CandyCane")
         return
     end
-    if not PriorityManager:CanRun("CandyCane") then return end
+    if not PriorityManager:CanRun("CandyCane") then
+        if HalloweenCombatManager and HalloweenCombatManager.Abort then
+            HalloweenCombatManager:Abort()
+        end
+        return
+    end
 
     if not HalloweenPortalManager.IsInHalloweenDimension() then
         PriorityManager:Claim("CandyCane")
@@ -3809,11 +3863,18 @@ WorkerScheduler:Register("CandyCaneFarm", 0.05, function()
 end)
 
 WorkerScheduler:Register("HalloweenPumpkin", 0.05, function()
-    if not getgenv().config.autoPumpkin or isHalloweenMapClosed() or not hasHalloweenWork() then
+    if not getgenv().config.autoPumpkin or isHalloweenMapClosed() then
         PriorityManager:Release("Pumpkin")
         return
     end
-    if not PriorityManager:CanRun("Pumpkin") then return end
+    if not PriorityManager:CanRun("Pumpkin") then
+        if not (HalloweenPumpkinManager and HalloweenPumpkinManager:IsCarrying()) then
+            if HalloweenPumpkinManager and HalloweenPumpkinManager.Abort then
+                HalloweenPumpkinManager:Abort()
+            end
+        end
+        return
+    end
 
     if not HalloweenPortalManager.IsInHalloweenDimension() then
         PriorityManager:Claim("Pumpkin")
@@ -3841,12 +3902,13 @@ end)
 WorkerScheduler:Register("EventsCombat", 0.35, function()
     if State.isStealingActive or isHoldingEgg() then return end
     if HalloweenPortalManager.IsInHalloweenDimension() then return end
-    local hasEgg = (isStealEnabled() and getBestEgg() ~= nil)
-    if not hasEgg and PriorityManager:CanRun("Bloom") then
-        BloomManager:ProcessButterflies(State.isStealingActive, hasEgg)
-        BloomManager:ProcessWisps(State.isStealingActive, hasEgg)
-        BloomManager:ProcessTradeAndCraft()
-    end
+    if not PriorityManager:CanRun("Bloom") then return end
+
+    PriorityManager:Claim("Bloom")
+    BloomManager:ProcessButterflies(State.isStealingActive, false)
+    BloomManager:ProcessWisps(State.isStealingActive, false)
+    BloomManager:ProcessTradeAndCraft()
+    PriorityManager:Release("Bloom")
 end)
 
 WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
@@ -3855,22 +3917,32 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     applyGodMode(char)
 
     local inHalloween = HalloweenPortalManager.IsInHalloweenDimension()
-    local halloweenBusy = hasHalloweenWork()
+    local topTask = PriorityManager:GetTopWantedTask()
 
-    -- If Halloween has no work (turned off, map closed, normal Steal Panel target selected, or idle),
-    -- and player is inside Halloween dimension, exit back to main world if Steal Panel target, Auto Steal, or Auto Treadmill is enabled
-    if not halloweenBusy and inHalloween then
-        PriorityManager:Release("HalloweenSteal")
-        PriorityManager:Release("CandyCane")
-        PriorityManager:Release("Pumpkin")
-        if isNormalStealPanelTarget() or getgenv().config.autoFarm or getgenv().config.autoTreadmill then
-            if not isNormalStealPanelTarget() then
-                State.halloweenIdleCooldownUntil = os.clock() + 8.0
+    -- Dimension Supervisor
+    if topTask then
+        local targetDim = PriorityManager:GetTaskDimension(topTask)
+        if targetDim == "Normal" and inHalloween then
+            -- Preempt any active combat or non-carrying pumpkin work
+            if HalloweenCombatManager and HalloweenCombatManager.Abort then
+                HalloweenCombatManager:Abort()
             end
-            State.halloweenIdleSince = nil
+            if HalloweenPumpkinManager and not HalloweenPumpkinManager:IsCarrying() and HalloweenPumpkinManager.Abort then
+                HalloweenPumpkinManager:Abort()
+            end
             HalloweenPortalManager.ExitDimension(5.0)
+            return
+        elseif targetDim == "Halloween" and not inHalloween then
+            hopOffTreadmill()
+            HalloweenPortalManager.EnterDimension(5.0)
+            return
         end
-        return
+    else
+        -- If no active tasks have work and player is in Halloween, return to main world
+        if inHalloween then
+            HalloweenPortalManager.ExitDimension(5.0)
+            return
+        end
     end
 
     -- If player is inside Halloween dimension, main world Steal & Treadmill must NOT run!
@@ -3879,9 +3951,8 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     end
 
     -- 1. Auto Steal & Steal Panel Execution
-    local currentTargetEgg = nil
     if isStealEnabled() and not State.isStealingActive and not isMapClosed() and PriorityManager:CanRun("Steal") then
-        currentTargetEgg = getBestEgg()
+        local currentTargetEgg = getBestEgg()
         if currentTargetEgg then
             local targetUid = currentTargetEgg.Uid
             if not isEggStillValid(targetUid) then
@@ -3975,7 +4046,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
         end
     end
 
-    -- 2. Treadmill Idle Execution (With Automatic Flag/Lock Reset)
+    -- 2. Treadmill Idle Execution
     local isStealBusy = State.isStealingActive or isHoldingEgg()
     local canTreadmill = getgenv().config.autoTreadmill and not isStealBusy and PriorityManager:CanRun("Treadmill")
 
@@ -4006,7 +4077,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                         postHum.PlatformStand = false
                         postHum.Sit = false
                     end
-                    if Remotes.AskWearStill and not isStealBusy then
+                    if Remotes.AskWearStill and not isStealBusy and PriorityManager:CanRun("Treadmill") then
                         pcall(function() Remotes.AskWearStill:InvokeServer() end)
                     end
                     task.wait(0.35)

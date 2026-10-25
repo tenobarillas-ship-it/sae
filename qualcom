@@ -36,10 +36,12 @@ local currentSettings = {
     HalloweenTargetAreas = { ["All"] = true },
     HalloweenMinRarity = "All",
     AutoCandyCane = false,
+    AutoPumpkin = false,
     TaskPriorities = {
         "Auto Steal",
         -- "Halloween Steal", -- [TEMPORARILY HIDDEN]
         "Candy Cane Farm",
+        "Auto Pumpkin",
         "Bloom Event",
         "Auto Upgrades",
         "Auto Treadmill"
@@ -109,8 +111,10 @@ getgenv().config.autoHalloweenSteal = currentSettings.AutoHalloweenSteal
 getgenv().config.halloweenTargetAreas = currentSettings.HalloweenTargetAreas
 getgenv().config.halloweenMinRarity = currentSettings.HalloweenMinRarity
 getgenv().config.autoCandyCane = currentSettings.AutoCandyCane
+getgenv().config.autoPumpkin = currentSettings.AutoPumpkin
+getgenv().AutoCatchPumpkins = currentSettings.AutoPumpkin
 
-local HalloweenPortalManager, HalloweenAreaManager, HalloweenCombatManager, HalloweenStealManager, PriorityManager, getBestEgg, DynamicRarityResolver
+local HalloweenPortalManager, HalloweenAreaManager, HalloweenCombatManager, HalloweenPumpkinManager, HalloweenStealManager, PriorityManager, getBestEgg, DynamicRarityResolver
 
 local State = {
     currentStealSession = 0,
@@ -1470,6 +1474,263 @@ function HalloweenCombatManager:Abort()
 end
 
 -- ==============================================================================
+-- [ HALLOWEEN PUMPKIN MANAGER - AUTONOMOUS 3-ZONE RUNAWAY PUMPKIN FARMER ]
+-- ==============================================================================
+HalloweenPumpkinManager = {
+    IsBusy = false,
+    PumpkinsDeposited = 0,
+    Config = {
+        AltarDepositPos = Vector3.new(-5521.6, -195.0, -6623.0),
+        Bounds = {
+            MinX = -7000.0,
+            MaxX = -4900.0,
+            MinZ = -7700.0,
+            MaxZ = -4800.0
+        },
+        TravelSpeed = 260,
+        DepositTimeout = 2.0
+    }
+}
+
+function HalloweenPumpkinManager:IsCarrying()
+    if LocalPlayer:GetAttribute("HalloweenPumpkinCarrying") == true then
+        return true
+    end
+
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root then
+        for _, child in ipairs(root:GetChildren()) do
+            if child:IsA("WeldConstraint") and child.Part1 and child.Part1.Name == "HumanoidRootPart" then
+                if child.Part1.Parent and child.Part1.Parent.Name:find("Pumpkin") then
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+local function triggerPumpkinPrompt(prompt)
+    if not prompt or not prompt.Enabled then return false end
+    prompt.RequiresLineOfSight = false
+    prompt.MaxActivationDistance = 40
+    prompt.HoldDuration = 0
+
+    if typeof(fireproximityprompt) == "function" then
+        pcall(fireproximityprompt, prompt, 0)
+    else
+        pcall(function()
+            prompt:InputHoldBegin()
+            task.wait(0.04)
+            prompt:InputHoldEnd()
+        end)
+    end
+    return true
+end
+
+function HalloweenPumpkinManager:GetTarget()
+    local _, root = getAliveRig()
+    if not root then return nil, nil, nil end
+
+    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    if not dim then return nil, nil, nil end
+
+    local folder = dim:FindFirstChild("RunawayPumpkins")
+    local searchList = folder and folder:GetChildren() or {}
+
+    local closestModel = nil
+    local closestPrompt = nil
+    local closestPart = nil
+    local minDistance = math.huge
+
+    for _, model in ipairs(searchList) do
+        if model:IsA("Model") and model:IsDescendantOf(dim) then
+            local prompt = model:FindFirstChildWhichIsA("ProximityPrompt", true)
+            local part = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart") or model:FindFirstChildWhichIsA("BasePart")
+
+            if prompt and prompt.Enabled and part then
+                local p = part.Position
+                local insideBounds = (p.X >= self.Config.Bounds.MinX and p.X <= self.Config.Bounds.MaxX)
+                                 and (p.Z >= self.Config.Bounds.MinZ and p.Z <= self.Config.Bounds.MaxZ)
+
+                if insideBounds then
+                    local dist = (root.Position - p).Magnitude
+                    if dist < minDistance then
+                        minDistance = dist
+                        closestModel = model
+                        closestPrompt = prompt
+                        closestPart = part
+                    end
+                end
+            end
+        end
+    end
+
+    if not closestModel then
+        for _, desc in ipairs(dim:GetChildren()) do
+            if desc:IsA("Model") and desc.Name:find("Pumpkin") and desc.Name ~= "Altar" then
+                local prompt = desc:FindFirstChildWhichIsA("ProximityPrompt", true)
+                local part = desc.PrimaryPart or desc:FindFirstChild("HumanoidRootPart") or desc:FindFirstChildWhichIsA("BasePart")
+
+                if prompt and prompt.Enabled and part then
+                    local p = part.Position
+                    local insideBounds = (p.X >= self.Config.Bounds.MinX and p.X <= self.Config.Bounds.MaxX)
+                                     and (p.Z >= self.Config.Bounds.MinZ and p.Z <= self.Config.Bounds.MaxZ)
+
+                    if insideBounds then
+                        local dist = (root.Position - p).Magnitude
+                        if dist < minDistance then
+                            minDistance = dist
+                            closestModel = desc
+                            closestPrompt = prompt
+                            closestPart = part
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return closestModel, closestPrompt, closestPart
+end
+
+function HalloweenPumpkinManager:GlideTo(targetPos, stopDist)
+    local char, root = getAliveRig()
+    if not root then return false end
+
+    stopDist = stopDist or 3.0
+    local speed = self.Config.TravelSpeed
+
+    setCollisions(false)
+
+    local delta = targetPos - root.Position
+    local timeout = os.clock() + (delta.Magnitude / speed) + 4.0
+
+    while (targetPos - root.Position).Magnitude > stopDist do
+        if not getgenv().config.autoPumpkin or os.clock() > timeout or isHalloweenMapClosed() then
+            break
+        end
+
+        local dt = Services.RunService.Heartbeat:Wait()
+        local _, cRoot = getAliveRig()
+        if not cRoot then break end
+
+        local diff = targetPos - cRoot.Position
+        local dir = diff.Unit
+        local step = math.min(speed * dt, diff.Magnitude)
+
+        cRoot.AssemblyLinearVelocity = dir * speed
+        cRoot.CFrame = CFrame.new(cRoot.Position + dir * step, cRoot.Position + dir * 10)
+    end
+
+    local _, fRoot = getAliveRig()
+    if fRoot then
+        fRoot.AssemblyLinearVelocity = Vector3.zero
+    end
+    setCollisions(true)
+    return true
+end
+
+function HalloweenPumpkinManager:Process()
+    if not getgenv().config.autoPumpkin or isHalloweenMapClosed() then return end
+    if self.IsBusy then return end
+
+    if not HalloweenPortalManager.IsInHalloweenDimension() then
+        HalloweenPortalManager.EnterDimension(5.0)
+        return
+    end
+
+    local char, root, hum = getAliveRig()
+    if not char or not root or not hum then return end
+
+    self.IsBusy = true
+    local isCarrying = self:IsCarrying()
+
+    -- Phase 1: Deliver currently carried pumpkin to the Altar.
+    if isCarrying then
+        self:GlideTo(self.Config.AltarDepositPos, 3.5)
+
+        local depositStart = os.clock()
+        while (os.clock() - depositStart) < self.Config.DepositTimeout and self:IsCarrying() do
+            if not getgenv().config.autoPumpkin or isHalloweenMapClosed() then break end
+            local _, curRoot = getAliveRig()
+            if curRoot then
+                curRoot.CFrame = CFrame.new(self.Config.AltarDepositPos)
+                curRoot.AssemblyLinearVelocity = Vector3.zero
+            end
+            Services.RunService.Heartbeat:Wait()
+        end
+
+        task.wait(0.2)
+        self.PumpkinsDeposited = self.PumpkinsDeposited + 1
+
+    -- Phase 2: Search for and capture the nearest valid pumpkin.
+    else
+        local pumpkinModel, prompt, targetPart = self:GetTarget()
+
+        if pumpkinModel and prompt and targetPart then
+            local pPos = targetPart.Position
+
+            -- Glide to the moving target NPC.
+            self:GlideTo(pPos + Vector3.new(0, 1.2, 0), 4.5)
+
+            -- Latch onto the target NPC and trigger the Catch prompt until picked up.
+            local latchStart = os.clock()
+            while (os.clock() - latchStart) < 0.65 and not self:IsCarrying() do
+                if not getgenv().config.autoPumpkin or isHalloweenMapClosed() then break end
+                local _, curRoot = getAliveRig()
+                if curRoot and targetPart and targetPart.Parent then
+                    curRoot.CFrame = CFrame.new(targetPart.Position)
+                    curRoot.AssemblyLinearVelocity = Vector3.zero
+                    triggerPumpkinPrompt(prompt)
+                end
+                Services.RunService.Heartbeat:Wait()
+            end
+
+            task.wait(0.1)
+
+            -- If successfully acquired, travel directly to the Altar pad.
+            if self:IsCarrying() then
+                self:GlideTo(self.Config.AltarDepositPos, 3.5)
+
+                local depositStart = os.clock()
+                while (os.clock() - depositStart) < self.Config.DepositTimeout and self:IsCarrying() do
+                    if not getgenv().config.autoPumpkin or isHalloweenMapClosed() then break end
+                    local _, curRoot = getAliveRig()
+                    if curRoot then
+                        curRoot.CFrame = CFrame.new(self.Config.AltarDepositPos)
+                        curRoot.AssemblyLinearVelocity = Vector3.zero
+                    end
+                    Services.RunService.Heartbeat:Wait()
+                end
+
+                task.wait(0.2)
+                self.PumpkinsDeposited = self.PumpkinsDeposited + 1
+            end
+        else
+            -- Standby pause when no valid pumpkins are active in the 3 zones.
+            task.wait(0.8)
+        end
+    end
+
+    self.IsBusy = false
+end
+
+function HalloweenPumpkinManager:Abort()
+    self.IsBusy = false
+    setCollisions(true)
+    if PriorityManager then PriorityManager:Release("Pumpkin") end
+    local _, root, hum = getAliveRig()
+    if hum then hum.PlatformStand = false end
+    if root then
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end
+end
+
+-- ==============================================================================
 -- [ DYNAMIC RUNTIME EGG RARITY RESOLVER (ZERO HARDCODING) ]
 -- ==============================================================================
 DynamicRarityResolver = {
@@ -2132,6 +2393,7 @@ PriorityManager = {
         "Auto Steal",
         -- "Halloween Steal", -- [TEMPORARILY HIDDEN]
         "Candy Cane Farm",
+        "Auto Pumpkin",
         "Bloom Event",
         "Auto Upgrades",
         "Auto Treadmill"
@@ -2140,6 +2402,8 @@ PriorityManager = {
         ["Steal"] = "Auto Steal",
         ["HalloweenSteal"] = "Halloween Steal",
         ["CandyCane"] = "Candy Cane Farm",
+        ["Pumpkin"] = "Auto Pumpkin",
+        ["AutoPumpkin"] = "Auto Pumpkin",
         ["Bloom"] = "Bloom Event",
         ["Upgrades"] = "Auto Upgrades",
         ["Treadmill"] = "Auto Treadmill"
@@ -2182,6 +2446,8 @@ function PriorityManager:IsTaskEnabled(taskName)
         return isHalloweenStealEnabled() and not isHalloweenMapClosed()
     elseif resolved == "Candy Cane Farm" then
         return getgenv().config.autoCandyCane == true and not isHalloweenMapClosed()
+    elseif resolved == "Auto Pumpkin" then
+        return getgenv().config.autoPumpkin == true and not isHalloweenMapClosed()
     elseif resolved == "Bloom Event" then
         return (getgenv().config.autoCatchButterfly == true or getgenv().config.autoWispQuest == true) and not isMapClosed()
     elseif resolved == "Auto Upgrades" then
@@ -3250,7 +3516,8 @@ local function hasHalloweenWork()
 
     local wantSteal = isHalloweenStealEnabled()
     local wantCombat = getgenv().config.autoCandyCane == true
-    if not wantSteal and not wantCombat then
+    local wantPumpkin = getgenv().config.autoPumpkin == true
+    if not wantSteal and not wantCombat and not wantPumpkin then
         State.halloweenIdleSince = nil
         return false
     end
@@ -3266,17 +3533,23 @@ local function hasHalloweenWork()
         return true
     end
 
+    if HalloweenPumpkinManager and HalloweenPumpkinManager.IsBusy then
+        State.halloweenIdleSince = nil
+        return true
+    end
+
     local inHalloween = HalloweenPortalManager and HalloweenPortalManager.IsInHalloweenDimension()
     local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
 
     if inHalloween then
-        if isHoldingEgg() then
+        if isHoldingEgg() or (wantPumpkin and HalloweenPumpkinManager and HalloweenPumpkinManager:IsCarrying()) then
             State.halloweenIdleSince = nil
             return true
         end
         local stealTarget = wantSteal and HalloweenStealManager and HalloweenStealManager:SelectTargetEgg() or nil
         local combatTarget = wantCombat and HalloweenCombatManager and HalloweenCombatManager:GetClosestMonster() or nil
-        if stealTarget ~= nil or combatTarget ~= nil then
+        local pumpkinTarget = wantPumpkin and HalloweenPumpkinManager and HalloweenPumpkinManager:GetTarget() or nil
+        if stealTarget ~= nil or combatTarget ~= nil or pumpkinTarget ~= nil then
             State.halloweenIdleSince = nil
             return true
         end
@@ -3294,12 +3567,15 @@ local function hasHalloweenWork()
         if dim then
             local worldEggs = dim:FindFirstChild("WorldEggs")
             local monsters = dim:FindFirstChild("Monsters")
+            local pumpkinsFolder = dim:FindFirstChild("RunawayPumpkins")
             local hasLoadedEggs = worldEggs and #worldEggs:GetChildren() > 0
             local hasLoadedMonsters = monsters and #monsters:GetChildren() > 0
-            if (wantSteal and hasLoadedEggs) or (wantCombat and hasLoadedMonsters) then
+            local hasLoadedPumpkins = pumpkinsFolder and #pumpkinsFolder:GetChildren() > 0
+            if (wantSteal and hasLoadedEggs) or (wantCombat and hasLoadedMonsters) or (wantPumpkin and hasLoadedPumpkins) then
                 local stealTarget = wantSteal and HalloweenStealManager and HalloweenStealManager:SelectTargetEgg() or nil
                 local combatTarget = wantCombat and HalloweenCombatManager and HalloweenCombatManager:GetClosestMonster() or nil
-                if stealTarget == nil and combatTarget == nil then
+                local pumpkinTarget = wantPumpkin and HalloweenPumpkinManager and HalloweenPumpkinManager:GetTarget() or nil
+                if stealTarget == nil and combatTarget == nil and pumpkinTarget == nil then
                     return false
                 end
             end
@@ -3356,6 +3632,30 @@ WorkerScheduler:Register("CandyCaneFarm", 0.05, function()
     PriorityManager:Release("CandyCane")
 end)
 
+WorkerScheduler:Register("HalloweenPumpkin", 0.05, function()
+    if not getgenv().config.autoPumpkin or isHalloweenMapClosed() or not hasHalloweenWork() then
+        PriorityManager:Release("Pumpkin")
+        return
+    end
+    if not PriorityManager:CanRun("Pumpkin") then return end
+
+    if not HalloweenPortalManager.IsInHalloweenDimension() then
+        PriorityManager:Claim("Pumpkin")
+        HalloweenPortalManager.EnterDimension(5.0)
+        PriorityManager:Release("Pumpkin")
+        return
+    end
+
+    if not (HalloweenPumpkinManager and HalloweenPumpkinManager:IsCarrying()) and HalloweenPumpkinManager:GetTarget() == nil then
+        PriorityManager:Release("Pumpkin")
+        return
+    end
+
+    PriorityManager:Claim("Pumpkin")
+    pcall(function() HalloweenPumpkinManager:Process() end)
+    PriorityManager:Release("Pumpkin")
+end)
+
 WorkerScheduler:Register("AutoUpgrades", 6.0, function()
     if not PriorityManager:CanRun("Upgrades") then return end
     if getgenv().config.autoUpgradeTreadmill then tryUpgradeTreadmill() end
@@ -3385,6 +3685,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     if not halloweenBusy and inHalloween then
         PriorityManager:Release("HalloweenSteal")
         PriorityManager:Release("CandyCane")
+        PriorityManager:Release("Pumpkin")
         if isNormalStealPanelTarget() or getgenv().config.autoFarm or getgenv().config.autoTreadmill then
             if not isNormalStealPanelTarget() then
                 State.halloweenIdleCooldownUntil = os.clock() + 8.0
@@ -5614,6 +5915,16 @@ createToggle("Candy Cane Monster Farm", "Auto weapon swap combat in dimension", 
     saveStuff()
     if not state and HalloweenCombatManager and HalloweenCombatManager.Abort then
         HalloweenCombatManager:Abort()
+    end
+end)
+
+createToggle("Auto Pumpkin", "Auto catch runaway pumpkins & deposit at Altar", currentSettings.AutoPumpkin, halloweenCategory, 5, function(state)
+    getgenv().config.autoPumpkin = state
+    getgenv().AutoCatchPumpkins = state
+    currentSettings.AutoPumpkin = state
+    saveStuff()
+    if not state and HalloweenPumpkinManager and HalloweenPumpkinManager.Abort then
+        HalloweenPumpkinManager:Abort()
     end
 end)
 

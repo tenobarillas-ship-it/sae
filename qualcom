@@ -2,7 +2,7 @@
 -- [ SYNTAX HUB - COMPLETE FINAL UNIFIED SCRIPT ]
 -- ==============================================================================
 
-local Services = setmetatable({
+local Services = {
     Players = game:GetService("Players"),
     Workspace = game:GetService("Workspace"),
     RunService = game:GetService("RunService"),
@@ -12,21 +12,8 @@ local Services = setmetatable({
     SoundService = game:GetService("SoundService"),
     CollectionService = game:GetService("CollectionService"),
     HttpService = game:GetService("HttpService"),
-    UserInputService = game:GetService("UserInputService"),
-    ProximityPromptService = game:GetService("ProximityPromptService"),
-    Lighting = game:GetService("Lighting"),
-    CoreGui = game:GetService("CoreGui"),
-    StarterGui = game:GetService("StarterGui")
-}, {
-    __index = function(self, key)
-        local ok, svc = pcall(game.GetService, game, key)
-        if ok and svc then
-            rawset(self, key, svc)
-            return svc
-        end
-        return nil
-    end
-})
+    UserInputService = game:GetService("UserInputService")
+}
 
 local LocalPlayer = Services.Players.LocalPlayer or Services.Players.PlayerAdded:Wait()
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -38,7 +25,10 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 local UniversalCompat = {}
 
--- VirtualInputManager removed to prevent anti-cheat (UGI) detection
+local VIM = nil
+pcall(function()
+    VIM = game:GetService("VirtualInputManager")
+end)
 
 function UniversalCompat.FireProximityPrompt(prompt)
     if not prompt or not prompt.Parent then return false end
@@ -69,7 +59,14 @@ function UniversalCompat.FireProximityPrompt(prompt)
         success = true
     end)
 
--- Synthetic input removed for stealth
+    -- Method C: VirtualInputManager Key simulation fallback
+    if VIM and prompt.KeyboardKeyCode and prompt.KeyboardKeyCode ~= Enum.KeyCode.Unknown then
+        pcall(function()
+            VIM:SendKeyEvent(true, prompt.KeyboardKeyCode, false, game)
+            task.wait(0.03)
+            VIM:SendKeyEvent(false, prompt.KeyboardKeyCode, false, game)
+        end)
+    end
 
     return success
 end
@@ -126,7 +123,19 @@ function UniversalCompat.ClickButton(btn)
         end
     end
 
--- Synthetic mouse event removed for stealth
+    -- Method C: VirtualInputManager click at button AbsolutePosition
+    if VIM then
+        pcall(function()
+            local absPos = btn.AbsolutePosition
+            local absSize = btn.AbsoluteSize
+            local cx = absPos.X + (absSize.X / 2)
+            local cy = absPos.Y + (absSize.Y / 2)
+            VIM:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
+            task.wait(0.02)
+            VIM:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
+            triggered = true
+        end)
+    end
 
     return triggered
 end
@@ -142,10 +151,6 @@ local currentSettings = {
     AutoUpgradeTreadmill = false,
     AutoUpgradeBase = false,
     AutoClaimMastery = false,
-    AutoEquipBest = false,
-    AntiTrap = true,
-    AntiRagdoll = true,
-    AntiAfk = true,
     AutoCatchButterfly = false,
     AutoWispQuest = false,
     AutoTradeUp = false,
@@ -154,87 +159,15 @@ local currentSettings = {
     TargetAreas = { ["All"] = true },
     MinRarity = "All",
     AutoHalloweenSteal = false,
-    InstantHalloweenSteal = false,
-    AutoBuyHalloweenEgg = false,
     HalloweenTargetAreas = { ["All"] = true },
     HalloweenMinRarity = "All",
     AutoCandyCane = false,
     AutoPumpkin = false,
-
-    -- Stealing & Egg Management Expansions
-    SpecificTargetEggs = {},
-    StealMissingIndex = false,
-    AutoStealMinigame = false,
-    AutoCaptureEventEgg = false,
-    TakeFromHolder = false,
-    AutoCatchShootingStar = false,
-
-    -- Placement & Hatching
-    AutoPlaceEgg = false,
-    PlaceRarities = {},
-    PlaceSpecies = {},
-    PlaceMinIncome = 0,
-    PlaceOrder = "Highest Value",
-    AutoHatch = false,
-    AutoMutate = false,
-
-    -- Pet Management
-    AutoSellPets = false,
-    SellPetMaxRarity = "Common",
-    KeepMutatedPets = true,
-    AutoSellEggs = false,
-    SellEggMaxRarity = "Common",
-    KeepMutatedEggs = true,
-    AutoFuseMachine = false,
-    AutoFavorite = false,
-
-    -- Training & Movement
-    StayOnTreadmill = false,
-    AutoAdminTreadmill = false,
-    SpeedBoost = false,
-    BoostSpeed = 150,
-    InfiniteJump = false,
-
-    -- Halloween & Events
-    AutoGhostDog = false,
-    AutoFishing = false,
-    FishingLuck = "Max",
-    AutoPhantomExpress = false,
-    AutoVacuumGhouler = false,
-    AutoTradeSouls = false,
-    AutoBanjoCricket = false,
-
-    -- Character & Utility
-    InstantPrompts = false,
-    AutoRejoin = false,
-
-    -- ESP & Visuals
-    EspEggs = false,
-    EspFixedSize = true,
-    EspOwnBase = false,
-    EspOtherBase = false,
-    EspMinRarity = "All",
-    EspGuards = false,
-    EspPlayers = false,
-
-    -- Performance & Optimization
-    Optimizer = false,
-    Disable3DRender = false,
-    FpsCap = 60,
-    FarmHUD = false,
-    HideGameUI = false,
-
     TaskPriorities = {
         "Auto Steal",
-        "Shooting Star",
-        "Event Egg Capture",
         "Candy Cane Farm",
         "Auto Pumpkin",
-        "Ghost Dog & Fishing",
-        "Phantom Express",
         "Enchanted / Bloom Event",
-        "Auto Place Egg",
-        "Auto Hatch & Fuse",
         "Auto Upgrades",
         "Auto Treadmill"
     }
@@ -282,7 +215,8 @@ local function loadStuff()
     if type(currentSettings.HalloweenMinRarity) ~= "string" or string.find(currentSettings.HalloweenMinRarity, "table:") then
         currentSettings.HalloweenMinRarity = "All"
     end
-    -- AutoHalloweenSteal restored
+    -- Temporarily force AutoHalloweenSteal off while feature is hidden
+    currentSettings.AutoHalloweenSteal = false
     end
 
 loadStuff()
@@ -296,10 +230,6 @@ getgenv().config.autoTreadmill = currentSettings.AutoTreadmill
 getgenv().config.autoUpgradeTreadmill = currentSettings.AutoUpgradeTreadmill
 getgenv().config.autoUpgradeBase = currentSettings.AutoUpgradeBase
 getgenv().config.autoClaimMastery = currentSettings.AutoClaimMastery
-getgenv().config.autoEquipBest = currentSettings.AutoEquipBest
-getgenv().config.antiTrap = currentSettings.AntiTrap
-getgenv().config.antiRagdoll = currentSettings.AntiRagdoll
-getgenv().config.antiAfk = currentSettings.AntiAfk
 getgenv().config.autoCatchButterfly = currentSettings.AutoCatchButterfly
 getgenv().config.autoWispQuest = currentSettings.AutoWispQuest
 getgenv().config.autoTradeUp = currentSettings.AutoTradeUp
@@ -311,59 +241,6 @@ getgenv().config.halloweenMinRarity = currentSettings.HalloweenMinRarity
 getgenv().config.autoCandyCane = currentSettings.AutoCandyCane
 getgenv().config.autoPumpkin = currentSettings.AutoPumpkin
 getgenv().AutoCatchPumpkins = currentSettings.AutoPumpkin
-
--- Extended configuration flags
-getgenv().config.specificTargetEggs = currentSettings.SpecificTargetEggs
-getgenv().config.stealMissingIndex = currentSettings.StealMissingIndex
-getgenv().config.instantHalloweenSteal = currentSettings.InstantHalloweenSteal
-getgenv().config.autoBuyHalloweenEgg = currentSettings.AutoBuyHalloweenEgg
-getgenv().config.autoStealMinigame = currentSettings.AutoStealMinigame
-getgenv().config.autoCaptureEventEgg = currentSettings.AutoCaptureEventEgg
-getgenv().config.takeFromHolder = currentSettings.TakeFromHolder
-getgenv().config.autoCatchShootingStar = currentSettings.AutoCatchShootingStar
-
-getgenv().config.autoPlaceEgg = currentSettings.AutoPlaceEgg
-getgenv().config.placeRarities = currentSettings.PlaceRarities
-getgenv().config.placeSpecies = currentSettings.PlaceSpecies
-getgenv().config.placeMinIncome = currentSettings.PlaceMinIncome
-getgenv().config.placeOrder = currentSettings.PlaceOrder
-getgenv().config.autoHatch = currentSettings.AutoHatch
-getgenv().config.autoMutate = currentSettings.AutoMutate
-
-getgenv().config.autoSellPets = currentSettings.AutoSellPets
-getgenv().config.sellPetMaxRarity = currentSettings.SellPetMaxRarity
-getgenv().config.keepMutatedPets = currentSettings.KeepMutatedPets
-getgenv().config.autoSellEggs = currentSettings.AutoSellEggs
-getgenv().config.sellEggMaxRarity = currentSettings.SellEggMaxRarity
-getgenv().config.keepMutatedEggs = currentSettings.KeepMutatedEggs
-getgenv().config.autoFuseMachine = currentSettings.AutoFuseMachine
-getgenv().config.autoFavorite = currentSettings.AutoFavorite
-
-getgenv().config.stayOnTreadmill = currentSettings.StayOnTreadmill
-getgenv().config.autoAdminTreadmill = currentSettings.AutoAdminTreadmill
-getgenv().config.speedBoost = currentSettings.SpeedBoost
-getgenv().config.boostSpeed = currentSettings.BoostSpeed
-getgenv().config.infiniteJump = currentSettings.InfiniteJump
-
-getgenv().config.autoGhostDog = currentSettings.AutoGhostDog
-getgenv().config.autoFishing = currentSettings.AutoFishing
-getgenv().config.fishingLuck = currentSettings.FishingLuck
-getgenv().config.autoPhantomExpress = currentSettings.AutoPhantomExpress
-getgenv().config.autoVacuumGhouler = currentSettings.AutoVacuumGhouler
-getgenv().config.autoTradeSouls = currentSettings.AutoTradeSouls
-getgenv().config.autoBanjoCricket = currentSettings.AutoBanjoCricket
-
-getgenv().config.instantPrompts = currentSettings.InstantPrompts
-getgenv().config.autoRejoin = currentSettings.AutoRejoin
-getgenv().config.espEggs = currentSettings.EspEggs
-getgenv().config.espGuards = currentSettings.EspGuards
-getgenv().config.espPlayers = currentSettings.EspPlayers
-
-getgenv().config.optimizer = currentSettings.Optimizer
-getgenv().config.disable3DRender = currentSettings.Disable3DRender
-getgenv().config.fpsCap = currentSettings.FpsCap
-getgenv().config.farmHUD = currentSettings.FarmHUD
-getgenv().config.hideGameUI = currentSettings.HideGameUI
 
 local HalloweenPortalManager, HalloweenAreaManager, HalloweenCombatManager, HalloweenPumpkinManager, HalloweenStealManager, PriorityManager, getBestEgg, DynamicRarityResolver, activeTheme, Window
 
@@ -583,129 +460,8 @@ local Remotes = {
     ClaimNet = getRemote("RF/Butterflies/AskClaimNet"),
     TradeUp = getRemote("RF/Butterflies/AskTradeUp"),
     CraftEssence = getRemote("RF/Butterflies/AskCraftEssence"),
-    WispRequest = getRemote("RF/WispCompanion/Request"),
-    WearBest = getRemote("RF/Haul/WearBest"),
-    AskPlaceEgg = getRemote("RF/EggWorld/AskPlaceEgg"),
-    AskRedeemAll = getRemote("RF/Codex/AskRedeemAll"),
-    AskRedeemLimitedEgg = getRemote("RF/Codex/AskRedeemLimitedEgg"),
-    AskCollectOffline = getRemote("RF/AwayEarnings/AskCollect"),
-    AskUseMutationConsumable = getRemote("RF/BossMastery/AskUseMutationConsumable"),
-
-    -- Pet, Fuse & Satchel Remotes
-    AskHatch = getRemote("RF/EggWorld/AskHatch"),
-    SellSelection = getRemote("RE/PetSatchel/SellSelection"),
-    WriteFavourite = getRemote("RE/PetSatchel/WriteFavourite"),
-    LoadPet = getRemote("RF/Fusery/LoadPet"),
-    BeginFuse = getRemote("RF/Fusery/BeginFuse"),
-    FinishReveal = getRemote("RF/Fusery/FinishReveal"),
-    ConfirmBriefing = getRemote("RF/Fusery/ConfirmBriefing"),
-
-    -- Halloween & Events
-    AskBuyHalloweenEgg = getRemote("RF/HalloweenDimension/AskBuyEgg"),
-    GhostDogTalk = getRemote("RF/GhostDogQuest/Talk"),
-    GhostDogDive = getRemote("RF/GhostDogQuest/Dive"),
-    GhostDogSurface = getRemote("RF/GhostDogQuest/Surface"),
-    GhostDogClaim = getRemote("RF/GhostDogQuest/Claim"),
-    FishingCast = getRemote("RF/Fishing/Cast"),
-    FishingReel = getRemote("RF/Fishing/Reel"),
-    TrainAction = getRemote("RF/TrainEvent/Action"),
-    GhostBossSuction = getRemote("RE/GhostBoss/Suction"),
-    BanjoClaim = getRemote("RF/BanjoCricket/AskClaim"),
-    ShootingStarCatch = getRemote("RE/ShootingStar/Catch"),
-    ShootingStarHold = getRemote("RE/ShootingStar/Hold")
+    WispRequest = getRemote("RF/WispCompanion/Request")
 }
-
-
--- ==============================================================================
--- [ CHARACTER PROTECTION & IMMUNITY SYSTEM ]
--- Adopted & optimized from ChiliHub: Anti-Trap, Anti-Ragdoll, Anti-AFK
--- ==============================================================================
-
-local CharacterProtection = {
-    AntiTrapEnabled = true,
-    AntiRagdollEnabled = true,
-    AntiAfkEnabled = true
-}
-
-function CharacterProtection:Init()
-    -- 1. Anti-AFK (Disables Roblox 20-minute idle disconnect)
-    pcall(function()
-        if typeof(getconnections) == "function" then
-            for _, conn in ipairs(getconnections(LocalPlayer.Idled)) do
-                pcall(function() conn:Disable() end)
-            end
-        end
-        -- Connection-only Anti-AFK (matches ChiliHub, 100% undetected)
-    end)
-
-    -- 2. Anti-Trap (Neutralizes enemy & other players' traps via CollectionService)
-    local function neutralizeTrap(trap)
-        if not trap or not trap.Parent then return end
-        local owner = trap:GetAttribute("Owner")
-        if owner and tostring(owner) == LocalPlayer.Name then return end -- Keep player's own traps working!
-
-        for _, part in ipairs(trap:GetDescendants()) do
-            if part:IsA("BasePart") then
-                pcall(function() part.CanTouch = false end)
-            end
-        end
-        if trap:IsA("BasePart") then
-            pcall(function() trap.CanTouch = false end)
-        end
-        trap.DescendantAdded:Connect(function(part)
-            if part:IsA("BasePart") then
-                pcall(function() part.CanTouch = false end)
-            end
-        end)
-    end
-
-    pcall(function()
-        for _, trap in ipairs(Services.CollectionService:GetTagged("PlacedTrap")) do
-            neutralizeTrap(trap)
-        end
-        Services.CollectionService:GetInstanceAddedSignal("PlacedTrap"):Connect(function(trap)
-            task.defer(neutralizeTrap, trap)
-        end)
-    end)
-
-    -- 3. Anti-Ragdoll (Instantly recovers character if knocked down by monsters, guards, or bats)
-    local ragdollStateTypes = {
-        [Enum.HumanoidStateType.Physics] = true,
-        [Enum.HumanoidStateType.Ragdoll] = true,
-        [Enum.HumanoidStateType.FallingDown] = true
-    }
-    local ragdollConstraintClasses = {
-        BallSocketConstraint = true,
-        NoCollisionConstraint = true,
-        HingeConstraint = true
-    }
-
-    local function setupCharAntiRagdoll(char)
-        if not char then return end
-        local hum = char:WaitForChild("Humanoid", 5)
-        if not hum then return end
-
-        hum.StateChanged:Connect(function(_, newState)
-            if self.AntiRagdollEnabled and ragdollStateTypes[newState] then
-                pcall(function()
-                    for _, desc in ipairs(char:GetDescendants()) do
-                        if ragdollConstraintClasses[desc.ClassName] then
-                            pcall(function() desc:Destroy() end)
-                        elseif desc:IsA("Motor6D") and not desc.Enabled then
-                            desc.Enabled = true
-                        end
-                    end
-                    hum:ChangeState(Enum.HumanoidStateType.GettingUp)
-                end)
-            end
-        end)
-    end
-
-    if LocalPlayer.Character then setupCharAntiRagdoll(LocalPlayer.Character) end
-    LocalPlayer.CharacterAdded:Connect(setupCharAntiRagdoll)
-end
-
-CharacterProtection:Init()
 
 local clientFolder = Services.ReplicatedStorage:WaitForChild("Client", 5)
 local eggStateModule = clientFolder and clientFolder:WaitForChild("EggState", 5)
@@ -1251,22 +1007,7 @@ function EggDetector:CheckHolding()
 end
 
 local function isHoldingEgg()
-    if EggDetector:CheckHolding() then return true end
-    if EggState and typeof(EggState) == "table" and EggState.CarryUid ~= nil then
-        return true
-    end
-    local char = LocalPlayer.Character
-    if char then
-        for _, child in ipairs(char:GetChildren()) do
-            if child:IsA("Tool") and (child.Name:find("Egg") or child:GetAttribute("UID") or child:FindFirstChild("Egg")) then
-                return true
-            end
-            if child:IsA("BasePart") and child:FindFirstChild("EggWeld") then
-                return true
-            end
-        end
-    end
-    return false
+    return EggDetector:CheckHolding()
 end
 
 local function hopOffTreadmill()
@@ -1289,28 +1030,10 @@ local function hopOffTreadmill()
 end
 
 local function dropHeldEggDirect()
-    -- 1. Game client EggState direct call (highest priority, matches ChiliHub)
-    if EggState and typeof(EggState.DropFieldEgg) == "function" then
-        pcall(function() EggState.DropFieldEgg("PlayerRequest") end)
-    end
-
-    -- 2. Network remote fallbacks
     if Remotes.AskFieldEggDrop then
-        pcall(function() Remotes.AskFieldEggDrop:InvokeServer("PlayerRequest") end)
         pcall(function() Remotes.AskFieldEggDrop:InvokeServer({ Reason = "PlayerRequest" }) end)
-        pcall(function() Remotes.AskFieldEggDrop:InvokeServer() end)
-    end
-
-    -- 3. Click GUI Drop button fallback if still holding
-    if isHoldingEgg() then
-        for _, gui in ipairs(PlayerGui:GetChildren()) do
-            if gui:IsA("ScreenGui") and gui.Enabled and gui.Name ~= "SyntaxHubGUI" then
-                local btn = gui:FindFirstChild("Drop", true) or (gui.Name == "DropHeldEgg" and gui:FindFirstChildWhichIsA("GuiButton", true))
-                if btn and (btn:IsA("TextButton") or btn:IsA("ImageButton")) then
-                    UniversalCompat.ClickButton(btn)
-                end
-            end
-        end
+    elseif EggState and typeof(EggState.DropFieldEgg) == "function" then
+        pcall(function() EggState.DropFieldEgg("PlayerRequest") end)
     end
 end
 
@@ -2904,811 +2627,33 @@ end
 -- ==============================================================================
 -- [ TASK PRIORITY ARBITRATOR ]
 -- ==============================================================================
-
--- ==============================================================================
--- [ AUTOMATION MANAGERS: EXPANDED EVENT & FARM SYSTEMS ]
--- ==============================================================================
-
-local ShootingStarManager = {
-    IsBusy = false,
-    CurrentStar = nil,
-    StarsCollected = 0
-}
-
-function ShootingStarManager:GetActiveStar()
-    local starFolder = Services.Workspace:FindFirstChild("ShootingStarClient") 
-                    or Services.Workspace:FindFirstChild("ShootingStars")
-                    or Services.Workspace:FindFirstChild("FallingStars")
-    if starFolder then
-        for _, star in ipairs(starFolder:GetChildren()) do
-            if star:IsA("Model") or star:IsA("BasePart") then
-                return star
-            end
-        end
-    end
-    for _, star in ipairs(Services.CollectionService:GetTagged("ShootingStar")) do
-        if star and star.Parent then return star end
-    end
-    return nil
-end
-
-function ShootingStarManager:Process()
-    if not getgenv().config.autoCatchShootingStar or State.isStealingActive or isHoldingEgg() then
-        self.IsBusy = false
-        return
-    end
-
-    local star = self:GetActiveStar()
-    if not star then
-        self.IsBusy = false
-        return
-    end
-
-    local _, root, hum = getAliveRig()
-    if not root or not hum then return end
-
-    self.IsBusy = true
-    hopOffTreadmill()
-
-    local starPos = nil
-    if star:IsA("BasePart") then
-        starPos = star.Position
-    elseif star:IsA("Model") then
-        local ok, pivot = pcall(star.GetPivot, star)
-        starPos = ok and pivot.Position or (star.PrimaryPart and star.PrimaryPart.Position)
-    end
-
-    if not starPos then
-        self.IsBusy = false
-        return
-    end
-
-    local dist = (root.Position - starPos).Magnitude
-    if dist > 8 then
-        local tweenDuration = math.clamp(dist / 280, 0.2, 3.5)
-        local tw = Services.TweenService:Create(root, TweenInfo.new(tweenDuration, Enum.EasingStyle.Linear), {
-            CFrame = CFrame.new(starPos + Vector3.new(0, 3, 0))
-        })
-        tw:Play()
-        tw.Completed:Wait()
-    end
-
-    local starId = star:GetAttribute("Id") or star:GetAttribute("UID") or star.Name
-    if Remotes.ShootingStarCatch then
-        pcall(function() Remotes.ShootingStarCatch:FireServer(starId) end)
-    end
-
-    local prompt = star:FindFirstChildWhichIsA("ProximityPrompt", true)
-    if prompt and prompt.Enabled then
-        UniversalCompat.FireProximityPrompt(prompt)
-    end
-
-    self.StarsCollected = self.StarsCollected + 1
-    task.wait(0.3)
-    self.IsBusy = false
-end
-
-local EventEggCaptureManager = {
-    IsBusy = false,
-    Holding = false,
-    EggsCaptured = 0,
-    LastSearch = 0
-}
-
-function EventEggCaptureManager:GetEventEgg()
-    local candidates = {
-        Services.Workspace:FindFirstChild("EventEggClient"),
-        Services.Workspace:FindFirstChild("EventEgg"),
-        Services.Workspace:FindFirstChild("RoamingEventEgg")
-    }
-    for _, cand in ipairs(candidates) do
-        if cand and cand.Parent then return cand end
-    end
-    for _, tagged in ipairs(Services.CollectionService:GetTagged("EventEgg")) do
-        if tagged and tagged.Parent then return tagged end
-    end
-    return nil
-end
-
-function EventEggCaptureManager:IsPlayerHoldingEventEgg()
-    local char = LocalPlayer.Character
-    if not char then return false end
-    if char:GetAttribute("HoldingEventEgg") == true then return true end
-    for _, tool in ipairs(char:GetChildren()) do
-        if tool:IsA("Tool") and (tool.Name:find("EventEgg") or tool:GetAttribute("IsEventEgg")) then
-            return true
-        end
-    end
-    return false
-end
-
-function EventEggCaptureManager:Process()
-    if not getgenv().config.autoCaptureEventEgg or State.isStealingActive then
-        self.IsBusy = false
-        return
-    end
-
-    local _, root, hum = getAliveRig()
-    if not root or not hum then return end
-
-    if self:IsPlayerHoldingEventEgg() then
-        self.Holding = true
-        self.IsBusy = true
-        local safePos = root.Position
-        if safePos.Y < 120 then
-            root.CFrame = CFrame.new(safePos.X, 130, safePos.Z)
-        end
-        return
-    else
-        self.Holding = false
-    end
-
-    local egg = self:GetEventEgg()
-    if not egg then
-        self.IsBusy = false
-        return
-    end
-
-    self.IsBusy = true
-    hopOffTreadmill()
-
-    local eggPos = nil
-    if egg:IsA("BasePart") then
-        eggPos = egg.Position
-    elseif egg:IsA("Model") then
-        local ok, pivot = pcall(egg.GetPivot, egg)
-        eggPos = ok and pivot.Position or (egg.PrimaryPart and egg.PrimaryPart.Position)
-    end
-
-    if eggPos then
-        local dist = (root.Position - eggPos).Magnitude
-        if dist > 6 then
-            local dur = math.clamp(dist / 260, 0.2, 3.0)
-            local tw = Services.TweenService:Create(root, TweenInfo.new(dur, Enum.EasingStyle.Linear), {
-                CFrame = CFrame.new(eggPos + Vector3.new(0, 2, 0))
-            })
-            tw:Play()
-            tw.Completed:Wait()
-        end
-
-        local prompt = egg:FindFirstChildWhichIsA("ProximityPrompt", true)
-        if prompt and prompt.Enabled then
-            UniversalCompat.FireProximityPrompt(prompt)
-        end
-    end
-
-    task.wait(0.2)
-    self.IsBusy = false
-end
-
-local GhostDogFishingManager = {
-    IsBusy = false,
-    LastDogTalk = 0,
-    LastCast = 0,
-    IsFishing = false
-}
-
-function GhostDogFishingManager:ProcessGhostDog()
-    if not getgenv().config.autoGhostDog or State.isStealingActive or isHoldingEgg() then return end
-    if os.clock() - self.LastDogTalk < 4 then return end
-    self.LastDogTalk = os.clock()
-
-    if Remotes.GhostDogTalk then
-        pcall(function() Remotes.GhostDogTalk:InvokeServer() end)
-    end
-    task.wait(0.3)
-    if Remotes.GhostDogDive then
-        pcall(function() Remotes.GhostDogDive:InvokeServer() end)
-    end
-    task.wait(0.5)
-    if Remotes.GhostDogSurface then
-        pcall(function() Remotes.GhostDogSurface:InvokeServer() end)
-    end
-    task.wait(0.3)
-    if Remotes.GhostDogClaim then
-        pcall(function() Remotes.GhostDogClaim:InvokeServer() end)
-    end
-end
-
-function GhostDogFishingManager:ProcessFishing()
-    if not getgenv().config.autoFishing or State.isStealingActive or isHoldingEgg() then return end
-    if os.clock() - self.LastCast < 3.0 then return end
-    self.LastCast = os.clock()
-
-    local char = LocalPlayer.Character
-    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-    local rodTool = nil
-    for _, cont in ipairs({char, backpack}) do
-        if cont then
-            for _, item in ipairs(cont:GetChildren()) do
-                if item:IsA("Tool") and (item.Name:find("Rod") or item:GetAttribute("IsFishingRod")) then
-                    rodTool = item
-                    break
-                end
-            end
-        end
-    end
-
-    if rodTool and char and char:FindFirstChildOfClass("Humanoid") then
-        if rodTool.Parent ~= char then
-            pcall(function() char:FindFirstChildOfClass("Humanoid"):EquipTool(rodTool) end)
-            task.wait(0.2)
-        end
-    end
-
-    if Remotes.FishingCast then
-        local luckVal = getgenv().config.fishingLuck or "Max"
-        pcall(function() Remotes.FishingCast:InvokeServer({ Luck = luckVal }) end)
-        task.wait(1.5)
-        if Remotes.FishingReel then
-            pcall(function() Remotes.FishingReel:InvokeServer() end)
-        end
-    end
-end
-
-function GhostDogFishingManager:Process()
-    self.IsBusy = true
-    pcall(function() self:ProcessGhostDog() end)
-    pcall(function() self:ProcessFishing() end)
-    self.IsBusy = false
-end
-
-local PhantomExpressManager = {
-    IsBusy = false,
-    LastBoardAttempt = 0,
-    LastSuction = 0
-}
-
-function PhantomExpressManager:Process()
-    if State.isStealingActive or isHoldingEgg() then
-        self.IsBusy = false
-        return
-    end
-
-    if getgenv().config.autoPhantomExpress and Remotes.TrainAction then
-        if os.clock() - self.LastBoardAttempt > 3.0 then
-            self.LastBoardAttempt = os.clock()
-            pcall(function()
-                Remotes.TrainAction:InvokeServer({ Action = "Board" })
-            end)
-        end
-    end
-
-    if getgenv().config.autoVacuumGhouler and Remotes.GhostBossSuction then
-        if os.clock() - self.LastSuction > 0.4 then
-            self.LastSuction = os.clock()
-            local boss = Services.Workspace:FindFirstChild("GhostBoss", true)
-                      or Services.Workspace:FindFirstChild("GhoulerBoss", true)
-            if boss then
-                pcall(function()
-                    Remotes.GhostBossSuction:FireServer({ State = true, Target = boss })
-                end)
-            end
-        end
-    end
-end
-
-local AutoPlaceEggManager = {
-    IsBusy = false,
-    LastPlaceAttempt = 0
-}
-
-function AutoPlaceEggManager:GetPlayerBackpackEggs()
-    local eggs = {}
-    if EggState and typeof(EggState.ReadOwnerEggs) == "function" then
-        local ok, data = pcall(EggState.ReadOwnerEggs, LocalPlayer.UserId)
-        if ok and type(data) == "table" then
-            for uid, info in pairs(data) do
-                if type(info) == "table" and not info.Placement and not info.Placed then
-                    info.Uid = uid
-                    table.insert(eggs, info)
-                end
-            end
-        end
-    end
-
-    if #eggs == 0 then
-        local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-        if backpack then
-            for _, item in ipairs(backpack:GetChildren()) do
-                local uid = item:GetAttribute("UID")
-                if uid then
-                    table.insert(eggs, {
-                        Uid = uid,
-                        AssetCategory = item.Name,
-                        Scale = item:GetAttribute("AssetScale") or 1
-                    })
-                end
-            end
-        end
-    end
-    return eggs
-end
-
-function AutoPlaceEggManager:Process()
-    if not getgenv().config.autoPlaceEgg or State.isStealingActive or isHoldingEgg() then
-        self.IsBusy = false
-        return
-    end
-
-    if os.clock() - self.LastPlaceAttempt < 2.0 then return end
-    self.LastPlaceAttempt = os.clock()
-
-    findMyPlot()
-    local plot = State.myPlot
-    if not plot then return end
-
-    local penSlots = plot:FindFirstChild("EggPenSlots") or plot:FindFirstChild("EggSlots") or plot:FindFirstChild("PenGrid")
-    local penCenter = penSlots and (penSlots:IsA("BasePart") and penSlots.Position or penSlots:GetPivot().Position) or (plot:GetPivot().Position)
-
-    local unplacedEggs = self:GetPlayerBackpackEggs()
-    if #unplacedEggs == 0 then return end
-
-    local _, root, hum = getAliveRig()
-    if not root or not hum then return end
-
-    -- Move character near base pen if too far (server checks proximity)
-    local distToPen = (root.Position - penCenter).Magnitude
-    if distToPen > 35 then
-        pcall(function()
-            root.CFrame = CFrame.new(penCenter + Vector3.new(0, 2, 0))
-            root.AssemblyLinearVelocity = Vector3.zero
-        end)
-        task.wait(0.2)
-    end
-
-    local order = getgenv().config.placeOrder or "Highest Value"
-    if order == "Highest Value" then
-        table.sort(unplacedEggs, function(a, b)
-            local valA = (tonumber(a.EarningRate) or 0) * (tonumber(a.Scale) or 1)
-            local valB = (tonumber(b.EarningRate) or 0) * (tonumber(b.Scale) or 1)
-            return valA > valB
-        end)
-    elseif order == "Biggest" then
-        table.sort(unplacedEggs, function(a, b)
-            return (tonumber(a.Scale) or 1) > (tonumber(b.Scale) or 1)
-        end)
-    end
-
-    for _, slot in ipairs(penSlots:GetChildren()) do
-        if not slot:GetAttribute("Occupied") and #unplacedEggs > 0 then
-            local egg = table.remove(unplacedEggs, 1)
-            if egg and Remotes.AskPlaceEgg then
-                -- Equip egg tool if required by server engine
-                if EggState and typeof(EggState.WearEggTool) == "function" then
-                    pcall(function() EggState.WearEggTool(egg.Uid) end)
-                    task.wait(0.08)
-                else
-                    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-                    if backpack and hum then
-                        for _, tool in ipairs(backpack:GetChildren()) do
-                            if tool:IsA("Tool") and tool:GetAttribute("UID") == egg.Uid then
-                                pcall(function() hum:EquipTool(tool) end)
-                                task.wait(0.08)
-                                break
-                            end
-                        end
-                    end
-                end
-
-                pcall(function()
-                    Remotes.AskPlaceEgg:InvokeServer({
-                        Uid = egg.Uid,
-                        LocalCFrame = slot.CFrame
-                    })
-                end)
-                task.wait(0.15)
-
-                if EggState and typeof(EggState.DoffEggTool) == "function" then
-                    pcall(EggState.DoffEggTool)
-                elseif hum then
-                    pcall(function() hum:UnequipTools() end)
-                end
-            end
-        end
-    end
-end
-
-local AutoHatchAndFuseManager = {
-    IsBusy = false,
-    LastHatch = 0,
-    LastFuse = 0,
-    LastSell = 0,
-    LastMutate = 0
-}
-
-function AutoHatchAndFuseManager:ProcessHatch()
-    if not getgenv().config.autoHatch or State.isStealingActive or isHoldingEgg() then return end
-    if os.clock() - self.LastHatch < 1.0 then return end
-    self.LastHatch = os.clock()
-
-    -- Hatching operates on PLACED EGGS on player base pens when ready to hatch
-    if EggState and typeof(EggState.ReadOwnerEggs) == "function" and typeof(EggState.IsReadyToHatch) == "function" then
-        local ok, ownerEggs = pcall(EggState.ReadOwnerEggs, LocalPlayer.UserId)
-        if ok and type(ownerEggs) == "table" then
-            for uid, eggData in pairs(ownerEggs) do
-                if type(eggData) == "table" and (eggData.Placement ~= nil or eggData.Placed == true) then
-                    local isReady = false
-                    pcall(function() isReady = (EggState.IsReadyToHatch(uid) == true) end)
-                    if isReady and Remotes.AskHatch then
-                        pcall(function()
-                            Remotes.AskHatch:InvokeServer(uid)
-                            task.wait(0.2)
-                            if Remotes.AskFinishHatch then
-                                Remotes.AskFinishHatch:InvokeServer(uid)
-                            end
-                        end)
-                        task.wait(0.2)
-                    end
-                end
-            end
-        end
-    end
-end
-
-function AutoHatchAndFuseManager:ProcessFuse()
-    if not getgenv().config.autoFuseMachine or State.isStealingActive or isHoldingEgg() then return end
-    if os.clock() - self.LastFuse < 4.0 then return end
-    self.LastFuse = os.clock()
-
-    if Remotes.ConfirmBriefing and Remotes.BeginFuse and Remotes.FinishReveal then
-        pcall(function()
-            Remotes.ConfirmBriefing:InvokeServer()
-            task.wait(0.2)
-            Remotes.BeginFuse:InvokeServer()
-            task.wait(0.3)
-            Remotes.FinishReveal:InvokeServer()
-        end)
-    end
-end
-
-function AutoHatchAndFuseManager:ProcessMutate()
-    if not getgenv().config.autoMutate or State.isStealingActive or isHoldingEgg() then return end
-    if os.clock() - self.LastMutate < 3.0 then return end
-    self.LastMutate = os.clock()
-
-    local mutateRemote = Remotes.Mutate or Remotes.ApplyMutation
-    if not mutateRemote then
-        local packages = Services.ReplicatedStorage:FindFirstChild("Packages")
-        local networking = packages and packages:FindFirstChild("Networking")
-        mutateRemote = networking and (networking:FindFirstChild("RF/Mutations/Mutate") or networking:FindFirstChild("RF/Mutations/Apply"))
-    end
-    if mutateRemote and typeof(mutateRemote.InvokeServer) == "function" then
-        pcall(function() mutateRemote:InvokeServer() end)
-    end
-end
-
-function AutoHatchAndFuseManager:ProcessSell()
-    if State.isStealingActive or isHoldingEgg() then return end
-    if os.clock() - self.LastSell < 3.0 then return end
-    self.LastSell = os.clock()
-
-    local sellPets = getgenv().config.autoSellPets == true
-    local sellEggs = getgenv().config.autoSellEggs == true
-    if not sellPets and not sellEggs then return end
-
-    local sellRemote = Remotes.SellSelection or Remotes.Sell or Remotes.SellItems
-    if not sellRemote then
-        local packages = Services.ReplicatedStorage:FindFirstChild("Packages")
-        local networking = packages and packages:FindFirstChild("Networking")
-        sellRemote = networking and (networking:FindFirstChild("RE/Trading/SellSelection") or networking:FindFirstChild("RF/Trading/Sell") or networking:FindFirstChild("RF/Shop/Sell"))
-    end
-    if sellRemote then
-        local uidsToSell = {}
-        local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-        if backpack then
-            for _, item in ipairs(backpack:GetChildren()) do
-                if item:IsA("Tool") and item:GetAttribute("ItemType") == "Pet" then
-                    local isMutated = item:GetAttribute("Mutated") == true
-                    local isFavorite = item:GetAttribute("Favourite") == true
-                    if not (getgenv().config.keepMutatedPets and isMutated) and not isFavorite then
-                        local uid = item:GetAttribute("UID")
-                        if uid then table.insert(uidsToSell, uid) end
-                    end
-                end
-            end
-        end
-        if #uidsToSell > 0 then
-            if typeof(sellRemote.FireServer) == "function" then
-                pcall(function() sellRemote:FireServer(uidsToSell) end)
-            elseif typeof(sellRemote.InvokeServer) == "function" then
-                pcall(function() sellRemote:InvokeServer(uidsToSell) end)
-            end
-        end
-    end
-end
-
-local HalloweenEventStoreManager = {
-    LastBuy = 0,
-    LastTrade = 0,
-    LastBanjo = 0
-}
-
-function HalloweenEventStoreManager:ProcessBuyEgg()
-    if not getgenv().config.autoBuyHalloweenEgg or State.isStealingActive or isHoldingEgg() then return end
-    if os.clock() - self.LastBuy < 5.0 then return end
-    self.LastBuy = os.clock()
-
-    local packages = Services.ReplicatedStorage:FindFirstChild("Packages")
-    local networking = packages and packages:FindFirstChild("Networking")
-    local buyRemote = networking and (networking:FindFirstChild("RF/Halloween/BuyEgg") or networking:FindFirstChild("RF/HalloweenEvent/BuyEgg"))
-    if buyRemote and typeof(buyRemote.InvokeServer) == "function" then
-        pcall(function() buyRemote:InvokeServer("HalloweenEgg") end)
-    end
-end
-
-function HalloweenEventStoreManager:ProcessTradeSouls()
-    if not getgenv().config.autoTradeSouls or State.isStealingActive or isHoldingEgg() then return end
-    if os.clock() - self.LastTrade < 4.0 then return end
-    self.LastTrade = os.clock()
-
-    local packages = Services.ReplicatedStorage:FindFirstChild("Packages")
-    local networking = packages and packages:FindFirstChild("Networking")
-    local tradeRemote = networking and networking:FindFirstChild("RF/Halloween/TradeSouls")
-    if tradeRemote and typeof(tradeRemote.InvokeServer) == "function" then
-        pcall(function() tradeRemote:InvokeServer() end)
-    end
-end
-
-function HalloweenEventStoreManager:ProcessBanjo()
-    if not getgenv().config.autoBanjoCricket or State.isStealingActive or isHoldingEgg() then return end
-    if os.clock() - self.LastBanjo < 3.0 then return end
-    self.LastBanjo = os.clock()
-
-    local packages = Services.ReplicatedStorage:FindFirstChild("Packages")
-    local networking = packages and packages:FindFirstChild("Networking")
-    local banjoRemote = networking and (networking:FindFirstChild("RF/Banjo/Play") or networking:FindFirstChild("RF/Banjo/Talk"))
-    if banjoRemote and typeof(banjoRemote.InvokeServer) == "function" then
-        pcall(function() banjoRemote:InvokeServer() end)
-    end
-end
-
-local MovementManager = {
-    JumpConnection = nil,
-    OriginalSpeed = 16
-}
-
-function MovementManager:Initialize()
-    pcall(function()
-        local uis = Services.UserInputService
-        if uis and uis.JumpRequest then
-            uis.JumpRequest:Connect(function()
-                if getgenv().config.infiniteJump then
-                    local _, _, hum = getAliveRig()
-                    if hum then
-                        hum:ChangeState(Enum.HumanoidStateType.Jumping)
-                    end
-                end
-            end)
-        end
-    end)
-end
-
-function MovementManager:UpdateSpeed()
-    local _, _, hum = getAliveRig()
-    if not hum then return end
-    if getgenv().config.speedBoost then
-        local boost = tonumber(getgenv().config.boostSpeed) or 150
-        if hum.WalkSpeed ~= boost then
-            hum.WalkSpeed = boost
-        end
-    end
-end
-
-MovementManager:Initialize()
-
-local UtilityManager = {
-    LastPromptCheck = 0,
-    RejoinConnected = false
-}
-
-function UtilityManager:Initialize()
-    pcall(function()
-        local pps = Services.ProximityPromptService
-        if pps and pps.PromptShown then
-            pps.PromptShown:Connect(function(prompt)
-                if getgenv().config.instantPrompts and prompt then
-                    pcall(function() prompt.HoldDuration = 0 end)
-                end
-            end)
-        end
-    end)
-
-    if not self.RejoinConnected then
-        self.RejoinConnected = true
-        pcall(function()
-            local coreGui = Services.CoreGui
-            if coreGui then
-                local promptGui = coreGui:WaitForChild("RobloxPromptGui", 5)
-                if promptGui then
-                    local overlay = promptGui:WaitForChild("promptOverlay", 5)
-                    if overlay then
-                        overlay.ChildAdded:Connect(function(child)
-                            if getgenv().config.autoRejoin and child.Name == "ErrorPrompt" then
-                                task.wait(1.0)
-                                if Services.TeleportService then
-                                    Services.TeleportService:Teleport(game.PlaceId, LocalPlayer)
-                                end
-                            end
-                        end)
-                    end
-                end
-            end
-        end)
-    end
-end
-
-UtilityManager:Initialize()
-
-local ESPManager = {
-    Highlights = {},
-    Billboards = {}
-}
-
-function ESPManager:ClearESP()
-    for _, hl in pairs(self.Highlights) do
-        pcall(function() hl:Destroy() end)
-    end
-    for _, bb in pairs(self.Billboards) do
-        pcall(function() bb:Destroy() end)
-    end
-    table.clear(self.Highlights)
-    table.clear(self.Billboards)
-end
-
-function ESPManager:UpdateESP()
-    if not (getgenv().config.espEggs or getgenv().config.espGuards or getgenv().config.espPlayers) then
-        self:ClearESP()
-        return
-    end
-
-    local _, myRoot = getAliveRig()
-    if not myRoot then return end
-
-    if getgenv().config.espEggs then
-        local eggsData = EggState and typeof(EggState.ReadFieldEggs) == "function" and EggState.ReadFieldEggs()
-        local records = (eggsData and eggsData.Records) or {}
-        for uid, record in pairs(records) do
-            local part = record.Part or record.Instance
-            if part and part.Parent and not self.Billboards[uid] then
-                local bb = Instance.new("BillboardGui")
-                bb.Name = "EggESP_" .. tostring(uid)
-                bb.Size = UDim2.new(0, 100, 0, 30)
-                bb.AlwaysOnTop = true
-                bb.Adornee = part
-
-                local lbl = Instance.new("TextLabel", bb)
-                lbl.Size = UDim2.new(1, 0, 1, 0)
-                lbl.BackgroundTransparency = 1
-                lbl.TextColor3 = Color3.fromRGB(255, 230, 100)
-                lbl.TextStrokeTransparency = 0.4
-                lbl.Font = Enum.Font.GothamBold
-                lbl.TextSize = 11
-                local eggName = record.AssetCategory or record.Name or "Egg"
-                lbl.Text = string.format("%s", eggName)
-
-                bb.Parent = part
-                self.Billboards[uid] = bb
-            end
-        end
-    end
-
-    if getgenv().config.espGuards then
-        for _, guard in ipairs(Services.CollectionService:GetTagged("Guard")) do
-            if guard and guard.Parent and not self.Highlights[guard] then
-                local hl = Instance.new("Highlight")
-                hl.Name = "GuardHighlight"
-                hl.Adornee = guard
-                hl.FillColor = Color3.fromRGB(240, 70, 70)
-                hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-                hl.FillTransparency = 0.5
-                hl.Parent = guard
-                self.Highlights[guard] = hl
-            end
-        end
-    end
-
-    if getgenv().config.espPlayers then
-        for _, p in ipairs(Services.Players:GetPlayers()) do
-            if p ~= LocalPlayer and p.Character and not self.Highlights[p] then
-                local hl = Instance.new("Highlight")
-                hl.Name = "PlayerHighlight"
-                hl.Adornee = p.Character
-                hl.FillColor = Color3.fromRGB(70, 180, 240)
-                hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-                hl.FillTransparency = 0.6
-                hl.Parent = p.Character
-                self.Highlights[p] = hl
-            end
-        end
-    end
-end
-
-local PerformanceManager = {
-    Optimized = false,
-    OriginalRender = true
-}
-
-function PerformanceManager:ApplyOptimizer(state)
-    if state then
-        pcall(function()
-            Services.Lighting.GlobalShadows = false
-            Services.Lighting.FogEnd = 9e9
-            Services.Lighting.Brightness = 1
-            settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-        end)
-    end
-end
-
-function PerformanceManager:Set3DRendering(state)
-    pcall(function()
-        Services.RunService:Set3dRenderingEnabled(not state)
-    end)
-end
-
-function PerformanceManager:SetFpsCap(val)
-    if typeof(setfpscap) == "function" then
-        pcall(setfpscap, tonumber(val) or 60)
-    end
-end
-
 PriorityManager = {
     ActiveTask = nil,
     List = {
         "Auto Steal",
-        "Auto Steal Halloween Eggs",
-        "Auto Catch Shooting Star",
-        "Auto Capture Event Egg",
-        "Auto Butterfly Bloom",
-        "Candy Cane Monster Farm",
+        "Candy Cane Farm",
         "Auto Pumpkin",
-        "Auto Ghost Dog Quest",
-        "Auto Fishing",
-        "Auto Phantom Express",
-        "Auto Vacuum Ghouler Boss",
-        "Auto Use Admin Treadmill",
+        "Enchanted / Bloom Event",
+        "Auto Upgrades",
         "Auto Treadmill"
     },
     TaskAliases = {
         ["Steal"] = "Auto Steal",
         ["Auto Steal"] = "Auto Steal",
-        ["HalloweenSteal"] = "Auto Steal Halloween Eggs",
-        ["Halloween Steal"] = "Auto Steal Halloween Eggs",
-        ["Auto Steal Halloween Eggs"] = "Auto Steal Halloween Eggs",
-        ["Shooting Star"] = "Auto Catch Shooting Star",
-        ["Auto Catch Shooting Star"] = "Auto Catch Shooting Star",
-        ["ShootingStar"] = "Auto Catch Shooting Star",
-        ["Star"] = "Auto Catch Shooting Star",
-        ["Event Egg Capture"] = "Auto Capture Event Egg",
-        ["Auto Capture Event Egg"] = "Auto Capture Event Egg",
-        ["EventEgg"] = "Auto Capture Event Egg",
-        ["Bloom"] = "Auto Butterfly Bloom",
-        ["Bloom Event"] = "Auto Butterfly Bloom",
-        ["Butterfly Bloom"] = "Auto Butterfly Bloom",
-        ["Auto Butterfly Bloom"] = "Auto Butterfly Bloom",
-        ["Enchanted / Bloom Event"] = "Auto Butterfly Bloom",
-        ["CandyCane"] = "Candy Cane Monster Farm",
-        ["Candy Cane Farm"] = "Candy Cane Monster Farm",
-        ["Candy Cane Monster Farm"] = "Candy Cane Monster Farm",
-        ["Auto Candy Cane"] = "Candy Cane Monster Farm",
+        ["HalloweenSteal"] = "Halloween Steal",
+        ["Halloween Steal"] = "Halloween Steal",
+        ["CandyCane"] = "Candy Cane Farm",
+        ["Candy Cane Farm"] = "Candy Cane Farm",
+        ["Auto Candy Cane"] = "Candy Cane Farm",
         ["Pumpkin"] = "Auto Pumpkin",
         ["AutoPumpkin"] = "Auto Pumpkin",
         ["Auto Pumpkin"] = "Auto Pumpkin",
-        ["Ghost Dog Quest"] = "Auto Ghost Dog Quest",
-        ["Auto Ghost Dog Quest"] = "Auto Ghost Dog Quest",
-        ["GhostDog"] = "Auto Ghost Dog Quest",
-        ["Ghost Dog & Fishing"] = "Auto Ghost Dog Quest",
-        ["Fishing"] = "Auto Fishing",
-        ["Auto Fishing"] = "Auto Fishing",
-        ["Phantom Express"] = "Auto Phantom Express",
-        ["Auto Phantom Express"] = "Auto Phantom Express",
-        ["Train"] = "Auto Phantom Express",
-        ["Ghouler"] = "Auto Vacuum Ghouler Boss",
-        ["Auto Vacuum Ghouler Boss"] = "Auto Vacuum Ghouler Boss",
-        ["Vacuum Boss"] = "Auto Vacuum Ghouler Boss",
-        ["Admin Treadmill"] = "Auto Use Admin Treadmill",
-        ["Auto Use Admin Treadmill"] = "Auto Use Admin Treadmill",
-        ["AdminTreadmill"] = "Auto Use Admin Treadmill",
+        ["Bloom"] = "Enchanted / Bloom Event",
+        ["Bloom Event"] = "Enchanted / Bloom Event",
+        ["Enchanted"] = "Enchanted / Bloom Event",
+        ["Enchanted / Bloom Event"] = "Enchanted / Bloom Event",
+        ["Upgrades"] = "Auto Upgrades",
+        ["Auto Upgrades"] = "Auto Upgrades",
         ["Treadmill"] = "Auto Treadmill",
         ["Auto Treadmill"] = "Auto Treadmill"
     }
@@ -3717,17 +2662,10 @@ PriorityManager = {
 function PriorityManager:Initialize(savedPriorities)
     local canonicalList = {
         "Auto Steal",
-        "Auto Steal Halloween Eggs",
-        "Auto Catch Shooting Star",
-        "Auto Capture Event Egg",
-        "Auto Butterfly Bloom",
-        "Candy Cane Monster Farm",
+        "Candy Cane Farm",
         "Auto Pumpkin",
-        "Auto Ghost Dog Quest",
-        "Auto Fishing",
-        "Auto Phantom Express",
-        "Auto Vacuum Ghouler Boss",
-        "Auto Use Admin Treadmill",
+        "Enchanted / Bloom Event",
+        "Auto Upgrades",
         "Auto Treadmill"
     }
 
@@ -3764,20 +2702,9 @@ end
 
 function PriorityManager:GetTaskDimension(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
-    if resolved == "Auto Steal Halloween Eggs"
-       or resolved == "Candy Cane Monster Farm"
-       or resolved == "Auto Pumpkin"
-       or resolved == "Auto Ghost Dog Quest"
-       or resolved == "Auto Fishing"
-       or resolved == "Auto Phantom Express"
-       or resolved == "Auto Vacuum Ghouler Boss" then
+    if resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Halloween Steal" then
         return "Halloween"
-    elseif resolved == "Auto Steal"
-       or resolved == "Auto Catch Shooting Star"
-       or resolved == "Auto Capture Event Egg"
-       or resolved == "Auto Butterfly Bloom"
-       or resolved == "Auto Use Admin Treadmill"
-       or resolved == "Auto Treadmill" then
+    elseif resolved == "Auto Steal" or resolved == "Enchanted / Bloom Event" or resolved == "Auto Treadmill" then
         return "Normal"
     end
     return "Any"
@@ -3787,28 +2714,16 @@ function PriorityManager:IsTaskEnabled(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
     if resolved == "Auto Steal" then
         return isStealEnabled() and not isMapClosed()
-    elseif resolved == "Auto Steal Halloween Eggs" then
+    elseif resolved == "Halloween Steal" then
         return isHalloweenStealEnabled() and not isHalloweenMapClosed()
-    elseif resolved == "Auto Catch Shooting Star" then
-        return getgenv().config.autoCatchShootingStar == true and not isMapClosed()
-    elseif resolved == "Auto Capture Event Egg" then
-        return getgenv().config.autoCaptureEventEgg == true and not isMapClosed()
-    elseif resolved == "Auto Butterfly Bloom" then
-        return getgenv().config.autoCatchButterfly == true and not isMapClosed()
-    elseif resolved == "Candy Cane Monster Farm" then
+    elseif resolved == "Candy Cane Farm" then
         return getgenv().config.autoCandyCane == true and not isHalloweenMapClosed()
     elseif resolved == "Auto Pumpkin" then
         return getgenv().config.autoPumpkin == true and not isHalloweenMapClosed()
-    elseif resolved == "Auto Ghost Dog Quest" then
-        return getgenv().config.autoGhostDog == true and not isHalloweenMapClosed()
-    elseif resolved == "Auto Fishing" then
-        return getgenv().config.autoFishing == true and not isHalloweenMapClosed()
-    elseif resolved == "Auto Phantom Express" then
-        return getgenv().config.autoPhantomExpress == true and not isHalloweenMapClosed()
-    elseif resolved == "Auto Vacuum Ghouler Boss" then
-        return getgenv().config.autoVacuumGhouler == true and not isHalloweenMapClosed()
-    elseif resolved == "Auto Use Admin Treadmill" then
-        return getgenv().config.autoAdminTreadmill == true and not isMapClosed()
+    elseif resolved == "Enchanted / Bloom Event" then
+        return (getgenv().config.autoCatchButterfly == true or getgenv().config.autoWispQuest == true or getgenv().config.autoTradeUp == true or getgenv().config.autoCraftEssence == true) and not isMapClosed()
+    elseif resolved == "Auto Upgrades" then
+        return (getgenv().config.autoUpgradeTreadmill == true or getgenv().config.autoUpgradeBase == true)
     elseif resolved == "Auto Treadmill" then
         return getgenv().config.autoTreadmill == true and not isMapClosed()
     end
@@ -3827,7 +2742,7 @@ function PriorityManager:HasWork(taskName)
         end
         return false
 
-    elseif resolved == "Auto Steal Halloween Eggs" then
+    elseif resolved == "Halloween Steal" then
         if isHalloweenMapClosed() or not isHalloweenStealEnabled() then return false end
         if HalloweenStealManager and (HalloweenStealManager.IsActive or isHoldingEgg()) then return true end
         if HalloweenStealManager and HalloweenStealManager.SelectTargetEgg then
@@ -3835,25 +2750,7 @@ function PriorityManager:HasWork(taskName)
         end
         return false
 
-    elseif resolved == "Auto Catch Shooting Star" then
-        if isMapClosed() or getgenv().config.autoCatchShootingStar ~= true then return false end
-        local star = Services.Workspace:FindFirstChild("ShootingStarClient")
-        return star ~= nil
-
-    elseif resolved == "Auto Capture Event Egg" then
-        if isMapClosed() or getgenv().config.autoCaptureEventEgg ~= true then return false end
-        local eventEgg = Services.Workspace:FindFirstChild("EventEgg") or Services.Workspace:FindFirstChild("RovingEgg")
-        return eventEgg ~= nil
-
-    elseif resolved == "Auto Butterfly Bloom" then
-        if isMapClosed() or getgenv().config.autoCatchButterfly ~= true then return false end
-        if BloomManager and BloomManager.GetButterflies then
-            local list = BloomManager:GetButterflies()
-            return list and #list > 0
-        end
-        return false
-
-    elseif resolved == "Candy Cane Monster Farm" then
+    elseif resolved == "Candy Cane Farm" then
         if isHalloweenMapClosed() or getgenv().config.autoCandyCane ~= true then return false end
         local inHalloween = HalloweenPortalManager and HalloweenPortalManager.IsInHalloweenDimension()
         if inHalloween then
@@ -3863,7 +2760,9 @@ function PriorityManager:HasWork(taskName)
             local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
             if dim then
                 local monsters = dim:FindFirstChild("Monsters")
-                return monsters and #monsters:GetChildren() > 0
+                if monsters and #monsters:GetChildren() > 0 then
+                    return true
+                end
             end
             return true
         end
@@ -3881,35 +2780,32 @@ function PriorityManager:HasWork(taskName)
             local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
             if dim then
                 local pumpkins = dim:FindFirstChild("RunawayPumpkins")
-                return pumpkins and #pumpkins:GetChildren() > 0
+                if pumpkins and #pumpkins:GetChildren() > 0 then
+                    return true
+                end
             end
             return true
         end
 
-    elseif resolved == "Auto Ghost Dog Quest" then
-        if isHalloweenMapClosed() or getgenv().config.autoGhostDog ~= true then return false end
-        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-        return dim and (dim:FindFirstChild("GhostDog", true) ~= nil or dim:FindFirstChild("GhostDogQuest", true) ~= nil)
+    elseif resolved == "Enchanted / Bloom Event" then
+        if isMapClosed() then return false end
+        local wantButterfly = getgenv().config.autoCatchButterfly == true
+        local wantWisp = getgenv().config.autoWispQuest == true
+        local wantTrade = getgenv().config.autoTradeUp == true
+        local wantCraft = getgenv().config.autoCraftEssence == true
+        if not (wantButterfly or wantWisp or wantTrade or wantCraft) then return false end
 
-    elseif resolved == "Auto Fishing" then
-        if isHalloweenMapClosed() or getgenv().config.autoFishing ~= true then return false end
-        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-        return dim ~= nil
+        if wantButterfly and BloomManager and BloomManager.GetButterflies and #BloomManager:GetButterflies() > 0 then
+            return true
+        end
+        if wantWisp or wantTrade or wantCraft then
+            return true
+        end
+        return false
 
-    elseif resolved == "Auto Phantom Express" then
-        if isHalloweenMapClosed() or getgenv().config.autoPhantomExpress ~= true then return false end
-        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-        return dim and (dim:FindFirstChild("PhantomExpress", true) ~= nil or dim:FindFirstChild("Train", true) ~= nil)
-
-    elseif resolved == "Auto Vacuum Ghouler Boss" then
-        if isHalloweenMapClosed() or getgenv().config.autoVacuumGhouler ~= true then return false end
-        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-        return dim and (dim:FindFirstChild("GhostBoss", true) ~= nil or dim:FindFirstChild("GhoulerBoss", true) ~= nil)
-
-    elseif resolved == "Auto Use Admin Treadmill" then
-        if isMapClosed() or getgenv().config.autoAdminTreadmill ~= true then return false end
-        local adminTreadmill = Services.Workspace:FindFirstChild("AdminTreadmill")
-        return adminTreadmill ~= nil
+    elseif resolved == "Auto Upgrades" then
+        if not (getgenv().config.autoUpgradeTreadmill or getgenv().config.autoUpgradeBase) then return false end
+        return os.clock() >= State.treadmillUpgradeCooldown or os.clock() >= State.baseUpgradeCooldown
 
     elseif resolved == "Auto Treadmill" then
         if isMapClosed() or getgenv().config.autoTreadmill ~= true then return false end
@@ -3924,14 +2820,14 @@ function PriorityManager:GetTopWantedTask()
         return "Auto Steal"
     end
     if isHalloweenStealPanelTarget() then
-        return "Auto Steal Halloween Eggs"
+        return "Halloween Steal"
     end
 
     if isHoldingEgg() or State.isStealingActive then
         return "Auto Steal"
     end
     if HalloweenStealManager and (HalloweenStealManager.IsActive or isHoldingEgg()) then
-        return "Auto Steal Halloween Eggs"
+        return "Halloween Steal"
     end
     if HalloweenPumpkinManager and (HalloweenPumpkinManager.IsBusy or HalloweenPumpkinManager:IsCarrying()) then
         return "Auto Pumpkin"
@@ -3953,6 +2849,11 @@ function PriorityManager:CanRun(taskName)
     end
 
     local resolved = self.TaskAliases[taskName] or taskName
+
+    if resolved == "Auto Upgrades" then
+        return self:IsTaskEnabled("Auto Upgrades")
+    end
+
     local topTask = self:GetTopWantedTask()
     if not topTask then
         return false
@@ -4079,34 +2980,6 @@ local function tryUpgradeTreadmill()
                 break
             end
         end
-    end
-end
-
-local function tryClaimRewards()
-    if not getgenv().config.autoClaimMastery then return end
-    if Remotes.AskCollectOffline then
-        task.spawn(function()
-            pcall(function() Remotes.AskCollectOffline:InvokeServer({ Kind = "Claim" }) end)
-        end)
-    end
-    if Remotes.AskRedeemAll then
-        task.spawn(function()
-            pcall(function() Remotes.AskRedeemAll:InvokeServer() end)
-        end)
-    end
-    if Remotes.AskRedeemLimitedEgg then
-        task.spawn(function()
-            pcall(function() Remotes.AskRedeemLimitedEgg:InvokeServer() end)
-        end)
-    end
-end
-
-local function tryEquipBest()
-    if not getgenv().config.autoEquipBest then return end
-    if Remotes.WearBest then
-        task.spawn(function()
-            pcall(function() Remotes.WearBest:InvokeServer() end)
-        end)
     end
 end
 
@@ -4531,6 +3404,109 @@ local function instantGrabAtPosition(uid, targetPos, sessionId, isNest)
     return isHoldingEgg()
 end
 
+local function executeFastStealDelivery(targetEgg, sessionId)
+    local _, root, hum = getAliveRig()
+    if not root or not hum then return false end
+
+    local uid = targetEgg.Uid
+    local laneZ = math.clamp(root.Position.Z, -425, -300)
+    local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, CONFIG.GroundAltitude + 1.0, laneZ)
+
+    local playerSpeed = getPlayerCurrentSpeed()
+
+    setCollisions(false)
+    ShieldManager:MuteUGI()
+
+    local startTime = os.clock()
+    local travelTimeout = math.max(12, ((root.Position.X - dropTargetPos.X) / playerSpeed) + 6)
+
+    while root.Position.X > dropTargetPos.X + 2.0 and (os.clock() - startTime) < travelTimeout do
+        Services.RunService.Heartbeat:Wait()
+        if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
+            setCollisions(true)
+            ShieldManager:UnmuteUGI()
+            return false
+        end
+
+        local _, cRoot = getAliveRig()
+        if not cRoot then break end
+
+        -- Natural physics velocity without artificial CFrame position increments
+        cRoot.AssemblyLinearVelocity = Vector3.new(-playerSpeed, cRoot.AssemblyLinearVelocity.Y, 0)
+        cRoot.CFrame = CFrame.new(cRoot.Position.X, CONFIG.GroundAltitude + 1.0, laneZ) * CFrame.Angles(0, math.rad(90), 0)
+    end
+
+    local _, cRoot = getAliveRig()
+    if cRoot then
+        cRoot.CFrame = CFrame.new(dropTargetPos) * CFrame.Angles(0, math.rad(90), 0)
+        cRoot.AssemblyLinearVelocity = Vector3.zero
+    end
+    task.wait(0.2)
+
+    dropHeldEggDirect()
+    local dropWait = os.clock() + 1.2
+    while os.clock() < dropWait and isHoldingEgg() do
+        Services.RunService.Heartbeat:Wait()
+    end
+
+    local droppedEggPos = dropTargetPos
+
+    findMyPlot()
+    if State.myTreadmill then
+        local _, tRoot = getAliveRig()
+        if tRoot then
+            tRoot.CFrame = CFrame.new(State.myTreadmill.Position + Vector3.new(0, 1.5, 0))
+            tRoot.AssemblyLinearVelocity = Vector3.zero
+            task.wait(0.1)
+
+            if Remotes.AskWearStill then pcall(function() Remotes.AskWearStill:InvokeServer() end) end
+            local anchorTimeout = os.clock() + 1.5
+            while os.clock() < anchorTimeout do
+                local _, checkRoot = getAliveRig()
+                if checkRoot and checkRoot.Anchored then break end
+                Services.RunService.Heartbeat:Wait()
+            end
+
+            if Remotes.AskDoff then pcall(function() Remotes.AskDoff:InvokeServer() end) end
+            local _, freeRoot, freeHum = getAliveRig()
+            if freeRoot then freeRoot.Anchored = false end
+            if freeHum then freeHum.PlatformStand = false; freeHum.Sit = false end
+            task.wait(0.1)
+        end
+    end
+
+    local regrabSuccess = false
+    local regrabTimeout = os.clock() + 12
+
+    while os.clock() < regrabTimeout do
+        if sessionId ~= State.currentStealSession or not isStealEnabled() then break end
+        regrabSuccess = instantGrabAtPosition(uid, droppedEggPos, sessionId, false)
+        if regrabSuccess and isHoldingEgg() then break end
+        task.wait(0.08)
+    end
+
+    if not isHoldingEgg() then
+        setCollisions(true)
+        ShieldManager:UnmuteUGI()
+        return false
+    end
+
+    local _, fRoot, fHum = getAliveRig()
+    if fRoot then
+        fRoot.CFrame = CFrame.new(CONFIG.BaseDropPosition)
+        fRoot.AssemblyLinearVelocity = Vector3.zero
+    end
+    task.wait(0.25)
+
+    if fHum then fHum.PlatformStand = false end
+
+    dropHeldEggDirect()
+    task.wait(0.3)
+    setCollisions(true)
+    ShieldManager:UnmuteUGI()
+    return true
+end
+
 local function performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
     if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
     local _, root, humanoid = getAliveRig()
@@ -4548,30 +3524,22 @@ local function performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
     task.wait(0.06)
 
     dropHeldEggDirect()
-    local dropWait = os.clock() + 0.6
+    local dropWait = os.clock() + 0.5
     while os.clock() < dropWait and isHoldingEgg() do
         if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
         Services.RunService.Heartbeat:Wait()
     end
     task.wait(0.04)
 
-    -- Regrab: try client EggState.CarryFieldEgg first, then physical grab
-    if uid and EggState and typeof(EggState.CarryFieldEgg) == "function" then
-        pcall(function() EggState.CarryFieldEgg(uid) end)
-        task.wait(0.12)
-    end
+    local eggFloorPos = getPhysicalEggPosition(uid, Vector3.new(currentX, checkY, laneZ))
+    local grabSuccess = false
+    local retryTimeout = os.clock() + 3.5
 
-    if not isHoldingEgg() then
-        local eggFloorPos = getPhysicalEggPosition(uid, Vector3.new(currentX, checkY, laneZ))
-        local grabSuccess = false
-        local retryTimeout = os.clock() + 3.0
-
-        while os.clock() < retryTimeout do
-            if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
-            grabSuccess = instantGrabAtPosition(uid, eggFloorPos, sessionId, false)
-            if grabSuccess and isHoldingEgg() then break end
-            Services.RunService.Heartbeat:Wait()
-        end
+    while os.clock() < retryTimeout do
+        if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
+        grabSuccess = instantGrabAtPosition(uid, eggFloorPos, sessionId, false)
+        if grabSuccess and isHoldingEgg() then break end
+        Services.RunService.Heartbeat:Wait()
     end
     task.wait(0.04)
     return isHoldingEgg()
@@ -4598,7 +3566,6 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
 
     local groundY = CONFIG.GroundAltitude + 1.0
 
-    -- Phase 1: Hop along lane towards boundary with periodic checkpoints
     while currentX - stepSize > boundaryX do
         if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
             ShieldManager:UnmuteUGI()
@@ -4636,59 +3603,17 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
             CONFIG.HopGap = math.max(CONFIG.HopGapMin, CONFIG.HopGap - 0.005)
         end
 
-        -- Intermediate ground checkpoint at configured interval
-        if math.abs(lastCheckpointX - currentX) >= interval then
+        if math.abs(lastCheckpointX - currentX) >= interval and currentX > 1050 then
             lastCheckpointX = currentX
-            local ok = performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
-            if not ok and not isHoldingEgg() then
-                ShieldManager:UnmuteUGI()
-                StealUIManager:Unlock()
-                cleanupFlightState()
-                return false
-            end
-        end
-    end
-
-    -- Phase 2: Mandatory Boundary Checkpoint right at boundaryX before crossing into base
-    if isHoldingEgg() then
-        currentX = boundaryX
-        pcall(function()
-            local _, bRoot = getAliveRig()
-            if bRoot then
-                bRoot.CFrame = CFrame.new(boundaryX, groundY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
-                bRoot.AssemblyLinearVelocity = Vector3.zero
-            end
-        end)
-        task.wait(0.08)
-        local boundaryOk = performGroundCheckpoint(targetEgg, boundaryX, laneZ, sessionId)
-        if not boundaryOk and not isHoldingEgg() then
-            ShieldManager:UnmuteUGI()
-            StealUIManager:Unlock()
-            cleanupFlightState()
-            return false
-        end
-    end
-
-    -- Phase 3: Safe Zone Corridor Micro-Hops into Base (progressive hops, NEVER jump 450 studs in one step!)
-    local corridorStep = 45
-    while currentX - corridorStep > safeTarget.X do
-        if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
-            break
-        end
-
-        local nextX = currentX - corridorStep
-        local _, cRoot = getAliveRig()
-        if cRoot then
+            -- Settle position momentarily without dropping held egg mid-route
             pcall(function()
-                cRoot.CFrame = CFrame.new(nextX, groundY, safeTarget.Z) * CFrame.Angles(0, math.rad(90), 0)
+                cRoot.CFrame = CFrame.new(currentX, groundY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
                 cRoot.AssemblyLinearVelocity = Vector3.zero
             end)
+            task.wait(CONFIG.HopGap)
         end
-        task.wait(CONFIG.HopGap)
-        currentX = nextX
     end
 
-    -- Phase 4: Delivery Location Drop & Settle Sequence
     local _, fRoot, fHum = getAliveRig()
     if fRoot then
         pcall(function()
@@ -4696,13 +3621,13 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
             fRoot.AssemblyLinearVelocity = Vector3.zero
         end)
     end
-    task.wait(0.15)
+    task.wait(0.25)
     if fHum then fHum.PlatformStand = false end
 
     dropHeldEggDirect()
-    task.wait(0.25)
+    task.wait(0.3)
 
-    local dropVerifyTimeout = os.clock() + 2.0
+    local dropVerifyTimeout = os.clock() + 1.5
     while os.clock() < dropVerifyTimeout and isHoldingEgg() do
         dropHeldEggDirect()
         task.wait(0.2)
@@ -4711,93 +3636,6 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
     StealUIManager:Unlock()
     ShieldManager:UnmuteUGI()
     cleanupFlightState()
-    return not isHoldingEgg()
-end
-
-local function executeFastStealDelivery(targetEgg, sessionId)
-    local _, root, hum = getAliveRig()
-    if not root or not hum then return false end
-
-    local uid = targetEgg.Uid
-    local laneZ = math.clamp(root.Position.Z, -425, -300)
-    local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, CONFIG.GroundAltitude + 1.0, laneZ)
-    local playerSpeed = getPlayerCurrentSpeed()
-
-    setCollisions(false)
-    ShieldManager:MuteUGI()
-
-    local startTime = os.clock()
-    local travelTimeout = math.max(12, ((root.Position.X - dropTargetPos.X) / playerSpeed) + 6)
-
-    -- Phase 1: High speed glide along ground towards separation line
-    while root.Position.X > dropTargetPos.X + 2.0 and (os.clock() - startTime) < travelTimeout do
-        Services.RunService.Heartbeat:Wait()
-        if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
-            setCollisions(true)
-            ShieldManager:UnmuteUGI()
-            return false
-        end
-
-        local _, cRoot = getAliveRig()
-        if not cRoot then break end
-        cRoot.AssemblyLinearVelocity = Vector3.new(-playerSpeed, cRoot.AssemblyLinearVelocity.Y, 0)
-        cRoot.CFrame = CFrame.new(cRoot.Position.X, CONFIG.GroundAltitude + 1.0, laneZ) * CFrame.Angles(0, math.rad(90), 0)
-    end
-
-    local _, cRoot = getAliveRig()
-    if cRoot then
-        cRoot.CFrame = CFrame.new(dropTargetPos) * CFrame.Angles(0, math.rad(90), 0)
-        cRoot.AssemblyLinearVelocity = Vector3.zero
-    end
-    task.wait(0.1)
-
-    -- Phase 2: Separation line drop and regrab checkpoint
-    local checkpointOk = performGroundCheckpoint(targetEgg, dropTargetPos.X, laneZ, sessionId)
-    if not checkpointOk and not isHoldingEgg() then
-        setCollisions(true)
-        ShieldManager:UnmuteUGI()
-        return false
-    end
-
-    -- Phase 3: Fast micro-hops from separation line to base drop position
-    local currentX = dropTargetPos.X
-    local safeTarget = CONFIG.BaseDropPosition
-    local corridorStep = 55
-
-    while currentX - corridorStep > safeTarget.X do
-        if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then break end
-        local nextX = currentX - corridorStep
-        local _, hRoot = getAliveRig()
-        if hRoot then
-            pcall(function()
-                hRoot.CFrame = CFrame.new(nextX, CONFIG.GroundAltitude + 1.0, safeTarget.Z) * CFrame.Angles(0, math.rad(90), 0)
-                hRoot.AssemblyLinearVelocity = Vector3.zero
-            end)
-        end
-        task.wait(CONFIG.HopGap)
-        currentX = nextX
-    end
-
-    -- Phase 4: Final delivery drop at hopper
-    local _, fRoot, fHum = getAliveRig()
-    if fRoot then
-        fRoot.CFrame = CFrame.new(safeTarget.X, CONFIG.GroundAltitude + 1.2, safeTarget.Z)
-        fRoot.AssemblyLinearVelocity = Vector3.zero
-    end
-    task.wait(0.15)
-    if fHum then fHum.PlatformStand = false end
-
-    dropHeldEggDirect()
-    task.wait(0.25)
-
-    local dropVerifyTimeout = os.clock() + 2.0
-    while os.clock() < dropVerifyTimeout and isHoldingEgg() do
-        dropHeldEggDirect()
-        task.wait(0.2)
-    end
-
-    setCollisions(true)
-    ShieldManager:UnmuteUGI()
     return not isHoldingEgg()
 end
 
@@ -4929,7 +3767,7 @@ getBestEgg = function()
     pcall(function() data = EggState.ReadFieldEggs() end)
     if not data or not data.Records then return nil end
 
-    -- Steal Panel Target Handling (Normal Dimension only)
+    -- Steal Panel Target Handling (Normal Dimension only; never clear while actively stealing or holding an egg!)
     if isNormalStealPanelTarget() then
         for uid, record in pairs(data.Records) do
             if uid == State.targetedSpecificUid or record.Uid == State.targetedSpecificUid then
@@ -4963,21 +3801,7 @@ getBestEgg = function()
     local minScore = getMinRequiredScore()
     local bestEgg = nil
     local highestScore = -math.huge
-    local normalStealEnabled = getgenv().config.autoFarm == true
-    local targetSpecificMap = currentSettings.SpecificTargetEggs or {}
-    local hasSpecificFilter = false
-    if type(targetSpecificMap) == "table" and not targetSpecificMap["All"] then
-        for name, selected in pairs(targetSpecificMap) do
-            if selected == true and name ~= "All" then
-                hasSpecificFilter = true
-                break
-            end
-        end
-    end
-
-    local wantMissingIndex = getgenv().config.stealMissingIndex == true
-    local playerSaveData = wantMissingIndex and getSaveData() or nil
-    local playerIndex = playerSaveData and (playerSaveData.Index or playerSaveData.Codex or playerSaveData.Discovered) or {}
+        local normalStealEnabled = getgenv().config.autoFarm == true
 
     for keyUid, record in pairs(data.Records) do
         local uid = record.Uid or keyUid
@@ -4992,14 +3816,17 @@ getBestEgg = function()
 
                 if not posX or posX >= 560 then
                     local rawName = record.AssetCategory or record.Category or record.Name or "Unknown"
+                    
+                    if isLabNeeded then
+                        local scale = tonumber(record.AssetScale) or 1
+                        local mutationBonus = (record.Mutations and #record.Mutations > 0) and 2.5 or 1
+                        local score = 100000000 + ((scale ^ 1.85) * mutationBonus)
 
-                    -- 1. Specific Egg Targeting Filter
-                    local passesSpecific = true
-                    if hasSpecificFilter then
-                        passesSpecific = (targetSpecificMap[rawName] == true)
-                    end
-
-                    if passesSpecific and normalStealEnabled then
+                        if score > highestScore then
+                            highestScore = score
+                            bestEgg = record
+                        end
+                    elseif normalStealEnabled then
                         local areaIdStr = tostring(record.AreaId or "")
                         if matchesTargetArea(areaIdStr) then
                             local _, rank = MasterRegistry:Lookup(rawName)
@@ -5007,14 +3834,6 @@ getBestEgg = function()
                                 local scale = tonumber(record.AssetScale) or 1
                                 local mutationBonus = (record.Mutations and #record.Mutations > 0) and 2.5 or 1
                                 local score = (rank * 1000) + ((scale ^ 1.85) * mutationBonus)
-
-                                -- 2. Steal Missing Index Eggs Bonus: prioritize highest area missing index eggs
-                                if wantMissingIndex and type(playerIndex) == "table" then
-                                    if not playerIndex[rawName] then
-                                        local areaNum = tonumber(record.AreaId) or 1
-                                        score = score + 50000000 + (areaNum * 100000)
-                                    end
-                                end
 
                                 if score > highestScore then
                                     highestScore = score
@@ -5036,34 +3855,34 @@ end
 
 WorkerScheduler:Register("HalloweenSteal", 0.25, function()
     if not isHalloweenStealEnabled() then
-        PriorityManager:Release("Auto Steal Halloween Eggs")
+        PriorityManager:Release("HalloweenSteal")
         return
     end
-    if not PriorityManager:CanRun("Auto Steal Halloween Eggs") then return end
+    if not PriorityManager:CanRun("HalloweenSteal") then return end
 
     if not HalloweenPortalManager.IsInHalloweenDimension() then
-        PriorityManager:Claim("Auto Steal Halloween Eggs")
+        PriorityManager:Claim("HalloweenSteal")
         HalloweenPortalManager.EnterDimension(5.0)
-        PriorityManager:Release("Auto Steal Halloween Eggs")
+        PriorityManager:Release("HalloweenSteal")
         return
     end
 
     if HalloweenStealManager:SelectTargetEgg() == nil and not isHoldingEgg() and not HalloweenStealManager.IsActive then
-        PriorityManager:Release("Auto Steal Halloween Eggs")
+        PriorityManager:Release("HalloweenSteal")
         return
     end
 
-    PriorityManager:Claim("Auto Steal Halloween Eggs")
+    PriorityManager:Claim("HalloweenSteal")
     pcall(function() HalloweenStealManager:Process() end)
-    PriorityManager:Release("Auto Steal Halloween Eggs")
+    PriorityManager:Release("HalloweenSteal")
 end)
 
 WorkerScheduler:Register("CandyCaneFarm", 0.05, function()
     if not getgenv().config.autoCandyCane or isHalloweenMapClosed() then
-        PriorityManager:Release("Candy Cane Monster Farm")
+        PriorityManager:Release("CandyCane")
         return
     end
-    if not PriorityManager:CanRun("Candy Cane Monster Farm") then
+    if not PriorityManager:CanRun("CandyCane") then
         if HalloweenCombatManager and HalloweenCombatManager.Abort then
             HalloweenCombatManager:Abort()
         end
@@ -5071,28 +3890,28 @@ WorkerScheduler:Register("CandyCaneFarm", 0.05, function()
     end
 
     if not HalloweenPortalManager.IsInHalloweenDimension() then
-        PriorityManager:Claim("Candy Cane Monster Farm")
+        PriorityManager:Claim("CandyCane")
         HalloweenPortalManager.EnterDimension(5.0)
-        PriorityManager:Release("Candy Cane Monster Farm")
+        PriorityManager:Release("CandyCane")
         return
     end
 
     if HalloweenCombatManager:GetClosestMonster() == nil then
-        PriorityManager:Release("Candy Cane Monster Farm")
+        PriorityManager:Release("CandyCane")
         return
     end
 
-    PriorityManager:Claim("Candy Cane Monster Farm")
+    PriorityManager:Claim("CandyCane")
     pcall(function() HalloweenCombatManager:Process() end)
-    PriorityManager:Release("Candy Cane Monster Farm")
+    PriorityManager:Release("CandyCane")
 end)
 
 WorkerScheduler:Register("HalloweenPumpkin", 0.05, function()
     if not getgenv().config.autoPumpkin or isHalloweenMapClosed() then
-        PriorityManager:Release("Auto Pumpkin")
+        PriorityManager:Release("Pumpkin")
         return
     end
-    if not PriorityManager:CanRun("Auto Pumpkin") then
+    if not PriorityManager:CanRun("Pumpkin") then
         if not (HalloweenPumpkinManager and HalloweenPumpkinManager:IsCarrying()) then
             if HalloweenPumpkinManager and HalloweenPumpkinManager.Abort then
                 HalloweenPumpkinManager:Abort()
@@ -5102,235 +3921,38 @@ WorkerScheduler:Register("HalloweenPumpkin", 0.05, function()
     end
 
     if not HalloweenPortalManager.IsInHalloweenDimension() then
-        PriorityManager:Claim("Auto Pumpkin")
+        PriorityManager:Claim("Pumpkin")
         HalloweenPortalManager.EnterDimension(5.0)
-        PriorityManager:Release("Auto Pumpkin")
+        PriorityManager:Release("Pumpkin")
         return
     end
 
     if not (HalloweenPumpkinManager and HalloweenPumpkinManager:IsCarrying()) and HalloweenPumpkinManager:GetTarget() == nil then
-        PriorityManager:Release("Auto Pumpkin")
+        PriorityManager:Release("Pumpkin")
         return
     end
 
-    PriorityManager:Claim("Auto Pumpkin")
+    PriorityManager:Claim("Pumpkin")
     pcall(function() HalloweenPumpkinManager:Process() end)
-    PriorityManager:Release("Auto Pumpkin")
+    PriorityManager:Release("Pumpkin")
 end)
 
-WorkerScheduler:Register("ShootingStar", 0.25, function()
-    if State.isStealingActive or isHoldingEgg() then return end
-    if HalloweenPortalManager.IsInHalloweenDimension() then return end
-    if not PriorityManager:CanRun("Auto Catch Shooting Star") then return end
-
-    local star = Services.Workspace:FindFirstChild("ShootingStarClient")
-    if not star then return end
-
-    PriorityManager:Claim("Auto Catch Shooting Star")
-    local _, root = getAliveRig()
-    if root then
-        local starPos = star:IsA("BasePart") and star.Position or star:GetPivot().Position
-        pcall(function()
-            root.CFrame = CFrame.new(starPos + Vector3.new(0, 2, 0))
-            root.AssemblyLinearVelocity = Vector3.zero
-        end)
-        task.wait(0.1)
-
-        local packages = Services.ReplicatedStorage:FindFirstChild("Packages")
-        local networking = packages and packages:FindFirstChild("Networking")
-        local catchRemote = networking and networking:FindFirstChild("RE/ShootingStar/Catch")
-        if catchRemote and catchRemote:IsA("RemoteEvent") then
-            local starId = star:GetAttribute("Id") or star.Name
-            pcall(function() catchRemote:FireServer(starId) end)
-        end
-    end
-    PriorityManager:Release("Auto Catch Shooting Star")
-end)
-
-WorkerScheduler:Register("EventEggCapture", 0.25, function()
-    if State.isStealingActive then return end
-    if HalloweenPortalManager.IsInHalloweenDimension() then return end
-    if not PriorityManager:CanRun("Auto Capture Event Egg") then return end
-
-    local eventEgg = Services.Workspace:FindFirstChild("EventEgg") or Services.Workspace:FindFirstChild("RovingEgg")
-    if not eventEgg then return end
-
-    PriorityManager:Claim("Auto Capture Event Egg")
-    local _, root = getAliveRig()
-    if root then
-        local eggPos = eventEgg:IsA("BasePart") and eventEgg.Position or eventEgg:GetPivot().Position
-        pcall(function()
-            root.CFrame = CFrame.new(eggPos + Vector3.new(0, 1.5, 0))
-            root.AssemblyLinearVelocity = Vector3.zero
-        end)
-        task.wait(0.1)
-        if Remotes.AskFieldEggEquip then
-            local uid = eventEgg:GetAttribute("UID") or eventEgg.Name
-            pcall(function() Remotes.AskFieldEggEquip:InvokeServer(uid) end)
-        end
-    end
-    PriorityManager:Release("Auto Capture Event Egg")
-end)
-
-WorkerScheduler:Register("GhostDogTask", 0.5, function()
-    if State.isStealingActive or isHoldingEgg() then return end
-    if not PriorityManager:CanRun("Auto Ghost Dog Quest") then return end
-
-    if not HalloweenPortalManager.IsInHalloweenDimension() then
-        PriorityManager:Claim("Auto Ghost Dog Quest")
-        HalloweenPortalManager.EnterDimension(5.0)
-        PriorityManager:Release("Auto Ghost Dog Quest")
-        return
-    end
-
-    PriorityManager:Claim("Auto Ghost Dog Quest")
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    local ghostDog = dim and (dim:FindFirstChild("GhostDog", true) or dim:FindFirstChild("GhostDogNPC", true))
-    if ghostDog then
-        local _, root = getAliveRig()
-        if root then
-            local dogPos = ghostDog:IsA("BasePart") and ghostDog.Position or ghostDog:GetPivot().Position
-            if (root.Position - dogPos).Magnitude > 15 then
-                pcall(function()
-                    root.CFrame = CFrame.new(dogPos + Vector3.new(0, 1.5, 4))
-                    root.AssemblyLinearVelocity = Vector3.zero
-                end)
-                task.wait(0.2)
-            end
-        end
-    end
-    pcall(function() GhostDogFishingManager:ProcessGhostDog() end)
-    PriorityManager:Release("Auto Ghost Dog Quest")
-end)
-
-WorkerScheduler:Register("HalloweenFishingTask", 0.5, function()
-    if State.isStealingActive or isHoldingEgg() then return end
-    if not PriorityManager:CanRun("Auto Fishing") then return end
-
-    if not HalloweenPortalManager.IsInHalloweenDimension() then
-        PriorityManager:Claim("Auto Fishing")
-        HalloweenPortalManager.EnterDimension(5.0)
-        PriorityManager:Release("Auto Fishing")
-        return
-    end
-
-    PriorityManager:Claim("Auto Fishing")
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    local waterPart = dim and (dim:FindFirstChild("FishingWater", true) or dim:FindFirstChild("Dock", true))
-    if waterPart then
-        local _, root = getAliveRig()
-        if root then
-            local waterPos = waterPart:IsA("BasePart") and waterPart.Position or waterPart:GetPivot().Position
-            if (root.Position - waterPos).Magnitude > 25 then
-                pcall(function()
-                    root.CFrame = CFrame.new(waterPos + Vector3.new(0, 2, 0))
-                    root.AssemblyLinearVelocity = Vector3.zero
-                end)
-                task.wait(0.2)
-            end
-        end
-    end
-    pcall(function() GhostDogFishingManager:ProcessFishing() end)
-    PriorityManager:Release("Auto Fishing")
-end)
-
-WorkerScheduler:Register("PhantomExpressTask", 0.5, function()
-    if State.isStealingActive or isHoldingEgg() then return end
-    if not PriorityManager:CanRun("Auto Phantom Express") then return end
-
-    if not HalloweenPortalManager.IsInHalloweenDimension() then
-        PriorityManager:Claim("Auto Phantom Express")
-        HalloweenPortalManager.EnterDimension(5.0)
-        PriorityManager:Release("Auto Phantom Express")
-        return
-    end
-
-    PriorityManager:Claim("Auto Phantom Express")
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    local train = dim and (dim:FindFirstChild("PhantomExpress", true) or dim:FindFirstChild("Train", true))
-    if train then
-        local _, root = getAliveRig()
-        if root then
-            local trainPos = train:IsA("BasePart") and train.Position or train:GetPivot().Position
-            if (root.Position - trainPos).Magnitude > 30 then
-                pcall(function()
-                    root.CFrame = CFrame.new(trainPos + Vector3.new(0, 3, 0))
-                    root.AssemblyLinearVelocity = Vector3.zero
-                end)
-                task.wait(0.2)
-            end
-        end
-    end
-    pcall(function() PhantomExpressManager:Process() end)
-    PriorityManager:Release("Auto Phantom Express")
-end)
-
-WorkerScheduler:Register("VacuumGhoulerTask", 0.35, function()
-    if State.isStealingActive or isHoldingEgg() then return end
-    if not PriorityManager:CanRun("Auto Vacuum Ghouler Boss") then return end
-
-    if not HalloweenPortalManager.IsInHalloweenDimension() then
-        PriorityManager:Claim("Auto Vacuum Ghouler Boss")
-        HalloweenPortalManager.EnterDimension(5.0)
-        PriorityManager:Release("Auto Vacuum Ghouler Boss")
-        return
-    end
-
-    PriorityManager:Claim("Auto Vacuum Ghouler Boss")
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    local boss = dim and (dim:FindFirstChild("GhostBoss", true) or dim:FindFirstChild("GhoulerBoss", true))
-    if boss then
-        local _, root = getAliveRig()
-        if root then
-            local bossPos = boss:IsA("BasePart") and boss.Position or boss:GetPivot().Position
-            if (root.Position - bossPos).Magnitude > 20 then
-                pcall(function()
-                    root.CFrame = CFrame.new(bossPos + Vector3.new(0, 2, 8))
-                    root.AssemblyLinearVelocity = Vector3.zero
-                end)
-                task.wait(0.15)
-            end
-        end
-        local packages = Services.ReplicatedStorage:FindFirstChild("Packages")
-        local networking = packages and packages:FindFirstChild("Networking")
-        local suctionRemote = networking and (networking:FindFirstChild("RE/GhostBoss/Suction") or networking:FindFirstChild("RE/Ghouler/Suction"))
-        if suctionRemote and suctionRemote:IsA("RemoteEvent") then
-            pcall(function() suctionRemote:FireServer({ State = true, Target = boss }) end)
-        end
-    end
-    PriorityManager:Release("Auto Vacuum Ghouler Boss")
+WorkerScheduler:Register("AutoUpgrades", 6.0, function()
+    if not PriorityManager:CanRun("Upgrades") then return end
+    if getgenv().config.autoUpgradeTreadmill then tryUpgradeTreadmill() end
+    if getgenv().config.autoUpgradeBase then tryUpgradeBase() end
 end)
 
 WorkerScheduler:Register("EventsCombat", 0.35, function()
     if State.isStealingActive or isHoldingEgg() then return end
     if HalloweenPortalManager.IsInHalloweenDimension() then return end
-    if not PriorityManager:CanRun("Auto Butterfly Bloom") then return end
+    if not PriorityManager:CanRun("Bloom") then return end
 
-    PriorityManager:Claim("Auto Butterfly Bloom")
+    PriorityManager:Claim("Bloom")
     BloomManager:ProcessButterflies(State.isStealingActive, false)
     BloomManager:ProcessWisps(State.isStealingActive, false)
-    PriorityManager:Release("Auto Butterfly Bloom")
-end)
-
-WorkerScheduler:Register("BackgroundMaintenance", 2.0, function()
-    if getgenv().config.autoUpgradeTreadmill then tryUpgradeTreadmill() end
-    if getgenv().config.autoUpgradeBase then tryUpgradeBase() end
-    if getgenv().config.autoClaimMastery then tryClaimRewards() end
-    if getgenv().config.autoEquipBest then tryEquipBest() end
-    if getgenv().config.autoPlaceEgg then AutoPlaceEggManager:Process() end
-    if getgenv().config.autoHatch then AutoHatchAndFuseManager:ProcessHatch() end
-    if getgenv().config.autoFuseMachine then AutoHatchAndFuseManager:ProcessFuse() end
-    if getgenv().config.autoMutate then AutoHatchAndFuseManager:ProcessMutate() end
-    if getgenv().config.autoSellPets or getgenv().config.autoSellEggs then AutoHatchAndFuseManager:ProcessSell() end
-    if getgenv().config.autoBuyHalloweenEgg then HalloweenEventStoreManager:ProcessBuyEgg() end
-    if getgenv().config.autoTradeSouls then HalloweenEventStoreManager:ProcessTradeSouls() end
-    if getgenv().config.autoBanjoCricket then HalloweenEventStoreManager:ProcessBanjo() end
-    if getgenv().config.autoTradeUp or getgenv().config.autoCraftEssence then BloomManager:ProcessTradeAndCraft() end
-end)
-
-WorkerScheduler:Register("MovementAndVisuals", 0.1, function()
-    MovementManager:UpdateSpeed()
-    ESPManager:UpdateESP()
+    BloomManager:ProcessTradeAndCraft()
+    PriorityManager:Release("Bloom")
 end)
 
 WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
@@ -5341,27 +3963,29 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     local inHalloween = HalloweenPortalManager.IsInHalloweenDimension()
     local topTask = PriorityManager:GetTopWantedTask()
 
-    -- Dimension Supervisor: Only perform dimension transfer if a high-priority movement automation
-    -- with actual pending work claims the character! NEVER eject player if topTask is nil or idle!
-    if topTask and topTask ~= "Auto Treadmill" and topTask ~= "Auto Use Admin Treadmill" then
+    -- Dimension Supervisor
+    if topTask then
         local targetDim = PriorityManager:GetTaskDimension(topTask)
         if targetDim == "Normal" and inHalloween then
-            if PriorityManager:HasWork(topTask) and PriorityManager:CanRun(topTask) then
-                if HalloweenCombatManager and HalloweenCombatManager.Abort then
-                    HalloweenCombatManager:Abort()
-                end
-                if HalloweenPumpkinManager and not HalloweenPumpkinManager:IsCarrying() and HalloweenPumpkinManager.Abort then
-                    HalloweenPumpkinManager:Abort()
-                end
-                HalloweenPortalManager.ExitDimension(5.0)
-                return
+            -- Preempt any active combat or non-carrying pumpkin work
+            if HalloweenCombatManager and HalloweenCombatManager.Abort then
+                HalloweenCombatManager:Abort()
             end
+            if HalloweenPumpkinManager and not HalloweenPumpkinManager:IsCarrying() and HalloweenPumpkinManager.Abort then
+                HalloweenPumpkinManager:Abort()
+            end
+            HalloweenPortalManager.ExitDimension(5.0)
+            return
         elseif targetDim == "Halloween" and not inHalloween then
-            if PriorityManager:HasWork(topTask) and PriorityManager:CanRun(topTask) then
-                hopOffTreadmill()
-                HalloweenPortalManager.EnterDimension(5.0)
-                return
-            end
+            hopOffTreadmill()
+            HalloweenPortalManager.EnterDimension(5.0)
+            return
+        end
+    else
+        -- If no active tasks have work and player is in Halloween, return to main world
+        if inHalloween then
+            HalloweenPortalManager.ExitDimension(5.0)
+            return
         end
     end
 
@@ -5371,7 +3995,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     end
 
     -- 1. Auto Steal & Steal Panel Execution
-    if isStealEnabled() and not State.isStealingActive and not isMapClosed() and PriorityManager:CanRun("Auto Steal") then
+    if isStealEnabled() and not State.isStealingActive and not isMapClosed() and PriorityManager:CanRun("Steal") then
         local currentTargetEgg = getBestEgg()
         if currentTargetEgg then
             local targetUid = currentTargetEgg.Uid
@@ -5387,7 +4011,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                 return
             end
 
-            PriorityManager:Claim("Auto Steal")
+            PriorityManager:Claim("Steal")
             State.isStealingActive = true
             State.treadmillFailCount = 0
             State.currentStealSession = State.currentStealSession + 1
@@ -5445,7 +4069,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                 State.isStealingActive = false
                 ShieldManager:UndoSwap()
                 cleanupFlightState()
-                PriorityManager:Release("Auto Steal")
+                PriorityManager:Release("Steal")
 
                 if State.targetedSpecificUid == targetUid and (stealSuccess or not isEggStillValid(targetUid)) then
                     if State.activeStealButtons[targetUid] then
@@ -5459,53 +4083,64 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                 ShieldManager:UndoSwap()
                 cleanupFlightState()
                 if PriorityManager then
+                    PriorityManager:Release("Steal")
                     PriorityManager:Release("Auto Steal")
                 end
             end
         end
     end
 
-    -- 2. Admin Treadmill Execution
+    -- 2. Treadmill Idle Execution
     local isStealBusy = State.isStealingActive or isHoldingEgg()
-    if getgenv().config.autoAdminTreadmill and not isStealBusy and PriorityManager:CanRun("Auto Use Admin Treadmill") then
-        local adminTreadmill = Services.Workspace:FindFirstChild("AdminTreadmill")
-        if adminTreadmill then
-            local _, aRoot = getAliveRig()
-            if aRoot then
-                local aPos = adminTreadmill:IsA("BasePart") and adminTreadmill.Position or adminTreadmill:GetPivot().Position
-                if (aRoot.Position - aPos).Magnitude > 6 then
-                    pcall(function()
-                        aRoot.CFrame = CFrame.new(aPos + Vector3.new(0, 1.5, 0))
-                        aRoot.AssemblyLinearVelocity = Vector3.zero
-                    end)
-                    task.wait(0.1)
-                end
-                if Remotes.AskWearStill then
-                    pcall(function() Remotes.AskWearStill:InvokeServer() end)
-                end
-                return
-            end
-        end
-    end
-
-    -- 3. Base Treadmill Idle Execution
-    local canTreadmill = getgenv().config.autoTreadmill and not isStealBusy and PriorityManager:CanRun("Auto Treadmill")
+    local canTreadmill = getgenv().config.autoTreadmill and not isStealBusy and PriorityManager:CanRun("Treadmill")
 
     if canTreadmill and getAliveRig() then
+        ShieldManager:UndoSwap()
         findMyPlot()
-        if State.myTreadmill then
-            local _, tRoot = getAliveRig()
-            if tRoot and not tRoot.Anchored then
-                if (tRoot.Position - State.myTreadmill.Position).Magnitude > 8 then
-                    pcall(function()
-                        tRoot.CFrame = CFrame.new(State.myTreadmill.Position + Vector3.new(0, 1.5, 0))
-                        tRoot.AssemblyLinearVelocity = Vector3.zero
-                    end)
-                    task.wait(0.1)
+        local _, cRoot, cHum = getAliveRig()
+        if cRoot and cHum then
+            if State.myTreadmill then
+                local tPos = State.myTreadmill.Position + Vector3.new(0, 3, 0)
+                local dist = (cRoot.Position - tPos).Magnitude
+                if dist > 4 then
+                    cHum.PlatformStand = false
+                    cHum.Sit = false
+                    local speed = cHum.WalkSpeed
+                    if not speed or speed <= 0 then speed = 16 end
+                    local travelDuration = math.clamp(dist / math.max(speed, 16), 0.3, 3)
+                    local tw = Services.TweenService:Create(cRoot, TweenInfo.new(travelDuration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                        CFrame = CFrame.new(tPos) * cRoot.CFrame.Rotation
+                    })
+                    tw:Play()
+                    tw.Completed:Wait()
                 end
-                if Remotes.AskWearStill then
-                    pcall(function() Remotes.AskWearStill:InvokeServer() end)
+
+                local _, postRoot, postHum = getAliveRig()
+                if postRoot and not postRoot.Anchored then
+                    if postHum then
+                        postHum.PlatformStand = false
+                        postHum.Sit = false
+                    end
+                    if Remotes.AskWearStill and not isStealBusy and PriorityManager:CanRun("Treadmill") then
+                        pcall(function() Remotes.AskWearStill:InvokeServer() end)
+                    end
+                    task.wait(0.35)
+                    local _, verifyRoot = getAliveRig()
+                    if verifyRoot and not verifyRoot.Anchored then
+                        State.treadmillFailCount = State.treadmillFailCount + 1
+                        if State.treadmillFailCount >= 8 then
+                            resetFlaggedCharacter()
+                        elseif State.treadmillFailCount == 4 and Remotes.AskDoff then
+                            pcall(function() Remotes.AskDoff:InvokeServer() end)
+                        end
+                    else
+                        State.treadmillFailCount = 0
+                    end
+                else
+                    State.treadmillFailCount = 0
                 end
+            else
+                State.treadmillFailCount = 0
             end
         end
     end
@@ -5537,37 +4172,19 @@ activeTheme = Window:GetActiveTheme()
 -- ==============================================================================
 -- [ TAB 1: FARM CONTROLS & EVENT CATEGORIES ]
 -- ==============================================================================
-local rarityList = {
-    "All", "1 - Common", "2 - Uncommon", "3 - Rare", "4 - Epic",
-    "5 - Legendary", "6 - Mythic", "7 - Cosmic", "8 - Secret",
-    "9 - Eternal", "10 - Divine"
-}
-
-local areaList = {
-    "All", "Forest", "Lake", "Desert", "Jungle", "Snow", 
-    "Volcano", "Abyss Ocean", "Prehistoric", "Cosmic", 
-    "Cherry Blossom", "Titan Temple", "Light Dark", "Enchanted Forest"
-}
-
-local eggSpeciesList = {
-    "All", "Dog", "Cat", "Bunny", "Bear", "Wolf", "Dragon", "Phoenix", 
-    "Unicorn", "Hydra", "Demon", "Angel", "Ghost", "Pumpkin"
-}
-
--- ==============================================================================
--- [ TAB 1: FARM CONTROLS & EVENT CATEGORIES ]
--- ==============================================================================
 local FarmTab = Window:CreateTab("Farm", "Farm")
 
--- 1. Stealing & Egg Management Category
-local stealCategory = FarmTab:CreateCategory("Stealing & Egg Management", false, 1)
+-- Automation Steal Category
+local stealCategory = FarmTab:CreateCategory("Automation Steal", false, 1)
 
 stealCategory:CreateToggle("Auto Steal", "Automatically steal eggs from areas", currentSettings.AutoFarm, function(state)
     getgenv().config.autoFarm = state
     currentSettings.AutoFarm = state
     saveStuff()
     table.clear(State.blacklistedEggs)
-    if not state then abortStealRoutine() end
+    if not state then
+        abortStealRoutine()
+    end
 end)
 
 stealCategory:CreateToggle("Fast Steal", "Only works on Titan temple and above areas.", currentSettings.FastSteal, function(state)
@@ -5577,47 +4194,17 @@ stealCategory:CreateToggle("Fast Steal", "Only works on Titan temple and above a
     if state then
         Window:ShowWarningModal("Fast Steal Warning", "Fast Steal is unreliable. Do not use if you are lagging or AFK farming.")
     else
-        if State.isStealingActive and not isHoldingEgg() then abortStealRoutine() end
+        if State.isStealingActive and not isHoldingEgg() then
+            abortStealRoutine()
+        end
     end
 end)
 
-stealCategory:CreateMultiDropdown("Specific Egg Targeting", "Select specific egg species to target", eggSpeciesList, currentSettings.SpecificTargetEggs or {}, function(selectedMap)
-    getgenv().config.specificTargetEggs = selectedMap
-    currentSettings.SpecificTargetEggs = selectedMap
-    saveStuff()
-    table.clear(State.blacklistedEggs)
-end)
-
-stealCategory:CreateToggle("Steal Missing Index Eggs", "Target eggs not yet unlocked in Codex", currentSettings.StealMissingIndex, function(state)
-    getgenv().config.stealMissingIndex = state
-    currentSettings.StealMissingIndex = state
-    saveStuff()
-    table.clear(State.blacklistedEggs)
-end)
-
-stealCategory:CreateToggle("Auto Steal Minigame Egg", "Automates Red Light Green Light & T-Rex egg steals", currentSettings.AutoStealMinigame, function(state)
-    getgenv().config.autoStealMinigame = state
-    currentSettings.AutoStealMinigame = state
-    saveStuff()
-end)
-
-stealCategory:CreateToggle("Auto Capture Event Egg", "Capture roaming event egg in world", currentSettings.AutoCaptureEventEgg, function(state)
-    getgenv().config.autoCaptureEventEgg = state
-    currentSettings.AutoCaptureEventEgg = state
-    saveStuff()
-end)
-
-stealCategory:CreateToggle("Take From Holder", "Steal roaming event egg directly from holding player", currentSettings.TakeFromHolder, function(state)
-    getgenv().config.takeFromHolder = state
-    currentSettings.TakeFromHolder = state
-    saveStuff()
-end)
-
-stealCategory:CreateToggle("Auto Catch Shooting Star", "Detect and catch falling stars for rare loot", currentSettings.AutoCatchShootingStar, function(state)
-    getgenv().config.autoCatchShootingStar = state
-    currentSettings.AutoCatchShootingStar = state
-    saveStuff()
-end)
+local areaList = {
+    "All", "Forest", "Lake", "Desert", "Jungle", "Snow", 
+    "Volcano", "Abyss Ocean", "Prehistoric", "Cosmic", 
+    "Cherry Blossom", "Titan Temple", "Light Dark", "Enchanted Forest"
+}
 
 stealCategory:CreateMultiDropdown("Target Areas", "Select one or multiple areas (empty = all)", areaList, currentSettings.TargetAreas, function(selectedMap)
     getgenv().config.targetAreas = selectedMap
@@ -5626,6 +4213,12 @@ stealCategory:CreateMultiDropdown("Target Areas", "Select one or multiple areas 
     table.clear(State.blacklistedEggs)
 end)
 
+local rarityList = {
+    "All", "1 - Common", "2 - Uncommon", "3 - Rare", "4 - Epic",
+    "5 - Legendary", "6 - Mythic", "7 - Cosmic", "8 - Secret",
+    "9 - Eternal", "10 - Divine"
+}
+
 stealCategory:CreateDropdown("Min Rarity", "Only steal eggs with rarity >= this", rarityList, currentSettings.MinRarity, function(selected)
     getgenv().config.minRarity = selected
     currentSettings.MinRarity = selected
@@ -5633,29 +4226,36 @@ stealCategory:CreateDropdown("Min Rarity", "Only steal eggs with rarity >= this"
     table.clear(State.blacklistedEggs)
 end)
 
--- 2. Halloween & Dimension Events Category
-local halloweenCategory = FarmTab:CreateCategory("Halloween & Dimension Events", false, 2)
+-- Halloween Event Category
+local halloweenCategory = FarmTab:CreateCategory("Halloween Event 2026", false, 2)
 
-halloweenCategory:CreateToggle("Halloween Auto Steal", "Auto direct-remote grab & gate tween in dimension", currentSettings.AutoHalloweenSteal, function(state)
-    getgenv().config.autoHalloweenSteal = state
-    currentSettings.AutoHalloweenSteal = state
-    saveStuff()
-    if not state and HalloweenStealManager and HalloweenStealManager.Abort then
-        HalloweenStealManager:Abort()
-    end
-end)
+-- [TEMPORARILY HIDDEN: Auto Steal Halloween Eggs UI Controls]
+if false then
+    halloweenCategory:CreateToggle("Halloween Auto Steal", "Auto direct-remote grab & gate tween", currentSettings.AutoHalloweenSteal, function(state)
+        getgenv().config.autoHalloweenSteal = state
+        currentSettings.AutoHalloweenSteal = state
+        saveStuff()
+        if not state and HalloweenStealManager and HalloweenStealManager.Abort then
+            HalloweenStealManager:Abort()
+        end
+    end)
 
-halloweenCategory:CreateToggle("Instant Halloween Steal", "High-speed delivery mode for Halloween dimension", currentSettings.InstantHalloweenSteal, function(state)
-    getgenv().config.instantHalloweenSteal = state
-    currentSettings.InstantHalloweenSteal = state
-    saveStuff()
-end)
+    local halloweenAreaList = {
+        "All", "Graveyard", "Haunted Swamps", "Abandoned Manor"
+    }
 
-halloweenCategory:CreateToggle("Auto Buy Halloween Egg", "Automatically buy event eggs when currency is available", currentSettings.AutoBuyHalloweenEgg, function(state)
-    getgenv().config.autoBuyHalloweenEgg = state
-    currentSettings.AutoBuyHalloweenEgg = state
-    saveStuff()
-end)
+    halloweenCategory:CreateMultiDropdown("Target Areas", "Select Halloween areas to steal from", halloweenAreaList, currentSettings.HalloweenTargetAreas, function(selectedMap)
+        getgenv().config.halloweenTargetAreas = selectedMap
+        currentSettings.HalloweenTargetAreas = selectedMap
+        saveStuff()
+    end)
+
+    halloweenCategory:CreateDropdown("Min Rarity", "Only steal Halloween eggs with rarity >= this", rarityList, currentSettings.HalloweenMinRarity, function(selected)
+        getgenv().config.halloweenMinRarity = selected
+        currentSettings.HalloweenMinRarity = selected
+        saveStuff()
+    end)
+end
 
 halloweenCategory:CreateToggle("Candy Cane Monster Farm", "Auto weapon swap combat in dimension", currentSettings.AutoCandyCane, function(state)
     getgenv().config.autoCandyCane = state
@@ -5676,73 +4276,35 @@ halloweenCategory:CreateToggle("Auto Pumpkin", "Auto catch runaway pumpkins & de
     end
 end)
 
-halloweenCategory:CreateToggle("Auto Ghost Dog Quest", "Automates dialog, diving & surface turn-ins", currentSettings.AutoGhostDog, function(state)
-    getgenv().config.autoGhostDog = state
-    currentSettings.AutoGhostDog = state
+-- Automation Treadmill Category
+local treadmillCategory = FarmTab:CreateCategory("Automation Treadmill", false, 3)
+
+treadmillCategory:CreateToggle("Auto Treadmill", "Gain treadmill speed when idle", currentSettings.AutoTreadmill, function(state)
+    getgenv().config.autoTreadmill = state
+    currentSettings.AutoTreadmill = state
+    State.treadmillFailCount = 0
     saveStuff()
+    if not state then hopOffTreadmill() end
 end)
 
-halloweenCategory:CreateToggle("Auto Fishing", "Auto cast and reel fishing rods in dimension", currentSettings.AutoFishing, function(state)
-    getgenv().config.autoFishing = state
-    currentSettings.AutoFishing = state
-    saveStuff()
-end)
+-- Enchanted / Bloom Event Category
+local bloomCategory = FarmTab:CreateCategory("Enchanted / Bloom Event", false, 4)
 
-local luckList = { "Max", "High", "Normal" }
-halloweenCategory:CreateDropdown("Fishing Luck", "Configurable luck parameter for cast", luckList, currentSettings.FishingLuck or "Max", function(val)
-    getgenv().config.fishingLuck = val
-    currentSettings.FishingLuck = val
-    saveStuff()
-end)
-
-halloweenCategory:CreateToggle("Auto Phantom Express", "Boards and farms Ghost Train event", currentSettings.AutoPhantomExpress, function(state)
-    getgenv().config.autoPhantomExpress = state
-    currentSettings.AutoPhantomExpress = state
-    saveStuff()
-end)
-
-halloweenCategory:CreateToggle("Auto Vacuum Ghouler Boss", "Aims vacuum weapon against Ghouler boss", currentSettings.AutoVacuumGhouler, function(state)
-    getgenv().config.autoVacuumGhouler = state
-    currentSettings.AutoVacuumGhouler = state
-    saveStuff()
-end)
-
-halloweenCategory:CreateToggle("Auto Trade Souls", "Exchanges collected souls at event stalls", currentSettings.AutoTradeSouls, function(state)
-    getgenv().config.autoTradeSouls = state
-    currentSettings.AutoTradeSouls = state
-    saveStuff()
-end)
-
--- 3. Enchanted & Bloom Events Category
-local bloomCategory = FarmTab:CreateCategory("Enchanted & Bloom Events", false, 3)
-
-bloomCategory:CreateToggle("Auto Catch Butterfly", "Auto equip net and fly-catch butterflies", currentSettings.AutoCatchButterfly, function(state)
+bloomCategory:CreateToggle("Auto Bloom Event", "Auto catch butterflies during Bloom Event", currentSettings.AutoCatchButterfly, function(state)
     getgenv().config.autoCatchButterfly = state
     currentSettings.AutoCatchButterfly = state
     saveStuff()
     if not state then BloomManager.IsBusy = false end
 end)
 
-bloomCategory:CreateSlider("Butterfly Speed", "Travel speed while catching butterflies", 100, 600, currentSettings.ButterflySpeed or 320, 10, function(val)
-    getgenv().config.butterflySpeed = val
-    currentSettings.ButterflySpeed = val
-    saveStuff()
-end)
-
-bloomCategory:CreateToggle("Auto Wisp Companion", "Auto deliver requested eggs to companion wisps", currentSettings.AutoWispQuest, function(state)
+bloomCategory:CreateToggle("Auto Wisps Quest", "Auto advance & submit Wisp quest eggs", currentSettings.AutoWispQuest, function(state)
     getgenv().config.autoWispQuest = state
     currentSettings.AutoWispQuest = state
     saveStuff()
     if not state then BloomManager.IsBusy = false end
 end)
 
-bloomCategory:CreateToggle("Auto Banjo Cricket", "Claims Banjo Cricket musical buffs", currentSettings.AutoBanjoCricket, function(state)
-    getgenv().config.autoBanjoCricket = state
-    currentSettings.AutoBanjoCricket = state
-    saveStuff()
-end)
-
-bloomCategory:CreateToggle("Auto Trade Up", "Trade 5 lower-tier butterflies into higher tiers", currentSettings.AutoTradeUp, function(state)
+bloomCategory:CreateToggle("Auto Trade Up", "Trade butterflies into higher tiers at machine", currentSettings.AutoTradeUp, function(state)
     getgenv().config.autoTradeUp = state
     currentSettings.AutoTradeUp = state
     saveStuff()
@@ -5754,125 +4316,14 @@ bloomCategory:CreateToggle("Auto Craft Essence", "Craft Enchanted Essence at Mut
     saveStuff()
 end)
 
-bloomCategory:CreateToggle("Auto Mutate Eggs", "Apply mutation essence to placed eggs", currentSettings.AutoMutate, function(state)
-    getgenv().config.autoMutate = state
-    currentSettings.AutoMutate = state
+bloomCategory:CreateSlider("Butterfly Speed", "Travel speed while catching butterflies", 100, 600, currentSettings.ButterflySpeed or 320, 10, function(val)
+    getgenv().config.butterflySpeed = val
+    currentSettings.ButterflySpeed = val
     saveStuff()
 end)
 
--- 4. Pet & Egg Management Category
-local petCategory = FarmTab:CreateCategory("Pet & Egg Management", false, 4)
-
-petCategory:CreateToggle("Auto Place Egg", "Automatically place backpack eggs into pen slots", currentSettings.AutoPlaceEgg, function(state)
-    getgenv().config.autoPlaceEgg = state
-    currentSettings.AutoPlaceEgg = state
-    saveStuff()
-end)
-
-local placeOrders = { "Highest Value", "Biggest", "Backpack Order" }
-petCategory:CreateDropdown("Placement Order", "Sort order for egg placement", placeOrders, currentSettings.PlaceOrder or "Highest Value", function(val)
-    getgenv().config.placeOrder = val
-    currentSettings.PlaceOrder = val
-    saveStuff()
-end)
-
-petCategory:CreateToggle("Auto Hatch", "Automatically hatch eggs from backpack", currentSettings.AutoHatch, function(state)
-    getgenv().config.autoHatch = state
-    currentSettings.AutoHatch = state
-    saveStuff()
-end)
-
-petCategory:CreateToggle("Auto Equip Best", "Equip pets with highest multiplier/speed", currentSettings.AutoEquipBest, function(state)
-    getgenv().config.autoEquipBest = state
-    currentSettings.AutoEquipBest = state
-    saveStuff()
-    if state and Remotes.WearBest then
-        pcall(function() Remotes.WearBest:InvokeServer() end)
-    end
-end)
-
-petCategory:CreateToggle("Auto Sell Pets", "Sell low rarity pets to maintain bag space", currentSettings.AutoSellPets, function(state)
-    getgenv().config.autoSellPets = state
-    currentSettings.AutoSellPets = state
-    saveStuff()
-end)
-
-petCategory:CreateDropdown("Sell Pet Max Rarity", "Sell pets at or below this rarity", rarityList, currentSettings.SellPetMaxRarity or "Common", function(val)
-    getgenv().config.sellPetMaxRarity = val
-    currentSettings.SellPetMaxRarity = val
-    saveStuff()
-end)
-
-petCategory:CreateToggle("Keep Mutated Pets", "Preserve mutated pets from auto-sell", currentSettings.KeepMutatedPets, function(state)
-    getgenv().config.keepMutatedPets = state
-    currentSettings.KeepMutatedPets = state
-    saveStuff()
-end)
-
-petCategory:CreateToggle("Auto Sell Eggs", "Sell unplaced backpack eggs below rarity limit", currentSettings.AutoSellEggs, function(state)
-    getgenv().config.autoSellEggs = state
-    currentSettings.AutoSellEggs = state
-    saveStuff()
-end)
-
-petCategory:CreateToggle("Auto Fuse Machine", "Load 3 matching pets to fuse into higher tiers", currentSettings.AutoFuseMachine, function(state)
-    getgenv().config.autoFuseMachine = state
-    currentSettings.AutoFuseMachine = state
-    saveStuff()
-end)
-
-petCategory:CreateToggle("Auto Favorite", "Lock high rarity & mutated pets", currentSettings.AutoFavorite, function(state)
-    getgenv().config.autoFavorite = state
-    currentSettings.AutoFavorite = state
-    saveStuff()
-end)
-
--- 5. Training & Movement Category
-local treadmillCategory = FarmTab:CreateCategory("Training & Movement", false, 5)
-
-treadmillCategory:CreateToggle("Auto Treadmill", "Auto walk on plot treadmill for speed training", currentSettings.AutoTreadmill, function(state)
-    getgenv().config.autoTreadmill = state
-    currentSettings.AutoTreadmill = state
-    saveStuff()
-    if not state then hopOffTreadmill() end
-end)
-
-treadmillCategory:CreateToggle("Stay On Treadmill", "Hold exact position while training", currentSettings.StayOnTreadmill, function(state)
-    getgenv().config.stayOnTreadmill = state
-    currentSettings.StayOnTreadmill = state
-    saveStuff()
-end)
-
-treadmillCategory:CreateToggle("Auto Admin Treadmill", "Train on admin/VIP event treadmills", currentSettings.AutoAdminTreadmill, function(state)
-    getgenv().config.autoAdminTreadmill = state
-    currentSettings.AutoAdminTreadmill = state
-    saveStuff()
-end)
-
-treadmillCategory:CreateToggle("Speed Boost", "Enable custom walkspeed multiplier", currentSettings.SpeedBoost, function(state)
-    getgenv().config.speedBoost = state
-    currentSettings.SpeedBoost = state
-    saveStuff()
-    if not state then
-        local _, _, hum = getAliveRig()
-        if hum then hum.WalkSpeed = 16 end
-    end
-end)
-
-treadmillCategory:CreateSlider("WalkSpeed Value", "Multiplier for Speed Boost", 16, 300, currentSettings.BoostSpeed or 150, 5, function(val)
-    getgenv().config.boostSpeed = val
-    currentSettings.BoostSpeed = val
-    saveStuff()
-end)
-
-treadmillCategory:CreateToggle("Infinite Jump", "Jump repeatedly in mid-air", currentSettings.InfiniteJump, function(state)
-    getgenv().config.infiniteJump = state
-    currentSettings.InfiniteJump = state
-    saveStuff()
-end)
-
--- 6. Automation Upgrades Category
-local upgradesCategory = FarmTab:CreateCategory("Automation Upgrades", false, 6)
+-- Automation Upgrades Category
+local upgradesCategory = FarmTab:CreateCategory("Automation Upgrades", false, 5)
 
 upgradesCategory:CreateToggle("Auto Upgrade Treadmill", "Auto buy next tier treadmill", currentSettings.AutoUpgradeTreadmill, function(state)
     getgenv().config.autoUpgradeTreadmill = state
@@ -5883,146 +4334,6 @@ end)
 upgradesCategory:CreateToggle("Auto Upgrade Base", "Auto buy homestead base expansion", currentSettings.AutoUpgradeBase, function(state)
     getgenv().config.autoUpgradeBase = state
     currentSettings.AutoUpgradeBase = state
-    saveStuff()
-end)
-
-upgradesCategory:CreateToggle("Auto Claim Rewards", "Auto collect offline money & codex/index rewards", currentSettings.AutoClaimMastery, function(state)
-    getgenv().config.autoClaimMastery = state
-    currentSettings.AutoClaimMastery = state
-    saveStuff()
-end)
-
--- ==============================================================================
--- [ TAB 2: VISUALS & ESP CONTROLS ]
--- ==============================================================================
-local VisualsTab = Window:CreateTab("Visuals", "Visuals")
-
-local eggEspCategory = VisualsTab:CreateCategory("Egg ESP & Filters", false, 1)
-
-eggEspCategory:CreateToggle("ESP Eggs", "Highlight field eggs with tier color codes", currentSettings.EspEggs, function(state)
-    getgenv().config.espEggs = state
-    currentSettings.EspEggs = state
-    saveStuff()
-    if not state then ESPManager:ClearESP() end
-end)
-
-eggEspCategory:CreateToggle("Fixed Size ESP", "Keep billboard size constant regardless of distance", currentSettings.EspFixedSize, function(state)
-    getgenv().config.espFixedSize = state
-    currentSettings.EspFixedSize = state
-    saveStuff()
-end)
-
-eggEspCategory:CreateToggle("Own Base Eggs", "Show ESP for eggs in your own pen", currentSettings.EspOwnBase, function(state)
-    getgenv().config.espOwnBase = state
-    currentSettings.EspOwnBase = state
-    saveStuff()
-end)
-
-eggEspCategory:CreateToggle("Other Base Eggs", "Show ESP for eggs in other players bases", currentSettings.EspOtherBase, function(state)
-    getgenv().config.espOtherBase = state
-    currentSettings.EspOtherBase = state
-    saveStuff()
-end)
-
-eggEspCategory:CreateDropdown("Min ESP Rarity", "Filter out eggs below this rarity", rarityList, currentSettings.EspMinRarity or "All", function(val)
-    getgenv().config.espMinRarity = val
-    currentSettings.EspMinRarity = val
-    saveStuff()
-end)
-
-local entityEspCategory = VisualsTab:CreateCategory("Entity & Player ESP", false, 2)
-
-entityEspCategory:CreateToggle("ESP Guards", "Highlight plot guards with red outlines", currentSettings.EspGuards, function(state)
-    getgenv().config.espGuards = state
-    currentSettings.EspGuards = state
-    saveStuff()
-    if not state then ESPManager:ClearESP() end
-end)
-
-entityEspCategory:CreateToggle("ESP Players", "Highlight nearby players and show distances", currentSettings.EspPlayers, function(state)
-    getgenv().config.espPlayers = state
-    currentSettings.EspPlayers = state
-    saveStuff()
-    if not state then ESPManager:ClearESP() end
-end)
-
--- ==============================================================================
--- [ TAB 3: UTILITY & PERFORMANCE CONTROLS ]
--- ==============================================================================
-local UtilityTab = Window:CreateTab("Utility", "Utility")
-
-local protectCategory = UtilityTab:CreateCategory("Character Protections", false, 1)
-
-protectCategory:CreateToggle("Anti-Trap Immunity", "Traps from other players cannot catch you", currentSettings.AntiTrap, function(state)
-    getgenv().config.antiTrap = state
-    currentSettings.AntiTrap = state
-    CharacterProtection.AntiTrapEnabled = state
-    saveStuff()
-end)
-
-protectCategory:CreateToggle("Anti-Ragdoll Recovery", "Instant recovery from knockdowns, guards, & bats", currentSettings.AntiRagdoll, function(state)
-    getgenv().config.antiRagdoll = state
-    currentSettings.AntiRagdoll = state
-    CharacterProtection.AntiRagdollEnabled = state
-    saveStuff()
-end)
-
-protectCategory:CreateToggle("Stealth Anti-AFK", "Disable Idled disconnect connection (100% undetected)", currentSettings.AntiAfk, function(state)
-    getgenv().config.antiAfk = state
-    currentSettings.AntiAfk = state
-    saveStuff()
-end)
-
-protectCategory:CreateToggle("Instant Prompts", "Reduce proximity prompt duration to zero", currentSettings.InstantPrompts, function(state)
-    getgenv().config.instantPrompts = state
-    currentSettings.InstantPrompts = state
-    saveStuff()
-end)
-
-protectCategory:CreateToggle("Auto Rejoin On Disconnect", "Automatically reconnect to server if kicked or disconnected", currentSettings.AutoRejoin, function(state)
-    getgenv().config.autoRejoin = state
-    currentSettings.AutoRejoin = state
-    saveStuff()
-end)
-
-local perfCategory = UtilityTab:CreateCategory("Performance & Optimization", false, 2)
-
-perfCategory:CreateToggle("Optimizer", "Strip shadows, particles, and effects for high FPS", currentSettings.Optimizer, function(state)
-    getgenv().config.optimizer = state
-    currentSettings.Optimizer = state
-    saveStuff()
-    PerformanceManager:ApplyOptimizer(state)
-end)
-
-perfCategory:CreateToggle("Disable 3D Render", "Turn off 3D world rendering for ultra-low CPU/GPU usage", currentSettings.Disable3DRender, function(state)
-    getgenv().config.disable3DRender = state
-    currentSettings.Disable3DRender = state
-    saveStuff()
-    PerformanceManager:Set3DRendering(state)
-end)
-
-perfCategory:CreateSlider("FPS Cap", "Maximum framerate limit", 30, 240, currentSettings.FpsCap or 60, 10, function(val)
-    getgenv().config.fpsCap = val
-    currentSettings.FpsCap = val
-    saveStuff()
-    PerformanceManager:SetFpsCap(val)
-end)
-
-perfCategory:CreateToggle("Hide Game UI", "Hide CoreGui HUD to reduce UI rendering overhead", currentSettings.HideGameUI, function(state)
-    getgenv().config.hideGameUI = state
-    currentSettings.HideGameUI = state
-    saveStuff()
-    pcall(function()
-        local sg = Services.StarterGui
-        if sg then
-            sg:SetCoreGuiEnabled(Enum.CoreGuiType.All, not state)
-        end
-    end)
-end)
-
-perfCategory:CreateToggle("Farm HUD", "Show live on-screen statistics overlay", currentSettings.FarmHUD, function(state)
-    getgenv().config.farmHUD = state
-    currentSettings.FarmHUD = state
     saveStuff()
 end)
 

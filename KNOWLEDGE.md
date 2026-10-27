@@ -40,8 +40,8 @@
     ```lua
     local SyntaxisLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/tenobarillas-ship-it/GUILib/main/SyntaxisLib.lua"))()
     ```
-- **Reference Repository (Private):** [`tenobarillas-ship-it/friend`](https://github.com/tenobarillas-ship-it/friend)
-  - Houses the monolithic 49,217-line reference script `chilihubstealanegg.lua`.
+- **Reference Repository (Private):** [`tenobarillas-ship-it/cool`](https://github.com/tenobarillas-ship-it/cool)
+  - Houses the monolithic 49,217-line reference script `hot.lua`.
   - Used strictly for reverse engineering, remote discovery, and algorithm comparison.
 
 ### 1.2 Local Workspace & Settings Persistence
@@ -65,7 +65,7 @@
 All script automation modules route through `UniversalCompat` rather than making raw executor calls. It is engineered to be **100% Touch & Mobile-Safe** with zero synthetic input flags:
 
 1. **`UniversalCompat.FireProximityPrompt(prompt)`**:
-   - Matches the friend reference implementation (`chilihubstealanegg.lua` line 30064):
+   - Matches the cool reference implementation (`hot.lua` line 30064):
      ```lua
      local function FirePrompt(prompt)
          if prompt and type(fireproximityprompt) == "function" then
@@ -86,7 +86,7 @@ All script automation modules route through `UniversalCompat` rather than making
    - Works uniformly across PC executors and mobile executors without raising execution exceptions.
 
 3. **`UniversalCompat.ClickButton(btn)`**:
-   - Pure event dispatching matching friend source (line 37655):
+   - Pure event dispatching matching cool source (line 37655):
      1. `firesignal(btn.Activated)` / `firesignal(btn.MouseButton1Click)`
      2. `getconnections(btn.Activated)` loop invoking `c:Fire()` or `c.Function()`
      3. `getconnections(btn.MouseButton1Click)` loop invoking `c:Fire()` or `c.Function()`
@@ -383,65 +383,48 @@ sequenceDiagram
 
 ### 6.5 Halloween Dimension & World Automations
 
-- **Auto Halloween Egg Steal (Friend Source Architecture — `chilihubstealanegg.lua` lines 30036–30973):**
-  - **Zone Indexing & Spatial Filtering:**
-    - Resolves BaseParts `Zone1` (Graveyard), `Zone2` (Haunted Swamps), and `Zone3` (Abandoned Manor) under `HalloweenDimension.Zones`.
-    - Determines zone index using precise object-space bounding box calculations:
-      $$\Delta X \le \frac{\text{Size.X}}{2} - \text{inset}, \quad \Delta Z \le \frac{\text{Size.Z}}{2} - \text{inset}$$
-  - **Egg Valuation & Identification:**
-    - Resolves raw egg instances to `Data.HalloweenPets.Specs` identifiers and `Data.Assets.Directory` records.
-    - Computes egg value using non-linear scale valuation:
-      $$\text{Factor} = (\text{Scale} > 5.0) \mathbin{?} \left(\frac{\text{Scale}}{5}\right)^{1.2} \times 19.637875755794113 : \text{Scale}^{1.85}$$
-      $$\text{Value} = \text{EarningRate} \times \text{Factor}$$
-    - Evaluates filters: `TargetAreas` (Zone matching), `MinRarity` (Rank matching), and internal `OrderIndex` priority.
-  - **Approach & Grab Routine:**
-    - When `InstantSteal = true`, steps character towards target egg using Heartbeat-clamped displacement (`StepSpeed`, default 40 studs/step).
-    - Approaches within 3 studs, positions character at `eggPos + Vector3.new(0, 3, 0)`, and fires `StealPrompt` every 100ms via pure `fireproximityprompt`.
-    - If grabbing fails after 3 attempts, blacklists egg for 30s (`BadEggs[egg] = os.clock() + 30`).
-  - **SafeCarry Delivery Sequence:**
-    - **Edge Stepping & Pullback Check:** Steps character to the outer boundary of `SafeZone`. Evaluates anti-cheat pullback up to 4 iterations (detecting if server displacement exceeds 100 studs).
-    - **Drop & Regrab at Boundary:** Asynchronously calls `RF/HalloweenDimension/AskDropEgg` to reset cumulative displacement, waits for `HalloweenCarrying == false`, then re-grabs the egg at the edge.
-    - **SafeZone Inset Velocity Glide:** Noclips character BaseParts (`CanCollide = false`), clamps target point inside SafeZone with inset (6 studs for Instant, 40 studs for Normal), and applies planar linear velocity towards target combined with vertical Y-correction:
-      $$\mathbf{v}_y = (Y_{\text{ground}} - Y_{\text{root}}) \times 8$$
-    - Restores BasePart collision and verifies delivery confirmation via `LocalPlayer:GetAttribute("HalloweenDelivered")` change.
-- **Dimension Boundary Supervisor & Portal Manager:**
-  - Prevents instant bounce-backs by verifying spatial bounding boxes (`workspace:FindFirstChild("HalloweenDimension")` and character CFrame bounds).
-  - Teleports through portals with downward physics nudges (`Vector3.new(0, -0.5, 0)`) to guarantee broadphase collision registration.
-- **Candy Cane Monster Farm:**
-  - Identifies active monsters in `HalloweenDimension.Monsters`.
-  - Cycles weapons via `GetWeaponList()` to bypass attack cooldowns.
-  - Hovers at `HoverHeight = 12–14` studs and triggers swept touch collisions.
-  - Cleanly yields via `HalloweenCombatManager:Abort()` when preempted.
-- **Auto Pumpkin:**
-  - Detects runaway pumpkins in `HalloweenDimension.RunawayPumpkins`.
-  - Glides to pumpkin, grabs, and carries to the Altar.
-  - Marked **non-interruptible** while `IsCarrying() = true` to prevent pumpkin dropping.
-- **Auto Boss (Pumpkin King) — `HalloweenBossManager` in `qualcom`:**
-  - **GUI:** `Halloween Event 2026` category → `Auto Boss` toggle (`currentSettings.AutoBossEvent` → `getgenv().config.autoBossEvent`, mirrored to `getgenv().AutoBossEvent`). The separate `Repeat Boss Runs` toggle was removed; event repeating is managed autonomously via internal lifecycle state tracking.
-  - **Driver:** `WorkerScheduler:Register("HalloweenBoss", 0.05, ...)` → `PriorityManager:CanRun("Boss")` → `HalloweenBossManager:Process()` (one loop iteration per tick, guarded by `getgenv().BossFarmerState.IsBusy`).
-  - **Persistent Event Scoping State:** `getgenv().BossFarmerState = { IsBusy, CurrentBatIndex, KingEncountered, CurrentEventCompleted, WaitingForPortalClose, ArenaEntryTime }` (`IsBusy` force-reset on script load).
-  - **Event Lifecycle & Portal Resealing Mechanics:**
-    1. **Stage 1 — Outside arena (`ProcessOutside` & `HasWork`):**
-       - Reads the portal model: `HalloweenDimension.BossPortal.BossPortalSeal` — any seal `BasePart` with `Transparency < 0.5` = **closed**, all transparent or seal missing = **open** (`GetPortalState()` returns `known, open`).
-       - **Sealed Portal Resets Completion:** When the portal closes/seals, `CurrentEventCompleted` and `WaitingForPortalClose` are reset to `false`. The system is now fully armed for the next genuinely new event.
-       - **Finished Event Window Ignore:** After King Boss is defeated, the entrance portal remains open for several minutes before closing. Auto Boss sets `CurrentEventCompleted = true` and `WaitingForPortalClose = true`, ignoring the lingering open portal so it will **never re-enter a finished event**.
-       - **New Event Entry:** When `open == true` and `CurrentEventCompleted == false`, a genuinely new boss event has started. Invokes `RF/BossEvent/AskEnter`, glides to `BossPortal.Hitbox`, and transitions into the arena.
-    2. **Stage 2 — Inside `PumpkinArena` (`ProcessArena`):**
-       - Arena detected via `InPumpkinArena` attribute or $\le 600$ studs from arena center `(-133552.1, 477.7, 980.7)`.
-       - **Immediate Defeat / Disappearance Exit (`IsBossDefeated`):**
-         - Detects victory if arena `Health <= 0`, `Phase ∈ {Defeated, Finished, Victory, Ended}`, King humanoid is dead, OR King Boss model has completely despawned/disappeared after being encountered alive (`state.KingEncountered == true`).
-         - Immediately marks `CurrentEventCompleted = true` and `WaitingForPortalClose = true`.
-         - Calls `HandleArenaExit(arena)` (glides to `BossExitPortal`, fires touch/prompt listeners) to exit the arena immediately instead of idling inside.
-       - **Cannon Phase:** When King Boss has an active shield (`Phase == "Shield"` / `ShieldActive == true`) or is stunned (`Phase == "Stunned"` / `StunEnds` / King `Stunned`): locates assigned cannon (`Cannons/*` with `OwnerUserId`), clears obstructing roots/vines with bat strikes, aligns character onto the green stand circle, and fires `RE/PumpkinBoss/CannonFire` with rate-limited debounce (0.25s).
-       - **Melee Phase:** When King Boss is unshielded and active, stands $14$ studs behind its `LookVector` at `FloorY + 3` (default `476.24`), cycling all bats in Character/Backpack every $0.06$s and triggering touch interest / `RE/HalloweenDimension/MonsterHit`.
-  - **Character protection:** `ApplyStateProtection` mirrors `applyGodMode` but **skips all `Tool` descendants** (BAC-7516 mitigation) and respects active `RagdollEndTime` (BAC-10518 mitigation).
-  - **Priority integration:** task `"Auto Boss"` (aliases `Boss`, `AutoBoss`), default **Rank 1**, dimension `"Self"`. `HalloweenBossManager:IsLocked()` (enabled **and** mid-run or in arena) forces `GetTopWantedTask()` to return `"Auto Boss"`; Dimension Supervisor never interferes while locked. When an event run is completed and waiting outside for the portal to close, `HasWork()` returns `false`, allowing other tasks (Auto Steal, etc.) to run.
-- **Live World Events:**
-  - **Shooting Stars:** Intercepts falling `ShootingStarClient` models, tracks landing position, and fires `RE/ShootingStar/Catch`.
-  - **Phantom Express:** Navigates to ghost train station platform and boards via `RF/TrainEvent/Action("Board")`.
-  - **Ghost Dog Quest:** Executes complete 5-stage quest pipeline (`Talk` $\rightarrow$ `Cast` $\rightarrow$ `Dive` $\rightarrow$ `Surface` $\rightarrow$ `Claim`).
-  - **Butterfly Bloom & Wisps:** Detects butterfly swarms in Enchanted Forest, collects nectar with equipped net, and fulfills wisp companion requests (`RF/WispCompanion/Request`).
-
+- **TweenService-Based Portal Transportation:**
+  - Replaces instant coordinate snaps with a physics-safe, smooth linear `TweenService` glide (speed $\approx 65$ studs/s).
+  - Temporarily sets `PlatformStand = true` and suppresses BasePart collision (`setCollisions(false)`) during glide transit.
+  - Monitors dimension arrival every frame: cancels active tween immediately if player arrives early, character dies, or task is aborted.
+  - Automatically triggers dual-stage touch interest fallback on portal hitbox upon arrival, followed by up to 3.0s confirmation wait for server dimension replication.
+- **Auto Pumpkin Moon Event Gating & Loop Resolution:**
+  - **The Defect Fixed:** Previously, outside the Halloween dimension, `PriorityManager:HasWork("Auto Pumpkin")` unconditionally returned `true`, causing the Dimension Supervisor to loop entering and exiting the portal indefinitely.
+  - **Authoritative Gating:** `HalloweenPumpkinManager:IsEventActive()` strictly verifies global world attributes: `workspace:GetAttribute("HalloweenWorldEvent") == "PumpkinMoon"` or `workspace:GetAttribute("WorldEvent") == "PumpkinMoon"`.
+  - When the event is inactive and player is not carrying a pumpkin, `HasWork` immediately returns `false`. The character remains completely idle outside the portal.
+- **Auto Ghost Dog Quest (`GhostDogManager`):**
+  - Automates the full 5-stage seasonal questline in the Halloween Dimension, terminating in unlocking the exclusive **Phantom Express Conductor Ticket**.
+  - **Marker Discovery:** Discovers named BaseParts under `HalloweenDimension.GhostDogQuest.Markers` (`DogSpot`, `FishermanSpot`, `Artifact_Collar`, `Artifact_Bone`, `Artifact_Toy`, `Artifact_Photo`, `CastSpot`, `CastTarget`, `ReturnSpot`).
+  - **Dialogue State Machine:** Talks to NPCs via `RF/GhostDogQuest/Talk` (`"Dog"`, `"Fisherman"`, `"Rod"`). If response indicates `"closer"`, micro-steps 3 studs and retries up to 3 times.
+  - **Artifact Collection:** Queries quest artifacts table. Seamlessly visits missing items, fires `RF/GhostDogQuest/Collect(artifactName)`, and returns to `DogSpot` to advance stage.
+  - **Underwater Spline Chase:** Casts quest rod at `CastTarget`. On bite (`Mode == "Quest"`), cancels fishing, invokes `RF/GhostDogQuest/Cast` to acquire `ChaseId`, invokes `RF/GhostDogQuest/Dive`, sets `Humanoid.PlatformStand = true`, tilts character $-72^\circ$ pitch (`CFrame.Angles(-1.2566, 0, 0)`), and glides along the `Data.GhostDogQuest.ChaseFrame` spline at 58 studs/s.
+  - **Claim & Surface:** Executes up to 8 claim attempts via `RF/GhostDogQuest/Claim`, calls `RF/GhostDogQuest/Surface` to return to ground level at `ReturnSpot`, restores `PlatformStand = false`, and unlocks `ConductorTicket`.
+- **Auto Dock Fishing Engine (`HalloweenFishingManager`):**
+  - **Water Surface Raycasting:** Casts vertical ray downward 180 studs ignoring character. Validates water contact via `hit.Material == Enum.Material.Water`, `TerrainRole == "Basin"`, `hit:GetAttribute("FishingWater")`, or tag `FishingWater`.
+  - **Radial Angle Scanner:** Evaluates 13 radial angles at distance $10 + 32 \times \text{Charge}$, maintaining $\ge 12$ studs separation from `CastTarget` to avoid interfering with quest ripples.
+  - **Tension Hold Formula:** Computes hold duration: $\text{holdDuration} = 1.2 \times \text{Charge}^{0.7142857}$. Fires `RE/Fishing/Hold`, waits duration, and invokes `RF/Fishing/Cast`.
+  - **Reel Simulation:** Simulates rapid punch reel interaction over bite window and invokes `RF/Fishing/Reel(biteId, "Caught", 16)`. Automatically diverts ghost fish bites to underwater spline chase.
+- **Phantom Express & Ghost Train Event (`PhantomExpressManager`):**
+  - **Real-Time State Listener:** Listens to `RE/TrainEvent/State` and queries `RF/TrainEvent/Action("Status")` for live train phases (`"Arrival"`, `"Boarding"`, `"Active"`, `"Invasion"`), arrival times, and departure timestamps (`DepartureAt`).
+  - **Ticket Access Gate:** Checks player backpack/character for `ConductorTicket` attribute or unlocked access before attempting to board.
+  - **Boarding & Return Mechanics:** Glides along boarding rail markers (`BoardRailStart` $\rightarrow$ `BoardRailEnd`) and invokes `RF/TrainEvent/Action("Board")`. Upon ride conclusion, moves along `ReturnRailStart` $\rightarrow$ `ReturnRailEnd` and invokes `RF/TrainEvent/Action("Return")`.
+  - **Departure Latch:** Records `DoneDeparture = DepartureAt`. Will never attempt to re-board the same train run, waiting outside for the next arrival window.
+- **Auto Vacuum Ghouler Boss & Soul Trading (`GhoulerBossManager`):**
+  - **Vacuum Acquisition:** Automatically checks for `GhostVacuum` tool; interacts with `TrainEventAction.PickupVacuum` proximity prompt if missing.
+  - **Invisibility Suppression:** Temporarily pauses active character invisibility (`InvisHalloweenUntil`) while vacuuming because suction mechanics require physical player visibility.
+  - **Ghost Selection Hierarchy:** Intelligently scans `TrainGhostVisuals`. Supports `"Rarest First"` (Vengeful=3, Haunted=2, Normal=1) and `"Closest"` Euclidean sorting.
+  - **16-Point Safe Orbital Positioning:** Dynamically computes safe circular orbital standoff (7 to 15 studs) around target ghosts using floor raycasts to avoid physical collision damage.
+  - **Directional Suction:** Fires `RE/GhostBoss/Suction` with unit direction vectors every 0.25s.
+  - **Ghouler Boss Predictive Tracking:** Extrapolates boss position via predictive velocity lead: $\mathbf{p}_{\text{aim}} = \mathbf{p}_{\text{ground}} + \mathbf{v} \times \Delta t$, maintaining a safe standoff distance of 42 studs.
+  - **Automated Soul Trading:** When soul shop is available, navigates to `TrainEventAction.OpenSoulShop` and trades collected souls via `RF/TrainEvent/Action("TradeSouls", Cost)`.
+- **Auto Buy Halloween Dimension Egg:**
+  - Automated merchant purchasing in the Halloween Dimension via `RF/HalloweenDimension/AskBuyEgg` with rate-limiting debounce.
+- **Auto Steal Halloween Eggs (`HalloweenStealManager`):**
+  - 3-zone spatial bounding box filtering (`Graveyard`, `Haunted Swamps`, `Abandoned Manor`), non-linear scale egg valuation, and SafeZone edge drop/regrab delivery.
+- **Candy Cane Monster Farm (`HalloweenCombatManager`):**
+  - Rapid multi-bat auto-switching melee combat targeting seasonal monsters at safe hover elevation.
+- **Auto Boss (Pumpkin King) (`HalloweenBossManager`):**
+  - Full autonomous arena lifecycle: entrance portal glide, cannon firing during shield/stun phases, 14-stud rear standoff melee combat, immediate arena exit upon boss defeat/despawn, and persistent latch ignoring lingering open portals until a genuinely new boss event begins.
 
 ### 6.5.1 Architectural Rules: Halloween Event 2026 = Halloween Dimension
 
@@ -508,53 +491,40 @@ end
 
 ## 7. Unified Priority System & Concurrency Architecture
 
-### 7.1 Canonical 7-Task Supervisor in `qualcom`
-In `qualcom`, tasks are evaluated strictly from **Rank 1** to **Rank 7** (default order, user-reorderable in the Priority tab):
-1. `Auto Boss` (Self-navigating: Halloween Dimension → BossPortal → PumpkinArena)
-2. `Auto Steal` (Normal Dimension)
-3. `Candy Cane Farm` (Halloween Dimension)
-4. `Auto Pumpkin` (Halloween Dimension)
-5. `Enchanted / Bloom Event` (Normal Dimension)
-6. `Auto Upgrades` (Global Background)
-7. `Auto Treadmill` (Normal Dimension Idle Fallback)
+### 7.1 Authoritative Character Ownership Mutex (`ActiveTask`)
+To resolve concurrent task execution conflicts (where two active features fight over the character's velocity and CFrame), the system enforces a **Centralized Character Ownership Lock**:
+1. **Ownership Lock (`ActiveTask` & `ActiveTaskExpiresAt`):**
+   - When a task begins a multi-second physical action (e.g. `Auto Steal` carrying an egg, `HalloweenPumpkin` carrying a pumpkin, `Candy Cane Farm` attacking a monster, `Ghost Dog` diving underwater), it calls `PriorityManager:Acquire(taskName, maxDuration)`.
+   - While the lock is held, `PriorityManager:IsLocked()` returns `true`.
+   - Other tasks calling `PriorityManager:CanRun(otherTask)` immediately return `false`.
+   - When the action concludes or fails, the owning task calls `PriorityManager:Release(taskName)`, clearing the lock.
+   - A safety timeout (default 15–35s) ensures the lock automatically expires if an unexpected script exception occurs, preventing deadlocks.
+2. **Elimination of Destructive Mid-Flight Preemptive Aborts:**
+   - Previously, background worker loops called `Abort()` on active managers whenever `CanRun()` returned `false`. This caused tasks to clobber and cancel each other mid-flight.
+   - In the new architecture, background workers simply yield and wait their turn without calling `Abort()`.
+3. **Dimension Supervisor Non-Interference:**
+   - The Dimension Supervisor will **NEVER** switch dimensions while `PriorityManager:IsLocked()` is `true`.
+   - Dimension transitions only occur when the character is completely idle and free of ownership locks.
+4. **Independent Task Decoupling:**
+   - Tasks that do not control character movement (such as `Auto Upgrades`) run independently in the background without contending for or locking the character.
+
+### 7.2 Canonical 12-Task Supervisor Hierarchy in `qualcom`
+Tasks are evaluated strictly in canonical order (default order, user-reorderable in the Priority UI tab):
+1. **`Auto Boss`** (Dimension: `Self` — autonomous portal/arena navigation)
+2. **`Auto Ghost Dog`** (Dimension: `Halloween`)
+3. **`Auto Train`** (Phantom Express & Train Event, Dimension: `Halloween`)
+4. **`Auto Vacuum`** (Auto Vacuum Ghouler Boss & Soul Trading, Dimension: `Halloween`)
+5. **`Auto Steal`** (Dimension: `Normal`)
+6. **`Candy Cane Farm`** (Dimension: `Halloween`)
+7. **`Auto Pumpkin`** (Dimension: `Halloween`)
+8. **`Auto Fishing`** (Dimension: `Halloween`)
+9. **`Auto Buy Halloween Egg`** (Dimension: `Halloween`)
+10. **`Enchanted / Bloom Event`** (Dimension: `Normal`)
+11. **`Auto Upgrades`** (Dimension: `Any` — independent background upgrades)
+12. **`Auto Treadmill`** (Dimension: `Normal` — idle training fallback)
 
 > [!NOTE]
-> `PriorityManager:Initialize()` inserts tasks missing from a saved `TaskPriorities` list at their **canonical index** (not at the bottom), so existing configs receive `Auto Boss` at Rank 1.
-
-### 7.2 The 13-Task Global Game Hierarchy
-Analysis of `SAE_Priority.json` revealed the complete priority coordinate chain:
-```text
-[Rank 1]  StealFilter    (Specific egg model priority)
-[Rank 2]  Star           (Shooting star spawn interception)
-[Rank 3]  Train          (Phantom Express ghost train)
-[Rank 4]  HwPumpkin      (Runaway pumpkin carry)
-[Rank 5]  Butterfly      (Butterfly swarm collection)
-[Rank 6]  StealWisp      (Wisp quest egg stealing)
-[Rank 7]  StealIndex     (Undiscovered Codex egg stealing)
-[Rank 8]  Place          (Base pen egg placement)
-[Rank 9]  Essence        (Mutation essence crafting)
-[Rank 10] HwDog          (Ghost Dog NPC quest)
-[Rank 11] HwMonsters     (Halloween monster farming)
-[Rank 12] HwFishing      (Halloween lake fishing)
-[Rank 13] Treadmill      (Homestead speed training)
-```
-
-### 7.3 Task Preemption & Dimension Supervisor
-- **`PriorityManager:GetTopWantedTask()`**: Evaluates tasks in user-configured rank order. The first task that is both **enabled** and **has active work** becomes the **Sole Authority Task**.
-- **`PriorityManager:CanRun(taskName)`**: Prevents lower-tier tasks from moving the character while a higher task is active.
-- **Preemption & Abort:** When a higher-priority task claims the character:
-  - If on treadmill: Calls `hopOffTreadmill()` immediately.
-  - If in Halloween combat: Calls `HalloweenCombatManager:Abort()`.
-  - If dimension switch is required: Paths through exit portal (`HalloweenPortalManager.ExitDimension(5.0)`) before executing normal dimension tasks.
-- **Non-Interruptible Carrying Protection:** If `isHoldingEgg()` or `HalloweenPumpkinManager:IsCarrying()` is `true`, the active carry sequence CANNOT be preempted until the payload is safely delivered.
-- **Autonomous Navigation Exemption:** In accordance with [Section 6.5.1](#651-architectural-rules-halloween-event-2026--halloween-dimension), autonomous navigation systems (such as Auto Boss) retain exclusive control over their dimension travel and arena portals; the Halloween Dimension supervisor will never override, redirect, or spam portal entries against an autonomous travel routine.
-  - **Implementation:** `GetTopWantedTask()` checks `HalloweenBossManager:IsLocked()` **before** every other lock; the `StealAndTreadmill` supervisor `return`s when `topTask == "Auto Boss"`; `GetTaskDimension("Auto Boss") == "Self"`.
-
-### 7.4 Centralized WorkerScheduler (`WorkerScheduler`)
-Located at lines 2906–2940 of `qualcom_clean.lua`:
-- Binds to `RunService.Heartbeat`.
-- Evaluates registered workers (`Name`, `Interval`, `Gap`, `Hold`, `Running`).
-- If a task errors, imposes a 3-second hold (`t.Hold = 3`) to prevent log spam and CPU thread locking.
+> `PriorityManager:Initialize()` inserts tasks missing from a saved `TaskPriorities` list at their **canonical index** (rather than dropping to the bottom), ensuring that new seasonal features naturally slot into their designated ranks upon script startup.
 
 ---
 
@@ -579,18 +549,15 @@ Located at lines 2906–2940 of `qualcom_clean.lua`:
      01:00:35 -- Server Kick Message: You have been removed for cheating, please remove any cheats to play | CODE BAC-7516; Metadata:
      01:00:35 -- PlacedEggRenderer: [Debug] Rendered placed egg <Uid> for owner <UserId>
      ```
-   - **Root Cause:** The server-side anti-cheat (`BAC`) verifies player proximity, physics constraints, and displacement state during egg tool equipping and placement. If a character teleports, crosses map boundaries without resetting carry displacement accumulators, or thrashes constraints/Motor6Ds (e.g. continuous `applyGodMode` loops scanning descendants every 250ms), the server triggers a hard anti-cheat kick (`CODE BAC-7516`).
-   - **Mitigation:**
-     1. Stop continuous constraint destruction in loop timers; only invoke character configuration on initial spawn (`CharacterAdded`).
-     2. Completely ignore instances under `Tool` during descendant constraint sweeps.
-     3. Enforce legitimate pen proximity and waypoint-based drop-and-regrab before carrying an egg into plot pens.
+   - **Root Cause:** The server-side anti-cheat (`BAC`) verifies player proximity, physics constraints, and displacement accumulators when attaching the egg tool. If the client manipulates welds or abruptly changes velocity while carrying, BAC flags the session.
+   - **Mitigation:** Ensure egg tool weld attachments are not destroyed or unparented manually, and keep character displacement clamped during egg carry.
 
 ---
 
-5. **`CODE BAC-10518` (Character Integrity, Anti-Ragdoll & Synthetic Input Flag):**
-   - **Trigger Signature:** Triggered during combat, boss arena encounters, or prompt interactions:
+5. **`CODE BAC-10518` (Bittersweet Anti-Cheat Engine Telemetry & State Flag):**
+   - **Trigger Signature:** Triggered during combat, proximity interactions, or fast position updates:
      ```text
-     01:38:11 -- Server Kick Message: You have been removed for cheating, please remove any cheats to play | CODE BAC-10518; Metadata:
+     02:30:11 -- Server Kick Message: You have been removed for cheating, please remove any cheats to play | CODE BAC-10518; Metadata:
      ```
    - **Root Causes:**
      1. **Synthetic Input (`VirtualInputManager`):** Using `VirtualInputManager:SendKeyEvent` or `VIM:SendMouseButtonEvent` on mobile devices or 64-bit clients sends synthetic desktop input events flagged by engine telemetry.
@@ -621,7 +588,8 @@ Located at lines 2906–2940 of `qualcom_clean.lua`:
 | `2925295fc800ed6081da4e3b827eb23395436f48` | `docs(knowledge): comprehensive knowledge base restore` | Reverted `KNOWLEDGE.md` to stable baseline before expanded documentation update. |
 | `568ba0bca4fe94565c4362142eb1b075bbadb2b5` | `feat(halloween): restore Auto Halloween Egg Steal` | Restored Auto Halloween Egg Steal with 3-phase SafeCarry and eliminated VIM synthetic input detection. |
 | `ec93180f8f9c4502a6157fc5375174541182005b` | `revert(qualcom): exact restore to bc4ca86` | Reverted qualcom to stable working baseline commit bc4ca8615c00b895b78cbe33f89ea12dd7b9d10a. |
-| `5700ee52bcd652c85a2fe5f4e32d830208f72db3` | `feat(halloween): add Auto Boss (Pumpkin King)` | Added `HalloweenBossManager` (portal-seal detection, arena melee, cannon phase, exit portal), `Auto Boss` / `Repeat Boss Runs` toggles, Rank-1 priority task with non-interference lock. |
+| `5700ee52bcd652c85a2fe5f4e32d830208f72db3` | `feat(halloween): add Auto Boss (Pumpkin King)` | Added `HalloweenBossManager` (portal-seal detection, arena melee, cannon phase, exit portal), `Auto Boss` toggle, Rank-1 priority task with non-interference lock. |
 | `215216a96da8c33db210b6cdef910a1d1b24b4dd` | `fix(anti-cheat): resolve CODE BAC-10518` | Removed `VirtualInputManager`, eliminated ProximityPrompt property mutation, stopped recurring constraint destruction, protected `RagdollEndTime`, and sanitized cannon/combat payloads. |
 | `c9ba9da5381ce70cf1842fefd04d67d7219c306a` | `fix(steal): restore 4-phase delivery pipeline` | Restored hop-drop-regrab boundary checkpoint ($X = 600.2$), 45-stud corridor micro-hops, dual holding detection (`EggState` + GUI), and eliminated 450-stud base teleport & treadmill anchoring. |
 | `edf23532509cd58510152fad819eb5aba89f312d` | `refactor(boss): event-scoped completion & auto-repeat` | Removed Repeat Boss Runs toggle; scoped completion to current event; King disappearance triggers immediate arena exit; ignores lingering open portal until it closes, automatically re-arming for next event. |
+| `3eb79135aa589d6e281ccf3f90960c4862a73eff` | `feat(halloween): complete halloween automation suite & task mutex` | Integrated Auto Ghost Dog Quest (5 stages + spline dive), Auto Fishing (water raycast + charge luck + reel), Phantom Express (ticket boarding + return latch), Auto Vacuum Ghouler Boss (16-point orbit + aim lead + soul shop), TweenService portal entry, PumpkinMoon attribute gating, and Centralized Character Mutex (ActiveTask). |

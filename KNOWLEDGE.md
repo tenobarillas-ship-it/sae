@@ -54,12 +54,11 @@
 ## 2. Platform & Universal Executor Compatibility Layer (`UniversalCompat`)
 
 ### 2.1 Platform Breakdown: Mobile vs PC Executors
-- **Delta Mobile (Android / iOS):**
-  - Pure touchscreen environment (`UserInputService.TouchEnabled = true`, `KeyboardEnabled = false`, `MouseEnabled = false`).
-  - Native C-level closures for `fireproximityprompt(prompt, 0)` and `firetouchinterest(part1, part2, 0/1)`.
-  - **Critical Mobile Rule:** Calling `VirtualInputManager:SendKeyEvent` or `SendMouseButtonEvent` on mobile devices dispatches synthetic PC hardware keystrokes/clicks with impossible device flags, raising engine exceptions or triggering immediate anti-cheat detection kicks.
-- **PC Executors (Wave, Synapse Z, MacSploit, Solara, Celery):**
-  - Keyboard and mouse environments where standard C-closures must be invoked with proper safety wrappers.
+- **Delta Mobile (Android):** Employs full C-level closures for `fireproximityprompt(prompt, 0)` and `firetouchinterest(part1, part2, 0/1)`. Operates in a unified 32/64-bit ARM environment.
+- **PC Executors (Wave, Synapse Z, Macsploit, Solara, Celery):**
+  - **Proximity Prompts:** Often lack `fireproximityprompt` completely (`nil`), or accept only specific argument counts (`prompt, 0`), or throw exceptions if called without `pcall`. Direct engine calls (`prompt:InputHoldBegin()`) fail unless `RequiresLineOfSight` is disabled, distance checks pass, and hold durations are allowed at least 1-2 frames.
+  - **Touch Interests:** Many budget PC executors have stubbed `firetouchinterest` implementations that do not replicate `Touched` events across distances. If a character hovers above a target (e.g. 14 studs), `firetouchinterest` does not hit unless the weapon handle physically intersects the target's bounding box.
+  - **Button Clicks:** `getconnections` is frequently stubbed or lacks `:Fire()`. Official Roblox `VirtualInputManager` is required as a reliable engine fallback.
 
 ### 2.2 Universal Compatibility & Polyfill Layer (`UniversalCompat`)
 All script automation modules route through `UniversalCompat` rather than making raw executor calls. It is engineered to be **100% Touch & Mobile-Safe** with zero synthetic input flags:
@@ -78,10 +77,10 @@ All script automation modules route through `UniversalCompat` rather than making
      ```
    - **Zero Property Tampering:** Never modifies `MaxActivationDistance` or `RequiresLineOfSight` on server-replicated prompts (which causes client/server property desync and triggers anti-tamper kicks).
    - **Zero VirtualInputManager:** Completely eliminates `VirtualInputManager:SendKeyEvent` simulation, avoiding synthetic keyboard event injection on touchscreen devices (Delta Android/iOS).
-   - **Legitimate Physical Positioning:** The player character is positioned within interaction reach ($\le 4$ studs) before firing, ensuring prompts trigger naturally within server distance boundaries.
+   - **Legitimate Physical Positioning:** The player character is positioned within interaction reach ($le 4$ studs) before firing, ensuring prompts trigger naturally within server distance boundaries.
 
 2. **`UniversalCompat.FireTouch(part1, part2)`**:
-   - **Method A:** Dual-stage `firetouchinterest(part1, part2, 0)` $\rightarrow$ `task.wait(0.01)` $\rightarrow$ `(part1, part2, 1)`.
+   - **Method A:** Dual-stage `firetouchinterest(part1, part2, 0)` $ightarrow$ `task.wait(0.01)` $ightarrow$ `(part1, part2, 1)`.
    - **Method B:** Fallback ensures `CanTouch = true` on participating BaseParts.
    - Works uniformly across PC executors and mobile executors without raising execution exceptions.
 
@@ -100,101 +99,148 @@ if typeof(gethui) == "function" then
     local ok, res = pcall(gethui)
     if ok and typeof(res) == "Instance" then safeContainer = res end
 end
-if not safeContainer and typeof(get_hidden_gui) == "function" then
-    local ok, res = pcall(get_hidden_gui)
-    if ok and typeof(res) == "Instance" then safeContainer = res end
+if not safeContainer then
+    pcall(function()
+        local cg = game:GetService("CoreGui")
+        if cg and typeof(cg) == "Instance" then safeContainer = cg end
+    end)
 end
 if not safeContainer then
-    safeContainer = Services.CoreGui:FindFirstChild("RobloxGui") or Services.CoreGui
+    safeContainer = LocalPlayer:WaitForChild("PlayerGui")
 end
 ```
+
+### 2.4 Screen-Wide Mouse & Touch Dragging (`MakeDraggable`)
+- **Bug Identified:** Using `handle.InputChanged` drops the drag on PC if the user moves the mouse faster than the GUI element's frame update.
+- **Rule:** Always attach `UserInputService.InputChanged` and `UserInputService.InputEnded` dynamically when drag starts, and disconnect on drag end.
 
 ---
 
 ## 3. Client Engine Hooking & Game Module Architecture
 
-### 3.1 Intercepted Game Modules
-Instead of scraping 3D models with expensive spatial raycasts or UI text labels, Syntaxis Hub hooks directly into the game's replicated client modules:
+Steal an Egg uses internal packages in `ReplicatedStorage` to replicate game state. Intercepting these modules provides direct state access without laggy workspace scanning:
 
-| Module Identifier | Location in `ReplicatedStorage` | Extracted State / Purpose |
-| :--- | :--- | :--- |
-| `EggState` | `ReplicatedStorage.Client.EggState` | Field egg positions, nest records, ownership, grab states (`ReadFieldEggs`). |
-| `PlotState` | `ReplicatedStorage.Client.PlotState` | Base boundaries, plot IDs, pen center coordinates (`ResolvePlot`). |
-| `Assets` | `ReplicatedStorage.Data.Assets` | Pet master catalog (`Directory`), base income rates, mesh assets. |
-| `Mutations` | `ReplicatedStorage.Shared.Modules.Mutations`| Mutation identifiers, essence crafting formulas, multiplier maps. |
-| `Rarity` | `ReplicatedStorage.Data.Rarity` | Rarity rankings, display colors, drop tier thresholds. |
-| `Save` | `ReplicatedStorage.Data.Save` | Local inventory snapshot, currency balances, index progression (`Get`, `Peek`). |
-| `Bases` | `ReplicatedStorage.Data.Bases` | Max pen capacity, upgrade tier costs, speed power requirements. |
-| `HalloweenPets` | `ReplicatedStorage.Data.HalloweenPets` | Seasonal pet specs, model-to-id mapping, event egg sources (`Specs`). |
+```mermaid
+flowchart TD
+    subgraph ClientPackages ["ReplicatedStorage Client Packages"]
+        ES["Client.EggState"]
+        PS["Client.PlotState"]
+        AS["Data.Assets"]
+        MT["Shared.Modules.Mutations"]
+        ER["Shared.Util.EggRecords"]
+        SV["Data.Save"]
+    end
+
+    subgraph SyntaxisHub ["Syntaxis Hub Engine"]
+        MR["MasterRegistry & NameResolver"]
+        PM["PriorityManager & DimensionSupervisor"]
+        WS["WorkerScheduler (Heartbeat)"]
+        SC["SafeCarry & Delivery Pipeline"]
+    end
+
+    ClientPackages --> SyntaxisHub
+```
+
+### Key Intercepted Modules:
+1. **`ReplicatedStorage.Client.EggState`**:
+   - `ReadFieldEggs()`: Returns dictionary of live conveyor eggs (`Uid`, `State`, `AssetCategory`, `AreaId`, `AssetScale`, `Mutations`, `BoundsCFrame`).
+   - `ReadOwnerEggs(UserId)`: Returns all eggs owned by the player, including placed pen eggs.
+   - `IsReadyToHatch(uid)`: Returns boolean indicating if incubation timer has elapsed.
+   - `WearEggTool(uid)` & `DoffEggTool()`: Equips/unequips egg from inventory as a character tool (mandatory before placing!).
+   - `CarryFieldEgg(uid)` & `DropFieldEgg(reason)`: Internal carry state hooks.
+2. **`ReplicatedStorage.Client.PlotState`**:
+   - Manages player homestead plot assignments, pen bounding boxes, and nest slots.
+3. **`ReplicatedStorage.Data.Assets`**:
+   - Master data table for eggs: base income values, scale multipliers, meshes, species names.
+4. **`ReplicatedStorage.Shared.Modules.Mutations`**:
+   - Mutation multipliers (e.g. Scrambled, Fractured, Nitro), essence recipes, and drop probabilities.
+5. **`ReplicatedStorage.Shared.Util.EggRecords`**:
+   - Player discovery Codex / Index records. Used to identify undiscovered breeds.
+6. **`ReplicatedStorage.Data.Save`**:
+   - Live client save table: currency balance (`Money`, `CandyCorn`, `Souls`), inventory items, and upgrade levels.
 
 ---
 
 ## 4. Complete Network Remotes Catalog (93 Total)
 
-### 4.1 Stealing, Carrying & Field Actions
-| Remote Name | Type | Direction | Payload & Technical Usage |
-| :--- | :---: | :---: | :--- |
-| `RF/EggWorld/AskCarryFieldEgg` | RF | Client $\rightarrow$ Server | `(eggUid)`: Picks up field egg into hands. |
-| `RF/EggWorld/AskFieldEggDrop` | RF | Client $\rightarrow$ Server | `("PlayerRequest")`: Drops currently held egg to ground. |
-| `RF/EggWorld/AskFieldEggCollect`| RF | Client $\rightarrow$ Server | `(eggUid)`: Deposits egg into base nest upon crossing home line. |
-| `RE/RigSync/Refresh` | RE | Server $\rightarrow$ Client | Syncs character position. Action `"Relocate"` indicates rollback. |
+All client-server communication occurs via `ReplicatedStorage.Packages.Networking`. Below is the complete catalog of **93 Network Remotes** (50 `RemoteFunctions` and 43 `RemoteEvents`):
 
-### 4.2 Egg Placement & Hatching
-| Remote Name | Type | Direction | Payload & Technical Usage |
+### 4.1 Stealing & Field Eggs
+| Remote Name | Type | Direction | Description & Arguments |
 | :--- | :---: | :---: | :--- |
-| `RF/EggWorld/AskPlaceEgg` | RF | Client $\rightarrow$ Server | `({Uid = uid, LocalCFrame = cframe})`: Places egg onto plot pen slot. |
-| `RF/EggWorld/AskHatch` | RF | Client $\rightarrow$ Server | `(uid)`: Starts hatching animation on placed egg. |
-| `RF/EggWorld/AskFinishHatch` | RF | Client $\rightarrow$ Server | `(uid)`: Completes hatch, claims new pet into satchel. |
-| `RF/PenRoster/AskWearLimit` | RF | Client $\rightarrow$ Server | `()`: Queries maximum allowable equipped pets + placed eggs. |
+| `RF/EggWorld/AskFieldEggCarry` | RF | Client $\rightarrow$ Server | Grabs field egg into character hands (`uid: string`). |
+| `RF/EggWorld/AskFieldEggDrop` | RF | Client $\rightarrow$ Server | Drops carried egg to field floor (`reason: string`). |
+| `RF/EggWorld/AskFieldEggSnapshot` | RF | Client $\rightarrow$ Server | Requests full replication snapshot of field eggs. |
+| `RE/RigSync/Refresh` | RE | Server $\rightarrow$ Client | Server character position synchronization packet (`Action = "Relocate"` signals rollback). |
+| `RE/RigSync/AskRigWipe` | RE | Client $\rightarrow$ Server | Requests character rig clean-up upon physics desync. |
 
-### 4.3 Pet Satchel, Fusion & Favoriting
-| Remote Name | Type | Direction | Payload & Technical Usage |
+### 4.2 Egg Placement & Incubation Hatching
+| Remote Name | Type | Direction | Description & Arguments |
 | :--- | :---: | :---: | :--- |
-| `RF/Haul/WearBest` | RF | Client $\rightarrow$ Server | `()`: Server equips highest-earning pets from satchel. |
-| `RF/Fusery/LoadPet` | RF | Client $\rightarrow$ Server | `(slotIndex, petUid)`: Inserts pet into fusion chamber. |
-| `RF/Fusery/BeginFuse` | RF | Client $\rightarrow$ Server | `()`: Starts fusion process. |
-| `RF/Fusery/FinishReveal` | RF | Client $\rightarrow$ Server | `()`: Claims fused result. |
-| `RF/Fusery/EjectPet` | RF | Client $\rightarrow$ Server | `(slotIndex)`: Ejects loaded pet. |
-| `RE/PetSatchel/SellSelection` | RE | Client $\rightarrow$ Server | `({petUids})`: Liquidates selected pets for money. |
-| `RE/PetSatchel/WriteFavourite`| RE | Client $\rightarrow$ Server | `(petUid, isFav)`: Toggles lock/favorite status on pet. |
+| `RF/EggWorld/AskPlaceEgg` | RF | Client $\rightarrow$ Server | Places equipped egg into base pen nest (`uid: string, localCFrame: CFrame`). |
+| `RF/EggWorld/AskHatch` | RF | Client $\rightarrow$ Server | Initiates hatching on ready pen egg (`uid: string`). |
+| `RF/EggWorld/AskFinishHatch` | RF | Client $\rightarrow$ Server | Concludes reveal animation and commits pet to inventory (`uid: string`). |
+
+### 4.3 Pet Satchel, Favorites & Selling
+| Remote Name | Type | Direction | Description & Arguments |
+| :--- | :---: | :---: | :--- |
+| `RF/Haul/WearBest` | RF | Client $\rightarrow$ Server | Server evaluates and auto-equips highest multiplier pets. |
+| `RE/PetSatchel/SellSelection` | RE | Client $\rightarrow$ Server | Sells list of pets below rarity threshold (`petUids: {string}`). |
+| `RE/PetSatchel/WriteFavourite` | RE | Client $\rightarrow$ Server | Toggles favorite flag to protect pet from selling (`petUid: string, state: boolean`). |
+| `RF/Fusery/LoadPet` | RF | Client $\rightarrow$ Server | Loads pet into fusion chamber slot (`slot: number, petUid: string`). |
+| `RF/Fusery/BeginFuse` | RF | Client $\rightarrow$ Server | Commits pet fusion process. |
+| `RF/Fusery/FinishReveal` | RF | Client $\rightarrow$ Server | Claims fused pet reward. |
+| `RF/Fusery/EjectPet` | RF | Client $\rightarrow$ Server | Ejects pet from fusion slot if recipe incomplete (`slot: number`). |
 
 ### 4.4 Treadmill & Homestead Upgrades
-| Remote Name | Type | Direction | Payload & Technical Usage |
+| Remote Name | Type | Direction | Description & Arguments |
 | :--- | :---: | :---: | :--- |
-| `RF/Treadmill/AskWearStill` | RF | Client $\rightarrow$ Server | `()`: Mounts base treadmill for speed generation. |
-| `RF/Treadmill/AskDoff` | RF | Client $\rightarrow$ Server | `()`: Dismounts treadmill. |
-| `RF/Base/AskUpgrade` | RF | Client $\rightarrow$ Server | `()`: Upgrades base plot tier (expands egg capacity). |
-| `RF/Treadmill/AskUpgrade` | RF | Client $\rightarrow$ Server | `()`: Upgrades treadmill tier (increases speed multiplier). |
+| `RF/Treadmill/AskWearStill` | RF | Client $\rightarrow$ Server | Mounts character onto base treadmill belt. |
+| `RF/Treadmill/AskDoff` | RF | Client $\rightarrow$ Server | Dismounts character from treadmill belt. |
+| `RF/Treadmill/AskTierRaise` | RF | Client $\rightarrow$ Server | Upgrades treadmill tier (`tierId: string`). |
+| `RE/Homestead/AskBaseTierRaise` | RE | Client $\rightarrow$ Server | Upgrades homestead base expansion plot. |
 
-### 4.5 World Events & Minigames
-| Remote Name | Type | Direction | Payload & Technical Usage |
+### 4.5 Live Events & World Systems
+| Remote Name | Type | Direction | Description & Arguments |
 | :--- | :---: | :---: | :--- |
-| `RE/ShootingStar/Catch` | RE | Client $\rightarrow$ Server | `(starModel)`: Collects landed star. |
-| `RF/TrainEvent/Action` | RF | Client $\rightarrow$ Server | `("Board")`: Boards the Phantom Express ghost train. |
-| `RF/GhostDogQuest/Talk` | RF | Client $\rightarrow$ Server | `(stageId)`: Advances Ghost Dog questline dialog. |
-| `RF/GhostDogQuest/Claim` | RF | Client $\rightarrow$ Server | `(stageId)`: Claims Ghost Dog quest reward. |
-| `RF/WispCompanion/Request` | RF | Client $\rightarrow$ Server | `(wispId)`: Fulfills wisp request with flowers/nectar. |
+| `RE/ShootingStar/Catch` | RE | Client $\rightarrow$ Server | Collects landed shooting star item (`starModel: Model`). |
+| `RE/ShootingStar/Hold` | RE | Client $\rightarrow$ Server | Toggles shooting star carry state (`state: boolean`). |
+| `RF/Butterflies/AskClaimNet` | RF | Client $\rightarrow$ Server | Claims butterfly net item. |
+| `RF/Butterflies/Equip` | RF | Client $\rightarrow$ Server | Equips butterfly net tool. |
+| `RF/Butterflies/AskTradeUp` | RF | Client $\rightarrow$ Server | Trades 5 lower-tier butterflies for 1 higher-tier butterfly. |
+| `RF/Butterflies/AskCraftEssence` | RF | Client $\rightarrow$ Server | Crafts Enchanted Essence at the Mutation Shrine. |
+| `RF/WispCompanion/Request` | RF | Client $\rightarrow$ Server | Submits eggs / fulfills wisp companion quests. |
 
 ### 4.6 Halloween Dimension & Seasonal Systems
-| Remote Name | Type | Direction | Payload & Technical Usage |
+| Remote Name | Type | Direction | Description & Arguments |
 | :--- | :---: | :---: | :--- |
 | `RF/HalloweenDimension/AskCarryEgg`| RF | Client $\rightarrow$ Server | Grabs event egg in Halloween Dimension. |
-| `RF/HalloweenDimension/AskDropEgg` | RF | Client $\rightarrow$ Server | Drops event egg in Halloween Dimension to clear displacement accumulator. |
+| `RF/HalloweenDimension/AskDropEgg` | RF | Client $\rightarrow$ Server | Drops event egg in Halloween Dimension. |
 | `RF/HalloweenDimension/AskBuyEgg` | RF | Client $\rightarrow$ Server | Purchases Halloween egg using Candy Corn currency. |
-| `RE/HalloweenDimension/MonsterHit` | RE | Client $\rightarrow$ Server | Registers weapon damage against Halloween monsters. |
+| `RE/HalloweenDimension/MonsterHit` | RE | Client $\rightarrow$ Server | Registers weapon damage against Halloween monster (`monster: Model, weaponId: string`). |
+| `RE/GhostBoss/Suction` | RE | Client $\rightarrow$ Server | Applies vacuum stream damage to Ghouler boss. |
+| `RF/GhostDogQuest/Talk` | RF | Client $\rightarrow$ Server | Advances Ghost Dog NPC quest dialog. |
+| `RF/GhostDogQuest/Cast` | RF | Client $\rightarrow$ Server | Casts fishing rod during Ghost Dog quest. |
+| `RF/GhostDogQuest/Dive` | RF | Client $\rightarrow$ Server | Dives underwater for quest items. |
+| `RF/GhostDogQuest/Surface` | RF | Client $\rightarrow$ Server | Surfaces after underwater dive. |
+| `RF/GhostDogQuest/Claim` | RF | Client $\rightarrow$ Server | Claims Ghost Dog quest completion reward. |
+| `RF/Fishing/Cast` | RF | Client $\rightarrow$ Server | Casts fishing line with luck parameter (`luckMultiplier: number`). |
+| `RF/Fishing/Reel` | RF | Client $\rightarrow$ Server | Reels in caught fish. |
+| `RF/TrainEvent/Action` | RF | Client $\rightarrow$ Server | Boards or exits Phantom Express ghost train (`action: "Board" | "Exit"`). |
+| `RF/ScrambleTradeIn/AskTradeIn` | RF | Client $\rightarrow$ Server | Commits pets to Dr. Scramble mutation trade-in. |
 
 ---
 
 ## 5. Valuation Formulas, Scoring & Rarity Tiers
 
-### 5.1 Egg Valuation Formula
-Egg valuation uses the non-linear scale multiplier:
-$$\text{Value} = \text{EarningRate} \times \text{Factor} \times \text{MutationBonus}$$
-Where:
-- If $\text{Scale} > 5.0$:
-  $$\text{Factor} = \left(\frac{\text{Scale}}{5}\right)^{1.2} \times 19.637875755794113$$
-- Else:
-  $$\text{Factor} = \text{Scale}^{1.85}$$
+### 5.1 Egg Score Calculation Formula
+$$\text{Score} = (\text{Rank} \times 1000) + (\text{Scale}^{1.85} \times \text{MutationBonus})$$
+- `MutationBonus`: $2.5$ if mutated, $1.0$ otherwise.
+- **Scale Factor Formulation:**
+  - If $\text{Scale} > 5.0$:
+    $$\text{Factor} = \left(\frac{\text{Scale}}{5}\right)^{1.2} \times 19.637875755794113$$
+  - Else:
+    $$\text{Factor} = \text{Scale}^{1.85}$$
 
 ### 5.2 Rarity Ranks Table
 | Rank | Tier Name | Base Multiplier | Color Tag |
@@ -219,6 +265,10 @@ Where:
 #### Normal Dimension Target Areas:
 Forest, Lake, Desert, Jungle, Snow, Volcano, Abyss Ocean, Prehistoric, Cosmic, Cherry Blossom, Titan Temple, Light Dark, Enchanted Forest.
 
+#### The Anti-Cheat Distance Rollback Vector:
+> [!IMPORTANT]
+> The Steal an Egg server anti-cheat monitors cumulative distance traveled while continuously holding an egg. If a character traverses over $\sim 400$ studs continuously without dropping, the server flags displacement and fires `RE/RigSync/Refresh` with `Action = "Relocate"` (rubber-band rollback) or forces an unprompted drop.
+
 #### Low-Speed Dynamic Hopping vs 4-Phase SafeCarry:
 1. **Dynamic Hopping Mode (`executeCheckpointedHopsHome` in `qualcom`):**
    - Uses discrete altitude hops (`groundY = CONFIG.GroundAltitude + 1.0`).
@@ -229,27 +279,79 @@ Forest, Lake, Desert, Jungle, Snow, Volcano, Abyss Ocean, Prehistoric, Cosmic, C
    - Computes two intermediate waypoints: `MidDrops = {0.33, 0.66}`.
    - Steps character to waypoint $\rightarrow$ calls `EggState.DropFieldEgg("PlayerRequest")` $\rightarrow$ waits `0.10s` (`MidRest`) $\rightarrow$ re-grabs with `EggState.CarryFieldEgg(uid)`.
    - **Why it succeeds:** The 0.10s drop resets the server's cumulative displacement counter to zero without triggering physics desync.
+   - Crosses the separation line ($X = 545 \rightarrow X = 150$) and deposits into base hopper.
+   - Dynamic guard pacing: `U.BeatGuard` continuously matches guard velocity to avoid aggro contact while avoiding velocity spikes.
 
 ---
 
 ### 6.2 Egg Placement & Incubation-Aware Hatching
-1. **Pen Proximity Enforcement:**
-   - Must be within $< 35$ studs of base pen anchor (`PetArea`). Calling `AskPlaceEgg` from outside your pen triggers server placement verification failure (`CODE BAC-7516`).
-2. **Tool Equipping Flow:**
-   - Calls `EggState.WearEggTool(uid)`, awaits confirmation tool attachment, then invokes `RF/EggWorld/AskPlaceEgg`. Cleans up with `EggState.DoffEggTool()`.
+
+> [!CAUTION]
+> **Why Previous Hatching Implementations Failed:**
+> Steal an Egg **does not support hatching directly from the inventory satchel**. Eggs must undergo an incubation lifecycle on base plot pens before the server allows hatching.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Satchel as Player Satchel
+    participant Rig as Character Rig
+    participant Pen as Base Pen Nest
+    participant Server as Game Server
+
+    Satchel->>Rig: EggState.WearEggTool(uid)
+    Rig->>Pen: Verify Proximity (< 35 Studs to PenAnchor)
+    Rig->>Server: RF/EggWorld/AskPlaceEgg(uid, localCFrame)
+    Server-->>Pen: Egg Placed (Incubation Starts)
+    Rig->>Satchel: EggState.DoffEggTool()
+    loop Incubation Watcher
+        Pen->>Pen: EggState.IsReadyToHatch(uid) == true?
+    end
+    Rig->>Server: RF/EggWorld/AskHatch(uid)
+    Server-->>Rig: Hatch Sequence Begun
+    Rig->>Server: RF/EggWorld/AskFinishHatch(uid)
+    Server-->>Satchel: Pet Added to Inventory
+```
+
+1. **Auto Place Egg (`SetupAutoPlaceEgg`):**
+   - Scans backpack for eligible unhatched eggs matching configured rarity/value filters.
+   - Verifies character is within 35 studs of the base pen anchor (`PenAnchor`).
+   - Equips egg as tool: `EggState.WearEggTool(uid)`.
+   - Invokes `RF/EggWorld/AskPlaceEgg` with UID and slot CFrame.
+   - Cleans up tool state: `EggState.DoffEggTool()`.
+2. **Auto Hatch (`SetupAutoHatchModule`):**
+   - Queries placed eggs belonging to the player: `EggState.ReadOwnerEggs(UserId)`.
+   - Filters for eggs currently placed in a pen nest (`Placement ~= nil`).
+   - Tests incubation status: `EggState.IsReadyToHatch(uid) == true`.
+   - Invokes `RF/EggWorld/AskHatch` followed by `RF/EggWorld/AskFinishHatch`.
 
 ---
 
 ### 6.3 Pet Management, Satchel & Fusion Chamber
-- **Auto Sell:** Scans backpack via `Save.Get().PetInventory` and bulk-liquidates pets below target rarity using `RE/PetSatchel/SellSelection`.
-- **Auto Fuse:** Auto-loads pets matching duplicate requirements, starts fusion, and claims rewards.
-- **Auto Equip Best:** Invokes `RF/Haul/WearBest` to maximize earnings.
+- **Auto Equip Best (`RF/Haul/WearBest`):**
+  - Invokes server remote to recalculate and equip top income multiplier pets automatically.
+- **Auto Sell Pets (`RE/PetSatchel/SellSelection`):**
+  - Iterates satchel pets below configured rarity ceiling.
+  - **Strict Safety Guards:**
+    - Checks `KeepMutatedPets`: Never sells pets with mutation flags.
+    - Checks `BlacklistSellPetsMap`: Never sells blacklisted species.
+- **Auto Favorite (`RE/PetSatchel/WriteFavourite`):**
+  - Automatically flags equipped and high-tier pets as favorites to prevent liquidation.
+- **Auto Fusion Chamber (`RF/Fusery/...`):**
+  - Loads eligible duplicate pets into chamber slots via `LoadPet`.
+  - Fires `BeginFuse`, waits for incubation reveal, and claims via `FinishReveal`.
+  - If incomplete duplicates exist, invokes `EjectPet` to return pets to the satchel.
 
 ---
 
 ### 6.4 Treadmill & Homestead Upgrades
-- Mounts base treadmill via `RF/Treadmill/AskWearStill`.
-- Periodic worker checks upgrade timers and triggers `AskUpgrade` for base capacity and treadmill speed.
+- **Treadmill Training (`RF/Treadmill/AskWearStill` & `AskDoff`):**
+  - Serves as the idle speed training fallback when no higher-priority tasks have work.
+  - Verifies character attachment to belt; auto-recovers if knocked off.
+  - Yields immediately (`hopOffTreadmill()`) as soon as any higher-priority task claims the character.
+- **Auto Upgrades (`tryUpgradeTreadmill` & `tryUpgradeBase`):**
+  - Passive background tasks running every 5–6 seconds.
+  - Checks player currency against `Treadmills.GetByUpgradeLevel(lvl + 1).Price`.
+  - Invokes `RF/Treadmill/AskTierRaise` and `RE/Homestead/AskBaseTierRaise` without moving character or interrupting stealing.
 
 ---
 
@@ -294,39 +396,97 @@ Forest, Lake, Desert, Jungle, Snow, Volcano, Abyss Ocean, Prehistoric, Cosmic, C
   - **Ghost Dog Quest:** Executes complete 5-stage quest pipeline (`Talk` $\rightarrow$ `Cast` $\rightarrow$ `Dive` $\rightarrow$ `Surface` $\rightarrow$ `Claim`).
   - **Butterfly Bloom & Wisps:** Detects butterfly swarms in Enchanted Forest, collects nectar with equipped net, and fulfills wisp companion requests (`RF/WispCompanion/Request`).
 
----
-
 ### 6.6 Character Integrity, GodMode & Anti-Ragdoll
 To prevent death loops, ragdoll exhaustion, and speed resets:
-- Disables falling down and physics state transitions.
-- Cleans ragdoll constraints only upon character initialization, explicitly ignoring tools to prevent breaking egg display attachments.
+```lua
+local function applyGodMode(character)
+    if not character then return end
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    local blockedStates = {
+        Enum.HumanoidStateType.FallingDown,
+        Enum.HumanoidStateType.Ragdoll,
+        Enum.HumanoidStateType.Physics
+    }
+    for _, state in ipairs(blockedStates) do
+        pcall(function() humanoid:SetStateEnabled(state, false) end)
+    end
+    pcall(function() humanoid.BreakJointsOnDeath = false end)
+
+    for _, desc in ipairs(character:GetDescendants()) do
+        if desc:IsA("BallSocketConstraint") or desc:IsA("HingeConstraint") or 
+          (desc:IsA("NoCollisionConstraint") and string.find(desc.Name, "Ragdoll", 1, true)) then
+            pcall(function() desc:Destroy() end)
+        elseif desc:IsA("Motor6D") and not desc.Enabled then
+            desc.Enabled = true
+        end
+    end
+end
+```
 
 ---
 
 ## 7. Unified Priority System & Concurrency Architecture
 
-### 7.1 Hierarchy of Tasks
+### 7.1 Canonical 6-Task Supervisor in `qualcom`
+In `qualcom`, tasks are evaluated strictly from **Rank 1** to **Rank 6**:
 1. `Auto Steal` (Normal Dimension)
-2. `Halloween Steal` (Halloween Dimension)
-3. `Candy Cane Farm` (Halloween Dimension)
-4. `Auto Pumpkin` (Halloween Dimension)
-5. `Enchanted / Bloom Event` (Normal Dimension)
-6. `Auto Upgrades` (Independent non-blocking)
-7. `Auto Treadmill` (Normal Dimension Idle Fallback)
+2. `Candy Cane Farm` (Halloween Dimension)
+3. `Auto Pumpkin` (Halloween Dimension)
+4. `Enchanted / Bloom Event` (Normal Dimension)
+5. `Auto Upgrades` (Global Background)
+6. `Auto Treadmill` (Normal Dimension Idle Fallback)
+
+### 7.2 The 13-Task Global Game Hierarchy
+Analysis of `SAE_Priority.json` revealed the complete priority coordinate chain:
+```text
+[Rank 1]  StealFilter    (Specific egg model priority)
+[Rank 2]  Star           (Shooting star spawn interception)
+[Rank 3]  Train          (Phantom Express ghost train)
+[Rank 4]  HwPumpkin      (Runaway pumpkin carry)
+[Rank 5]  Butterfly      (Butterfly swarm collection)
+[Rank 6]  StealWisp      (Wisp quest egg stealing)
+[Rank 7]  StealIndex     (Undiscovered Codex egg stealing)
+[Rank 8]  Place          (Base pen egg placement)
+[Rank 9]  Essence        (Mutation essence crafting)
+[Rank 10] HwDog          (Ghost Dog NPC quest)
+[Rank 11] HwMonsters     (Halloween monster farming)
+[Rank 12] HwFishing      (Halloween lake fishing)
+[Rank 13] Treadmill      (Homestead speed training)
+```
+
+### 7.3 Task Preemption & Dimension Supervisor
+- **`PriorityManager:GetTopWantedTask()`**: Evaluates tasks in user-configured rank order. The first task that is both **enabled** and **has active work** becomes the **Sole Authority Task**.
+- **`PriorityManager:CanRun(taskName)`**: Prevents lower-tier tasks from moving the character while a higher task is active.
+- **Preemption & Abort:** When a higher-priority task claims the character:
+  - If on treadmill: Calls `hopOffTreadmill()` immediately.
+  - If in Halloween combat: Calls `HalloweenCombatManager:Abort()`.
+  - If dimension switch is required: Paths through exit portal (`HalloweenPortalManager.ExitDimension(5.0)`) before executing normal dimension tasks.
+- **Non-Interruptible Carrying Protection:** If `isHoldingEgg()` or `HalloweenPumpkinManager:IsCarrying()` is `true`, the active carry sequence CANNOT be preempted until the payload is safely delivered.
+
+### 7.4 Centralized WorkerScheduler (`WorkerScheduler`)
+Located at lines 2906–2940 of `qualcom_clean.lua`:
+- Binds to `RunService.Heartbeat`.
+- Evaluates registered workers (`Name`, `Interval`, `Gap`, `Hold`, `Running`).
+- If a task errors, imposes a 3-second hold (`t.Hold = 3`) to prevent log spam and CPU thread locking.
 
 ---
 
 ## 8. Anti-Cheat Detection Vectors & Hardening Guidelines
 
 1. **Virtual Input Simulation vs Direct Remotes:**
-   - **Vector:** Using `VirtualInputManager:SendKeyEvent` or `SendMouseButtonEvent` is monitored by Byfron/Hyperion on 64-bit clients and crashes/flags mobile delta clients.
-   - **Mitigation:** Zero VIM. Use native `fireproximityprompt` and `firesignal` closures with legitimate character positioning.
+   - **Vector:** Using `VirtualInputManager:SendKeyEvent` or `SendMouseButtonEvent` is monitored by Byfron/Hyperion on 64-bit clients as synthetic input.
+   - **Mitigation:** Prioritize direct network remote calls (`RF/`, `RE/`) and internal game modules (`EggState`) over virtual keyboard/mouse clicks.
 2. **Carry Displacement Accumulation:**
    - **Vector:** Continuous velocity displacement $> 400$ studs while `isHoldingEgg() == true`.
-   - **Mitigation:** Intermediate waypoint drop-and-regrab to reset cumulative server displacement.
+   - **Mitigation:** Use intermediate `MidDrops = {0.33, 0.66}` with `0.10s` pauses to clear the server accumulator, or use dynamic speed-scaled hops.
 3. **Chunk Size & Variable Limits:**
-   - **Vector:** Exceeding 200 local variables in a single scope causes Luau compilation failure.
-   - **Mitigation:** Keep all module state within tables. Current maximum scope locals: 48.
+   - **Vector:** Monolithic scripts exceeding $1.5$ MB or containing $> 200$ local variables in a single scope fail to compile on mobile Luau VMs.
+   - **Mitigation:** Decouple GUI components into modular libraries (`GUILib`) and scope module state inside isolated closure tables.
+
+---
+
 4. **`CODE BAC-7516` (Bittersweet Anti-Cheat Egg Tool & Placement Flag):**
    - **Trigger Signature:** Triggered when an egg is held or placed on plot, as evidenced in engine logs:
      ```text
@@ -354,3 +514,5 @@ To prevent death loops, ragdoll exhaustion, and speed resets:
 | `bc4ca8615c00b895b78cbe33f89ea12dd7b9d10a` | `fix(executor-compat): universal polyfills for PC` | `UniversalCompat` layer for PC executors (prompts, touch, buttons) & safe low-speed delivery. |
 | `ca9cbc44f19ece1217971ecd1c302ee307d89fd7` | `revert(qualcom): exact byte-for-byte restore to bc4ca86` | Reverted `qualcom` to stable working baseline commit. |
 | `2925295fc800ed6081da4e3b827eb23395436f48` | `docs(knowledge): comprehensive knowledge base restore` | Reverted `KNOWLEDGE.md` to stable baseline before expanded documentation update. |
+| `568ba0bca4fe94565c4362142eb1b075bbadb2b5` | `feat(halloween): restore Auto Halloween Egg Steal` | Restored Auto Halloween Egg Steal with 3-phase SafeCarry and eliminated VIM synthetic input detection. |
+| `ec93180f8f9c4502a6157fc5375174541182005b` | `revert(qualcom): exact restore to bc4ca86` | Reverted qualcom to stable working baseline commit bc4ca8615c00b895b78cbe33f89ea12dd7b9d10a. |

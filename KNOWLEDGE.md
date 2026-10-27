@@ -220,6 +220,8 @@ All client-server communication occurs via `ReplicatedStorage.Packages.Networkin
 | `RF/HalloweenDimension/AskBuyEgg` | RF | Client $\rightarrow$ Server | Purchases Halloween egg using Candy Corn currency. |
 | `RE/HalloweenDimension/MonsterHit` | RE | Client $\rightarrow$ Server | Registers weapon damage against Halloween monster (`monster: Model, weaponId: string`). |
 | `RE/GhostBoss/Suction` | RE | Client $\rightarrow$ Server | Applies vacuum stream damage to Ghouler boss. |
+| `RF/BossEvent/AskEnter` | RF | Client $\rightarrow$ Server | Requests entry into the Pumpkin King arena through `HalloweenDimension.BossPortal` (used by Auto Boss). |
+| `RE/PumpkinBoss/CannonFire` | RE | Client $\rightarrow$ Server | Fires the player's assigned arena cannon at the Pumpkin King (Auto Boss sends `()`, `(cannon)`, `(CannonId)` payloads). |
 | `RF/GhostDogQuest/Talk` | RF | Client $\rightarrow$ Server | Advances Ghost Dog NPC quest dialog. |
 | `RF/GhostDogQuest/Cast` | RF | Client $\rightarrow$ Server | Casts fishing rod during Ghost Dog quest. |
 | `RF/GhostDogQuest/Dive` | RF | Client $\rightarrow$ Server | Dives underwater for quest items. |
@@ -391,6 +393,22 @@ sequenceDiagram
   - Detects runaway pumpkins in `HalloweenDimension.RunawayPumpkins`.
   - Glides to pumpkin, grabs, and carries to the Altar.
   - Marked **non-interruptible** while `IsCarrying() = true` to prevent pumpkin dropping.
+- **Auto Boss (Pumpkin King) — `HalloweenBossManager` in `qualcom`:**
+  - **GUI:** `Halloween Event 2026` category → `Auto Boss` toggle (`currentSettings.AutoBossEvent` → `getgenv().config.autoBossEvent`, mirrored to `getgenv().AutoBossEvent`) and `Repeat Boss Runs` toggle (`currentSettings.AutoBossRepeat` → `HalloweenBossManager.Config.AutoRepeatRuns`).
+  - **Driver:** `WorkerScheduler:Register("HalloweenBoss", 0.05, ...)` → `PriorityManager:CanRun("Boss")` → `HalloweenBossManager:Process()` (one loop iteration per tick, guarded by `getgenv().BossFarmerState.IsBusy`).
+  - **Persistent state:** `getgenv().BossFarmerState = { IsBusy, CurrentBatIndex, KingEncountered, RunCompleted }` (`IsBusy` force-reset on script load).
+  - **Stage 1 — Outside arena (`ProcessOutside`):**
+    1. Reads the portal from the model: `HalloweenDimension.BossPortal.BossPortalSeal` — any seal `BasePart` with `Transparency < 0.5` = **closed**, all transparent / seal missing = **open** (`GetPortalState()` returns `known, open`).
+    2. Sealed portal re-arms the `RunCompleted` latch (the next opening starts a fresh run).
+    3. **Rule 6.5.1 (1):** if outside the Halloween Dimension → `HalloweenPortalManager.EnterDimension(5.0)` first.
+    4. Invokes `RF/BossEvent/AskEnter`, glides (noclip, `GlideSpeed = 250`) to `BossPortal.Hitbox`, waits ≤ 2s for arena arrival.
+    5. If the portal model is not replicated (`known = false`), a rate-limited probe (`ProbeCooldown = 60s`) enters the dimension to read it.
+  - **Stage 2 — Inside `PumpkinArena` (`ProcessArena`):** arena detected via `InPumpkinArena` attribute or ≤ 600 studs from `(-133552.1, 477.7, 980.7)`.
+    - **Defeat check** (`IsBossDefeated`, only after `KingEncountered`): arena `Health <= 0`, `Phase ∈ {Defeated, Finished, Victory, Ended}`, or King humanoid dead → glide into `BossExitPortal` → `RunCompleted = true` → restore collisions.
+    - **Cannon phase** (arena `Phase == "Shield"`/`ShieldActive` or `Phase == "Stunned"`/`StunEnds`/King `Stunned`): find own cannon (`Cannons/*` with `OwnerUserId`, else `TutorialBeam` target) → if roots/vines still block it, bat-attack them → otherwise raycast-ground onto the green stand pad and fire `RE/PumpkinBoss/CannonFire` every `0.18s`.
+    - **Melee phase:** target `King` (or any `brute`/`king`/`pumpkinboss` model), stand `14` studs behind its `LookVector` at `FloorY + 3` (default `476.24`), cycle all bats (`IsBat` attribute or name contains "bat") every `0.05s` + `RE/HalloweenDimension/MonsterHit`.
+  - **Character protection:** `ApplyStateProtection` mirrors `applyGodMode` but **skips all `Tool` descendants** (BAC-7516 mitigation #2).
+  - **Priority integration:** task `"Auto Boss"` (aliases `Boss`, `AutoBoss`), default **Rank 1**, dimension `"Self"`. `HalloweenBossManager:IsLocked()` (enabled **and** mid-run or in arena) forces `GetTopWantedTask()` to return `"Auto Boss"`; the Dimension Supervisor returns early, and the Candy Cane / Pumpkin workers skip their `Abort()` (no collision resets) while locked.
 - **Live World Events:**
   - **Shooting Stars:** Intercepts falling `ShootingStarClient` models, tracks landing position, and fires `RE/ShootingStar/Catch`.
   - **Phantom Express:** Navigates to ghost train station platform and boards via `RF/TrainEvent/Action("Board")`.
@@ -463,14 +481,18 @@ end
 
 ## 7. Unified Priority System & Concurrency Architecture
 
-### 7.1 Canonical 6-Task Supervisor in `qualcom`
-In `qualcom`, tasks are evaluated strictly from **Rank 1** to **Rank 6**:
-1. `Auto Steal` (Normal Dimension)
-2. `Candy Cane Farm` (Halloween Dimension)
-3. `Auto Pumpkin` (Halloween Dimension)
-4. `Enchanted / Bloom Event` (Normal Dimension)
-5. `Auto Upgrades` (Global Background)
-6. `Auto Treadmill` (Normal Dimension Idle Fallback)
+### 7.1 Canonical 7-Task Supervisor in `qualcom`
+In `qualcom`, tasks are evaluated strictly from **Rank 1** to **Rank 7** (default order, user-reorderable in the Priority tab):
+1. `Auto Boss` (Self-navigating: Halloween Dimension → BossPortal → PumpkinArena)
+2. `Auto Steal` (Normal Dimension)
+3. `Candy Cane Farm` (Halloween Dimension)
+4. `Auto Pumpkin` (Halloween Dimension)
+5. `Enchanted / Bloom Event` (Normal Dimension)
+6. `Auto Upgrades` (Global Background)
+7. `Auto Treadmill` (Normal Dimension Idle Fallback)
+
+> [!NOTE]
+> `PriorityManager:Initialize()` inserts tasks missing from a saved `TaskPriorities` list at their **canonical index** (not at the bottom), so existing configs receive `Auto Boss` at Rank 1.
 
 ### 7.2 The 13-Task Global Game Hierarchy
 Analysis of `SAE_Priority.json` revealed the complete priority coordinate chain:
@@ -499,6 +521,7 @@ Analysis of `SAE_Priority.json` revealed the complete priority coordinate chain:
   - If dimension switch is required: Paths through exit portal (`HalloweenPortalManager.ExitDimension(5.0)`) before executing normal dimension tasks.
 - **Non-Interruptible Carrying Protection:** If `isHoldingEgg()` or `HalloweenPumpkinManager:IsCarrying()` is `true`, the active carry sequence CANNOT be preempted until the payload is safely delivered.
 - **Autonomous Navigation Exemption:** In accordance with [Section 6.5.1](#651-architectural-rules-halloween-event-2026--halloween-dimension), autonomous navigation systems (such as Auto Boss) retain exclusive control over their dimension travel and arena portals; the Halloween Dimension supervisor will never override, redirect, or spam portal entries against an autonomous travel routine.
+  - **Implementation:** `GetTopWantedTask()` checks `HalloweenBossManager:IsLocked()` **before** every other lock; the `StealAndTreadmill` supervisor `return`s when `topTask == "Auto Boss"`; `GetTaskDimension("Auto Boss") == "Self"`.
 
 ### 7.4 Centralized WorkerScheduler (`WorkerScheduler`)
 Located at lines 2906–2940 of `qualcom_clean.lua`:
@@ -551,3 +574,4 @@ Located at lines 2906–2940 of `qualcom_clean.lua`:
 | `2925295fc800ed6081da4e3b827eb23395436f48` | `docs(knowledge): comprehensive knowledge base restore` | Reverted `KNOWLEDGE.md` to stable baseline before expanded documentation update. |
 | `568ba0bca4fe94565c4362142eb1b075bbadb2b5` | `feat(halloween): restore Auto Halloween Egg Steal` | Restored Auto Halloween Egg Steal with 3-phase SafeCarry and eliminated VIM synthetic input detection. |
 | `ec93180f8f9c4502a6157fc5375174541182005b` | `revert(qualcom): exact restore to bc4ca86` | Reverted qualcom to stable working baseline commit bc4ca8615c00b895b78cbe33f89ea12dd7b9d10a. |
+| `5700ee52bcd652c85a2fe5f4e32d830208f72db3` | `feat(halloween): add Auto Boss (Pumpkin King)` | Added `HalloweenBossManager` (portal-seal detection, arena melee, cannon phase, exit portal), `Auto Boss` / `Repeat Boss Runs` toggles, Rank-1 priority task with non-interference lock. |

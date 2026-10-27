@@ -560,6 +560,26 @@ Located at lines 2906–2940 of `qualcom_clean.lua`:
 
 ---
 
+5. **`CODE BAC-10518` (Character Integrity, Anti-Ragdoll & Synthetic Input Flag):**
+   - **Trigger Signature:** Triggered during combat, boss arena encounters, or prompt interactions:
+     ```text
+     01:38:11 -- Server Kick Message: You have been removed for cheating, please remove any cheats to play | CODE BAC-10518; Metadata:
+     ```
+   - **Root Causes:**
+     1. **Synthetic Input (`VirtualInputManager`):** Using `VirtualInputManager:SendKeyEvent` or `VIM:SendMouseButtonEvent` on mobile devices or 64-bit clients sends synthetic desktop input events flagged by engine telemetry.
+     2. **ProximityPrompt Property Tampering:** Overwriting `prompt.RequiresLineOfSight = false`, `MaxActivationDistance = 50`, or `HoldDuration = 0` triggers server/client property change listeners.
+     3. **Anti-Ragdoll & Constraint Desync:** Forcibly deleting server-instantiated ragdoll constraints (`BallSocketConstraint`, `HingeConstraint`) or force-enabling `Motor6D.Enabled = true` while the server has an active ragdoll state (`RagdollEndTime > workspace:GetServerTimeNow()`).
+     4. **Weapon Handle CFrame Teleportation:** Overwriting `handle.CFrame = monsterPart.CFrame` desyncs the tool's `RightGrip` weld from the character's hand.
+     5. **Remote Payload Incompatibility:** Calling `RE/PumpkinBoss/CannonFire` simultaneously with 3 mismatched argument types every 0.18s.
+   - **Mitigation:**
+     1. Completely eliminate `VirtualInputManager`. Rely strictly on native exploit `fireproximityprompt(prompt, 0)` with early exit, or engine `prompt:InputHoldBegin()` without property modification.
+     2. Remove recurring `applyGodMode(char)` from the 250ms worker loop. Only configure humanoid state once on character spawn.
+     3. Never delete constraints or enable Motor6D while under active server ragdoll (`RagdollEndTime`).
+     4. Eliminate tool handle CFrame sweeps in combat; rely exclusively on `firetouchinterest`.
+     5. Send single, type-checked remote payloads with safe reload cadence (`>= 0.25s`).
+
+---
+
 ## 9. Commit History & Version Milestones
 
 | Commit SHA | Commit Title / Name | Description |
@@ -575,3 +595,4 @@ Located at lines 2906–2940 of `qualcom_clean.lua`:
 | `568ba0bca4fe94565c4362142eb1b075bbadb2b5` | `feat(halloween): restore Auto Halloween Egg Steal` | Restored Auto Halloween Egg Steal with 3-phase SafeCarry and eliminated VIM synthetic input detection. |
 | `ec93180f8f9c4502a6157fc5375174541182005b` | `revert(qualcom): exact restore to bc4ca86` | Reverted qualcom to stable working baseline commit bc4ca8615c00b895b78cbe33f89ea12dd7b9d10a. |
 | `5700ee52bcd652c85a2fe5f4e32d830208f72db3` | `feat(halloween): add Auto Boss (Pumpkin King)` | Added `HalloweenBossManager` (portal-seal detection, arena melee, cannon phase, exit portal), `Auto Boss` / `Repeat Boss Runs` toggles, Rank-1 priority task with non-interference lock. |
+| `215216a96da8c33db210b6cdef910a1d1b24b4dd` | `fix(anti-cheat): resolve CODE BAC-10518` | Removed `VirtualInputManager`, eliminated ProximityPrompt property mutation, stopped recurring constraint destruction, protected `RagdollEndTime`, and sanitized cannon/combat payloads. |

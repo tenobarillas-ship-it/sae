@@ -16,6 +16,7 @@
    - 6.3 [Pet Management, Satchel & Fusion Chamber](#63-pet-management-satchel--fusion-chamber)
    - 6.4 [Treadmill & Homestead Upgrades](#64-treadmill--homestead-upgrades)
    - 6.5 [Halloween Dimension & World Automations](#65-halloween-dimension--world-automations)
+     - 6.5.1 [Halloween Dimension Rules & Autonomous Travel](#651-architectural-rules-halloween-event-2026--halloween-dimension)
    - 6.6 [Character Integrity, GodMode & Anti-Ragdoll](#66-character-integrity-godmode--anti-ragdoll)
 7. [Unified Priority System & Concurrency Architecture](#7-unified-priority-system--concurrency-architecture)
 8. [Anti-Cheat Detection Vectors & Hardening Guidelines](#8-anti-cheat-detection-vectors--hardening-guidelines)
@@ -396,6 +397,39 @@ sequenceDiagram
   - **Ghost Dog Quest:** Executes complete 5-stage quest pipeline (`Talk` $\rightarrow$ `Cast` $\rightarrow$ `Dive` $\rightarrow$ `Surface` $\rightarrow$ `Claim`).
   - **Butterfly Bloom & Wisps:** Detects butterfly swarms in Enchanted Forest, collects nectar with equipped net, and fulfills wisp companion requests (`RF/WispCompanion/Request`).
 
+
+### 6.5.1 Architectural Rules: Halloween Event 2026 = Halloween Dimension
+
+> [!IMPORTANT]
+> **Core Architectural Principle:**
+> **Halloween Event 2026 = Halloween Dimension.**
+> Any feature categorized under **Halloween Event 2026** is fundamentally associated with the Halloween Dimension. Whenever a new feature is added under this category, it must recognize and operate within the Halloween Dimension.
+
+#### 1. Automatic Halloween Dimension Entry
+- **Prerequisite Check:** Before executing any action belonging to the **Halloween Event 2026** category, the system must check whether the player is currently inside the Halloween Dimension.
+- **Normal Execution:** If the player is already inside, execute the feature normally.
+- **Controlled Entry:** If the player is NOT inside, ensure the player enters the Halloween Dimension through the appropriate portal before executing the feature.
+- **Execution Guard:** Do NOT execute Halloween-specific actions while the player is still outside the required dimension.
+- **Future-Proofing:** This rule must apply universally to any new Halloween Event 2026 features added in the future.
+
+#### 2. Non-Interference With Autonomous Navigation Features (Important Exception)
+This is an essential architectural boundary. Some features possess their own dedicated navigation logic and require traveling between different dimensions, portals, arenas, or locations to complete their tasks:
+- **Example — Auto Boss:** When enabled, Auto Boss independently handles everything required for its operation (locating and entering portals, traveling to the boss arena, fighting the boss, and safely exiting the arena).
+- **Strict Boundary:** The Halloween Dimension entry system must **NOT** interrupt, override, redirect, or conflict with these actions.
+- **Scope Restriction:** The responsibility of the Halloween Dimension entry system is **ONLY** to ensure that the player enters the Halloween Dimension when a Halloween-specific action requires it and the player is currently outside that dimension. It must **NOT** take control of navigation that already belongs to another feature.
+
+#### 3. Feature Ownership, Navigation Isolation & Priority
+- **Decentralized Ownership:** Each feature remains strictly responsible for its own navigation and action sequences.
+- **Prerequisite Check vs Global Controller:** The Halloween Dimension entry rule is a prerequisite pre-flight check, **not** a global navigation controller.
+- **No Reverse Forcing:** Do not force the player back into the Halloween Dimension while another feature is legitimately traveling to another dimension, arena, or location.
+- **No Portal Spam:** Do not repeatedly trigger portal entry while another feature is actively executing its own navigation.
+- **Zero Collision:** Eliminate conflicting movement, portal interactions, teleportation, or other navigation actions between concurrent features.
+
+> [!TIP]
+> **Core Principle:**
+> Halloween-specific features must ensure the player is in the Halloween Dimension before performing their actions. However, features with their own navigation requirements must retain full, unhindered control of their travel and execution logic.
+> This rule is a permanent architectural guideline for all current and future feature implementations.
+
 ### 6.6 Character Integrity, GodMode & Anti-Ragdoll
 To prevent death loops, ragdoll exhaustion, and speed resets:
 ```lua
@@ -464,6 +498,7 @@ Analysis of `SAE_Priority.json` revealed the complete priority coordinate chain:
   - If in Halloween combat: Calls `HalloweenCombatManager:Abort()`.
   - If dimension switch is required: Paths through exit portal (`HalloweenPortalManager.ExitDimension(5.0)`) before executing normal dimension tasks.
 - **Non-Interruptible Carrying Protection:** If `isHoldingEgg()` or `HalloweenPumpkinManager:IsCarrying()` is `true`, the active carry sequence CANNOT be preempted until the payload is safely delivered.
+- **Autonomous Navigation Exemption:** In accordance with [Section 6.5.1](#651-architectural-rules-halloween-event-2026--halloween-dimension), autonomous navigation systems (such as Auto Boss) retain exclusive control over their dimension travel and arena portals; the Halloween Dimension supervisor will never override, redirect, or spam portal entries against an autonomous travel routine.
 
 ### 7.4 Centralized WorkerScheduler (`WorkerScheduler`)
 Located at lines 2906–2940 of `qualcom_clean.lua`:

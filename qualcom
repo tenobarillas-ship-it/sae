@@ -968,6 +968,11 @@ NameResolver:Build()
 
 local EggDetector = { IsHolding = false }
 function EggDetector:CheckHolding()
+    if EggState and typeof(EggState) == "table" then
+        if EggState.Carrying == true or (EggState.CarryUid ~= nil and EggState.CarryUid ~= "") then
+            return true
+        end
+    end
     local dropGui = PlayerGui:FindFirstChild("DropHeldEgg")
     local runGui = PlayerGui:FindFirstChild("RunBackEffects")
     if (dropGui and dropGui:IsA("ScreenGui") and dropGui.Enabled) or 
@@ -1013,10 +1018,11 @@ local function hopOffTreadmill()
 end
 
 local function dropHeldEggDirect()
+    if EggState and typeof(EggState.DropFieldEgg) == "function" then
+        pcall(function() EggState.DropFieldEgg("PlayerRequest") end)
+    end
     if Remotes.AskFieldEggDrop then
         pcall(function() Remotes.AskFieldEggDrop:InvokeServer({ Reason = "PlayerRequest" }) end)
-    elseif EggState and typeof(EggState.DropFieldEgg) == "function" then
-        pcall(function() EggState.DropFieldEgg("PlayerRequest") end)
     end
 end
 
@@ -4099,109 +4105,6 @@ local function instantGrabAtPosition(uid, targetPos, sessionId, isNest)
     return isHoldingEgg()
 end
 
-local function executeFastStealDelivery(targetEgg, sessionId)
-    local _, root, hum = getAliveRig()
-    if not root or not hum then return false end
-
-    local uid = targetEgg.Uid
-    local laneZ = math.clamp(root.Position.Z, -425, -300)
-    local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, CONFIG.GroundAltitude + 1.0, laneZ)
-
-    local playerSpeed = getPlayerCurrentSpeed()
-
-    setCollisions(false)
-    ShieldManager:MuteUGI()
-
-    local startTime = os.clock()
-    local travelTimeout = math.max(12, ((root.Position.X - dropTargetPos.X) / playerSpeed) + 6)
-
-    while root.Position.X > dropTargetPos.X + 2.0 and (os.clock() - startTime) < travelTimeout do
-        Services.RunService.Heartbeat:Wait()
-        if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
-            setCollisions(true)
-            ShieldManager:UnmuteUGI()
-            return false
-        end
-
-        local _, cRoot = getAliveRig()
-        if not cRoot then break end
-
-        -- Natural physics velocity without artificial CFrame position increments
-        cRoot.AssemblyLinearVelocity = Vector3.new(-playerSpeed, cRoot.AssemblyLinearVelocity.Y, 0)
-        cRoot.CFrame = CFrame.new(cRoot.Position.X, CONFIG.GroundAltitude + 1.0, laneZ) * CFrame.Angles(0, math.rad(90), 0)
-    end
-
-    local _, cRoot = getAliveRig()
-    if cRoot then
-        cRoot.CFrame = CFrame.new(dropTargetPos) * CFrame.Angles(0, math.rad(90), 0)
-        cRoot.AssemblyLinearVelocity = Vector3.zero
-    end
-    task.wait(0.2)
-
-    dropHeldEggDirect()
-    local dropWait = os.clock() + 1.2
-    while os.clock() < dropWait and isHoldingEgg() do
-        Services.RunService.Heartbeat:Wait()
-    end
-
-    local droppedEggPos = dropTargetPos
-
-    findMyPlot()
-    if State.myTreadmill then
-        local _, tRoot = getAliveRig()
-        if tRoot then
-            tRoot.CFrame = CFrame.new(State.myTreadmill.Position + Vector3.new(0, 1.5, 0))
-            tRoot.AssemblyLinearVelocity = Vector3.zero
-            task.wait(0.1)
-
-            if Remotes.AskWearStill then pcall(function() Remotes.AskWearStill:InvokeServer() end) end
-            local anchorTimeout = os.clock() + 1.5
-            while os.clock() < anchorTimeout do
-                local _, checkRoot = getAliveRig()
-                if checkRoot and checkRoot.Anchored then break end
-                Services.RunService.Heartbeat:Wait()
-            end
-
-            if Remotes.AskDoff then pcall(function() Remotes.AskDoff:InvokeServer() end) end
-            local _, freeRoot, freeHum = getAliveRig()
-            if freeRoot then freeRoot.Anchored = false end
-            if freeHum then freeHum.PlatformStand = false; freeHum.Sit = false end
-            task.wait(0.1)
-        end
-    end
-
-    local regrabSuccess = false
-    local regrabTimeout = os.clock() + 12
-
-    while os.clock() < regrabTimeout do
-        if sessionId ~= State.currentStealSession or not isStealEnabled() then break end
-        regrabSuccess = instantGrabAtPosition(uid, droppedEggPos, sessionId, false)
-        if regrabSuccess and isHoldingEgg() then break end
-        task.wait(0.08)
-    end
-
-    if not isHoldingEgg() then
-        setCollisions(true)
-        ShieldManager:UnmuteUGI()
-        return false
-    end
-
-    local _, fRoot, fHum = getAliveRig()
-    if fRoot then
-        fRoot.CFrame = CFrame.new(CONFIG.BaseDropPosition)
-        fRoot.AssemblyLinearVelocity = Vector3.zero
-    end
-    task.wait(0.25)
-
-    if fHum then fHum.PlatformStand = false end
-
-    dropHeldEggDirect()
-    task.wait(0.3)
-    setCollisions(true)
-    ShieldManager:UnmuteUGI()
-    return true
-end
-
 local function performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
     if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
     local _, root, humanoid = getAliveRig()
@@ -4219,22 +4122,31 @@ local function performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
     task.wait(0.06)
 
     dropHeldEggDirect()
-    local dropWait = os.clock() + 0.5
+    local dropWait = os.clock() + 0.6
     while os.clock() < dropWait and isHoldingEgg() do
         if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
-        Services.RunService.Heartbeat:Wait()
+        dropHeldEggDirect()
+        task.wait(0.08)
     end
     task.wait(0.04)
 
-    local eggFloorPos = getPhysicalEggPosition(uid, Vector3.new(currentX, checkY, laneZ))
-    local grabSuccess = false
-    local retryTimeout = os.clock() + 3.5
+    -- Regrab: try client EggState.CarryFieldEgg first, then physical grab
+    if uid and EggState and typeof(EggState.CarryFieldEgg) == "function" then
+        pcall(function() EggState.CarryFieldEgg(uid) end)
+        task.wait(0.12)
+    end
 
-    while os.clock() < retryTimeout do
-        if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
-        grabSuccess = instantGrabAtPosition(uid, eggFloorPos, sessionId, false)
-        if grabSuccess and isHoldingEgg() then break end
-        Services.RunService.Heartbeat:Wait()
+    if not isHoldingEgg() then
+        local eggFloorPos = getPhysicalEggPosition(uid, Vector3.new(currentX, checkY, laneZ))
+        local grabSuccess = false
+        local retryTimeout = os.clock() + 3.0
+
+        while os.clock() < retryTimeout do
+            if sessionId ~= State.currentStealSession or not isStealEnabled() then return false end
+            grabSuccess = instantGrabAtPosition(uid, eggFloorPos, sessionId, false)
+            if grabSuccess and isHoldingEgg() then break end
+            Services.RunService.Heartbeat:Wait()
+        end
     end
     task.wait(0.04)
     return isHoldingEgg()
@@ -4261,6 +4173,7 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
 
     local groundY = CONFIG.GroundAltitude + 1.0
 
+    -- Phase 1: Hop along lane towards boundary with periodic checkpoints
     while currentX - stepSize > boundaryX do
         if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
             ShieldManager:UnmuteUGI()
@@ -4298,17 +4211,59 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
             CONFIG.HopGap = math.max(CONFIG.HopGapMin, CONFIG.HopGap - 0.005)
         end
 
-        if math.abs(lastCheckpointX - currentX) >= interval and currentX > 1050 then
+        -- Intermediate ground checkpoint at configured interval
+        if math.abs(lastCheckpointX - currentX) >= interval then
             lastCheckpointX = currentX
-            -- Settle position momentarily without dropping held egg mid-route
-            pcall(function()
-                cRoot.CFrame = CFrame.new(currentX, groundY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
-                cRoot.AssemblyLinearVelocity = Vector3.zero
-            end)
-            task.wait(CONFIG.HopGap)
+            local ok = performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
+            if not ok and not isHoldingEgg() then
+                ShieldManager:UnmuteUGI()
+                StealUIManager:Unlock()
+                cleanupFlightState()
+                return false
+            end
         end
     end
 
+    -- Phase 2: Mandatory Boundary Checkpoint right at boundaryX before crossing into base
+    if isHoldingEgg() then
+        currentX = boundaryX
+        pcall(function()
+            local _, bRoot = getAliveRig()
+            if bRoot then
+                bRoot.CFrame = CFrame.new(boundaryX, groundY, laneZ) * CFrame.Angles(0, math.rad(90), 0)
+                bRoot.AssemblyLinearVelocity = Vector3.zero
+            end
+        end)
+        task.wait(0.08)
+        local boundaryOk = performGroundCheckpoint(targetEgg, boundaryX, laneZ, sessionId)
+        if not boundaryOk and not isHoldingEgg() then
+            ShieldManager:UnmuteUGI()
+            StealUIManager:Unlock()
+            cleanupFlightState()
+            return false
+        end
+    end
+
+    -- Phase 3: Safe Zone Corridor Micro-Hops into Base (progressive hops, NEVER jump 450 studs in one step!)
+    local corridorStep = 45
+    while currentX - corridorStep > safeTarget.X do
+        if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
+            break
+        end
+
+        local nextX = currentX - corridorStep
+        local _, cRoot = getAliveRig()
+        if cRoot then
+            pcall(function()
+                cRoot.CFrame = CFrame.new(nextX, groundY, safeTarget.Z) * CFrame.Angles(0, math.rad(90), 0)
+                cRoot.AssemblyLinearVelocity = Vector3.zero
+            end)
+        end
+        task.wait(CONFIG.HopGap)
+        currentX = nextX
+    end
+
+    -- Phase 4: Delivery Location Drop & Settle Sequence
     local _, fRoot, fHum = getAliveRig()
     if fRoot then
         pcall(function()
@@ -4316,13 +4271,13 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
             fRoot.AssemblyLinearVelocity = Vector3.zero
         end)
     end
-    task.wait(0.25)
+    task.wait(0.15)
     if fHum then fHum.PlatformStand = false end
 
     dropHeldEggDirect()
-    task.wait(0.3)
+    task.wait(0.25)
 
-    local dropVerifyTimeout = os.clock() + 1.5
+    local dropVerifyTimeout = os.clock() + 2.0
     while os.clock() < dropVerifyTimeout and isHoldingEgg() do
         dropHeldEggDirect()
         task.wait(0.2)
@@ -4331,6 +4286,93 @@ local function executeCheckpointedHopsHome(targetEgg, sessionId)
     StealUIManager:Unlock()
     ShieldManager:UnmuteUGI()
     cleanupFlightState()
+    return not isHoldingEgg()
+end
+
+local function executeFastStealDelivery(targetEgg, sessionId)
+    local _, root, hum = getAliveRig()
+    if not root or not hum then return false end
+
+    local uid = targetEgg.Uid
+    local laneZ = math.clamp(root.Position.Z, -425, -300)
+    local dropTargetPos = Vector3.new(CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset, CONFIG.GroundAltitude + 1.0, laneZ)
+    local playerSpeed = getPlayerCurrentSpeed()
+
+    setCollisions(false)
+    ShieldManager:MuteUGI()
+
+    local startTime = os.clock()
+    local travelTimeout = math.max(12, ((root.Position.X - dropTargetPos.X) / playerSpeed) + 6)
+
+    -- Phase 1: High speed glide along ground towards separation line
+    while root.Position.X > dropTargetPos.X + 2.0 and (os.clock() - startTime) < travelTimeout do
+        Services.RunService.Heartbeat:Wait()
+        if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then
+            setCollisions(true)
+            ShieldManager:UnmuteUGI()
+            return false
+        end
+
+        local _, cRoot = getAliveRig()
+        if not cRoot then break end
+        cRoot.AssemblyLinearVelocity = Vector3.new(-playerSpeed, cRoot.AssemblyLinearVelocity.Y, 0)
+        cRoot.CFrame = CFrame.new(cRoot.Position.X, CONFIG.GroundAltitude + 1.0, laneZ) * CFrame.Angles(0, math.rad(90), 0)
+    end
+
+    local _, cRoot = getAliveRig()
+    if cRoot then
+        cRoot.CFrame = CFrame.new(dropTargetPos) * CFrame.Angles(0, math.rad(90), 0)
+        cRoot.AssemblyLinearVelocity = Vector3.zero
+    end
+    task.wait(0.1)
+
+    -- Phase 2: Separation line drop and regrab checkpoint
+    local checkpointOk = performGroundCheckpoint(targetEgg, dropTargetPos.X, laneZ, sessionId)
+    if not checkpointOk and not isHoldingEgg() then
+        setCollisions(true)
+        ShieldManager:UnmuteUGI()
+        return false
+    end
+
+    -- Phase 3: Fast micro-hops from separation line to base drop position
+    local currentX = dropTargetPos.X
+    local safeTarget = CONFIG.BaseDropPosition
+    local corridorStep = 55
+
+    while currentX - corridorStep > safeTarget.X do
+        if sessionId ~= State.currentStealSession or not isStealEnabled() or not isHoldingEgg() then break end
+        local nextX = currentX - corridorStep
+        local _, hRoot = getAliveRig()
+        if hRoot then
+            pcall(function()
+                hRoot.CFrame = CFrame.new(nextX, CONFIG.GroundAltitude + 1.0, safeTarget.Z) * CFrame.Angles(0, math.rad(90), 0)
+                hRoot.AssemblyLinearVelocity = Vector3.zero
+            end)
+        end
+        task.wait(CONFIG.HopGap)
+        currentX = nextX
+    end
+
+    -- Phase 4: Final delivery drop at hopper
+    local _, fRoot, fHum = getAliveRig()
+    if fRoot then
+        fRoot.CFrame = CFrame.new(safeTarget.X, CONFIG.GroundAltitude + 1.2, safeTarget.Z)
+        fRoot.AssemblyLinearVelocity = Vector3.zero
+    end
+    task.wait(0.15)
+    if fHum then fHum.PlatformStand = false end
+
+    dropHeldEggDirect()
+    task.wait(0.25)
+
+    local dropVerifyTimeout = os.clock() + 2.0
+    while os.clock() < dropVerifyTimeout and isHoldingEgg() do
+        dropHeldEggDirect()
+        task.wait(0.2)
+    end
+
+    setCollisions(true)
+    ShieldManager:UnmuteUGI()
     return not isHoldingEgg()
 end
 
@@ -4692,12 +4734,6 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
         elseif targetDim == "Halloween" and not inHalloween then
             hopOffTreadmill()
             HalloweenPortalManager.EnterDimension(5.0)
-            return
-        end
-    else
-        -- If no active tasks have work and player is in Halloween, return to main world
-        if inHalloween then
-            HalloweenPortalManager.ExitDimension(5.0)
             return
         end
     end

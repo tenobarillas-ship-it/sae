@@ -133,7 +133,6 @@ local currentSettings = {
     AutoCandyCane = false,
     AutoPumpkin = false,
     AutoBossEvent = false,
-    AutoBossRepeat = false,
     TaskPriorities = {
         "Auto Boss",
         "Auto Steal",
@@ -2619,7 +2618,13 @@ getgenv().BossFarmerState = getgenv().BossFarmerState or {
     CurrentBatIndex = 1,
     -- Tracks whether the King has actually appeared alive during the current arena run.
     KingEncountered = false,
-    -- Latch preventing the script from re-entering the portal once a boss run finishes.
+    -- Scoped to current boss event: true when King has been defeated.
+    CurrentEventCompleted = false,
+    -- Set when exiting after victory; waits for open portal to close before re-arming.
+    WaitingForPortalClose = false,
+    -- Timestamp when player entered the arena (for stale arena timeout).
+    ArenaEntryTime = 0,
+    -- Backward compatibility alias
     RunCompleted = false
 }
 -- A re-executed script must never inherit a stale busy lock from a killed thread.
@@ -2645,9 +2650,7 @@ HalloweenBossManager = {
         -- Tuned delay between cannon shots matching server reload debounce.
         CannonReloadDelay = 0.25,
         -- Seconds between portal probes when the portal state cannot be read.
-        ProbeCooldown = 60,
-        -- When false, the script will NOT re-enter the portal after finishing a boss run.
-        AutoRepeatRuns = currentSettings.AutoBossRepeat == true
+        ProbeCooldown = 60
     },
     -- References to the game's networking remotes (resolved lazily, never blocks load).
     Remotes = {
@@ -3057,12 +3060,7 @@ function HalloweenBossManager:IsBossDefeated(arena)
     if not arena then return false end
     local state = getgenv().BossFarmerState
 
-    -- SAFETY LATCH: Never trigger exit if the King was not encountered alive yet.
-    if not state.KingEncountered then
-        return false
-    end
-
-    -- 1. Check if King's health attribute dropped to 0
+    -- 1. Check if King's health attribute explicitly dropped to 0
     local bossHp = arena:GetAttribute("Health")
     if bossHp and bossHp <= 0 then
         return true
@@ -3074,11 +3072,28 @@ function HalloweenBossManager:IsBossDefeated(arena)
         return true
     end
 
-    -- 3. Check if King humanoid is dead
+    -- 3. Check if King humanoid exists and is dead
     local king = arena:FindFirstChild("King")
     if king then
         local hum = king:FindFirstChildOfClass("Humanoid")
         if hum and hum.Health <= 0 then
+            return true
+        end
+    end
+
+    -- 4. Check if King was encountered alive earlier and has now disappeared from the arena
+    if state.KingEncountered then
+        local activeBossModel, _ = self:FindActiveBoss()
+        if not activeBossModel then
+            -- Boss was alive earlier and now completely disappeared / despawned -> Defeated!
+            return true
+        end
+    end
+
+    -- 5. Stale arena guard: inside arena for > 15s without finding any King boss
+    if not state.KingEncountered and state.ArenaEntryTime > 0 and (os.clock() - state.ArenaEntryTime) > 15 then
+        local activeBossModel, _ = self:FindActiveBoss()
+        if not activeBossModel then
             return true
         end
     end
@@ -3090,6 +3105,8 @@ end
 function HalloweenBossManager:HandleArenaExit(arena)
     if not arena then return false end
     local exitPortal = arena:FindFirstChild("BossExitPortal", true)
+                    or arena:FindFirstChild("ExitPortal", true)
+                    or arena:FindFirstChild("Exit", true)
     if not exitPortal then return false end
 
     local hitbox = exitPortal:FindFirstChild("Hitbox", true)
@@ -3097,9 +3114,27 @@ function HalloweenBossManager:HandleArenaExit(arena)
                 or exitPortal:FindFirstChildWhichIsA("BasePart")
 
     if hitbox then
-        self:GlideTo(hitbox.Position, 2.0)
-        task.wait(0.5)
-        return true
+        local _, root = getAliveRig()
+        if root then
+            self:GlideTo(hitbox.Position, 2.0)
+            pcall(function()
+                if UniversalCompat and UniversalCompat.FireTouch then
+                    UniversalCompat.FireTouch(hitbox, root, 0)
+                    task.wait(0.05)
+                    UniversalCompat.FireTouch(hitbox, root, 1)
+                end
+            end)
+            local prompt = exitPortal:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if prompt and prompt.Enabled and UniversalCompat then
+                UniversalCompat.FireProximityPrompt(prompt)
+            end
+        end
+
+        local exitTimeout = os.clock() + 3.0
+        while os.clock() < exitTimeout and self:IsPlayerInArena() do
+            Services.RunService.Heartbeat:Wait()
+        end
+        return not self:IsPlayerInArena()
     end
     return false
 end
@@ -3111,13 +3146,18 @@ function HalloweenBossManager:ProcessOutside()
 
     local known, open = self:GetPortalState()
     if known and not open then
-        -- Portal sealed: boss window over. Re-arm the run latch and wait for it to open.
+        -- Portal sealed: previous boss event is completely over.
+        -- Reset completion latch so the script is armed for the next genuine boss event!
+        state.CurrentEventCompleted = false
+        state.WaitingForPortalClose = false
         state.RunCompleted = false
         self.ProbeCooldownUntil = os.clock() + self.Config.ProbeCooldown
         return
     end
 
-    if state.RunCompleted and not self.Config.AutoRepeatRuns then
+    -- If current event run was completed, ignore remaining portal open window!
+    -- The portal remains open for a few minutes after King dies, but event is finished.
+    if state.CurrentEventCompleted or state.WaitingForPortalClose then
         return
     end
 
@@ -3133,17 +3173,16 @@ function HalloweenBossManager:ProcessOutside()
         return
     end
 
-    state.RunCompleted = false
-
     local entryPos = self:GetPortalTargetPos()
     if self.Remotes.AskEnter then
         pcall(function() self.Remotes.AskEnter:InvokeServer() end)
     end
 
+    state.ArenaEntryTime = os.clock()
     self:GlideTo(entryPos, 2.0)
 
     local teleportWait = os.clock()
-    while (os.clock() - teleportWait) < 2.0 and not self:IsPlayerInArena() do
+    while (os.clock() - teleportWait) < 2.5 and not self:IsPlayerInArena() do
         Services.RunService.Heartbeat:Wait()
     end
 
@@ -3160,11 +3199,16 @@ function HalloweenBossManager:ProcessArena()
 
     local arena = Services.Workspace:FindFirstChild("PumpkinArena", true)
 
-    -- Check if King has been defeated -> Auto-Exit Arena
+    -- Check if King has been defeated or disappeared -> Immediately exit the arena!
     if self:IsBossDefeated(arena) then
-        self:HandleArenaExit(arena)
+        state.CurrentEventCompleted = true
+        state.WaitingForPortalClose = true
         state.RunCompleted = true
-        task.wait(1.0)
+        state.KingEncountered = false
+
+        self:HandleArenaExit(arena)
+        task.wait(0.5)
+
         if not self:IsPlayerInArena() then
             setCollisions(true)
         end
@@ -3277,13 +3321,25 @@ function HalloweenBossManager:HasWork()
 
     local state = getgenv().BossFarmerState
     local known, open = self:GetPortalState()
+
     if known and not open then
-        -- Sealed portal = boss window over; arm the latch for the next opening.
+        -- Sealed portal = previous boss event is completely over; reset latch so next opening is treated as new event.
+        state.CurrentEventCompleted = false
+        state.WaitingForPortalClose = false
         state.RunCompleted = false
         return false
     end
-    if state.RunCompleted and not self.Config.AutoRepeatRuns then return false end
-    if known then return true end
+
+    -- If current boss run was completed, ignore remaining open portal until it closes!
+    if state.CurrentEventCompleted or state.WaitingForPortalClose then
+        return false
+    end
+
+    if known and open then
+        -- Genuinely new boss event available!
+        return true
+    end
+
     -- Portal model not replicated (e.g. outside the dimension): probe, rate-limited.
     return os.clock() >= self.ProbeCooldownUntil
 end
@@ -5031,17 +5087,11 @@ halloweenCategory:CreateToggle("Auto Boss", "Auto enter BossPortal, fight the Pu
     currentSettings.AutoBossEvent = state
     saveStuff()
     if state then
+        getgenv().BossFarmerState.CurrentEventCompleted = false
+        getgenv().BossFarmerState.WaitingForPortalClose = false
         getgenv().BossFarmerState.RunCompleted = false
     elseif HalloweenBossManager and HalloweenBossManager.Abort then
         HalloweenBossManager:Abort()
-    end
-end)
-
-halloweenCategory:CreateToggle("Repeat Boss Runs", "Re-enter the BossPortal after each finished run", currentSettings.AutoBossRepeat, function(state)
-    currentSettings.AutoBossRepeat = state
-    saveStuff()
-    if HalloweenBossManager then
-        HalloweenBossManager.Config.AutoRepeatRuns = state
     end
 end)
 

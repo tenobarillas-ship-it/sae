@@ -272,18 +272,41 @@ Forest, Lake, Desert, Jungle, Snow, Volcano, Abyss Ocean, Prehistoric, Cosmic, C
 > [!IMPORTANT]
 > The Steal an Egg server anti-cheat monitors cumulative distance traveled while continuously holding an egg. If a character traverses over $\sim 400$ studs continuously without dropping, the server flags displacement and fires `RE/RigSync/Refresh` with `Action = "Relocate"` (rubber-band rollback) or forces an unprompted drop.
 
-#### Low-Speed Dynamic Hopping vs 4-Phase SafeCarry:
-1. **Dynamic Hopping Mode (`executeCheckpointedHopsHome` in `qualcom`):**
-   - Uses discrete altitude hops (`groundY = CONFIG.GroundAltitude + 1.0`).
-   - Hop step size dynamically scales with player WalkSpeed:
+#### Restored 4-Phase Delivery Sequence (`qualcom`):
+In commit `bc4ca86`, an experimental delivery method attempted to anchor the character to the base treadmill (`AskWearStill`) and teleported directly from the boundary ($X \approx 600$) to the hopper ($X \approx 150$) in a single 450-stud jump. This triggered severe physics desync, anti-cheat drop penalties, and delivery failures. The restored 4-Phase Delivery Sequence eliminates all unprompted teleports and treadmill anchoring:
+
+```mermaid
+flowchart TD
+    A["Phase 1: Inbound Transit<br/>(Dynamic Hopping or Fast Glide)"] --> B["Phase 2: Mandatory Boundary Checkpoint<br/>(X = 600.2 / Separation Line)"]
+    B --> C["Hop-Drop-Regrab Sequence<br/>(dropHeldEggDirect -> EggState.CarryFieldEgg)"]
+    C --> D["Phase 3: Safe Zone Corridor Micro-Hops<br/>(45 to 55 stud steps into Base)"]
+    D --> E["Phase 4: Hopper Delivery Drop<br/>(BaseDropPosition + 2s Verification Loop)"]
+```
+
+1. **Phase 1: Inbound Route (Dynamic Hopping or Fast Glide):**
+   - **Dynamic Hopping Mode (`executeCheckpointedHopsHome`):** Steps along the lane towards the boundary using discrete altitude hops (`groundY = CONFIG.GroundAltitude + 1.0`). Hop step size dynamically scales with player WalkSpeed:
      $$\text{stepSize} = (\text{playerSpeed} < 100) \mathbin{?} \max(34, \text{playerSpeed} \times 0.45) : \min(\text{baseStep}, \max(60, \text{playerSpeed} \times 0.75))$$
-   - Eliminates blind mid-route dropping that caused low-speed players and PC executors to lose eggs on the conveyor.
-2. **4-Phase SafeCarry (`SafeCarry.LineDropHome` & `Home` from ChiliHub):**
-   - Computes two intermediate waypoints: `MidDrops = {0.33, 0.66}`.
-   - Steps character to waypoint $\rightarrow$ calls `EggState.DropFieldEgg("PlayerRequest")` $\rightarrow$ waits `0.10s` (`MidRest`) $\rightarrow$ re-grabs with `EggState.CarryFieldEgg(uid)`.
-   - **Why it succeeds:** The 0.10s drop resets the server's cumulative displacement counter to zero without triggering physics desync.
-   - Crosses the separation line ($X = 545 \rightarrow X = 150$) and deposits into base hopper.
-   - Dynamic guard pacing: `U.BeatGuard` continuously matches guard velocity to avoid aggro contact while avoiding velocity spikes.
+     Performs intermediate ground checkpoints (`performGroundCheckpoint`) every `CONFIG.CheckpointInterval` (380 studs) along the lane to keep cumulative held displacement under server limits.
+   - **Fast Steal Glide Mode (`executeFastStealDelivery`):** High-speed physics velocity glide along the ground plane towards `CONFIG.SeparationLineX + CONFIG.FastStealLineDropOffset`.
+2. **Phase 2: Mandatory Boundary Checkpoint (`performGroundCheckpoint`):**
+   - Directly at the boundary line ($X = 600.2$ / Separation Line $X = 545.0$), the character anchors briefly at the safe ground position.
+   - **Hop-Drop-Regrab Sequence:**
+     - Calls `dropHeldEggDirect()` which notifies both `EggState.DropFieldEgg("PlayerRequest")` and `Remotes.AskFieldEggDrop`.
+     - Loops until `isHoldingEgg()` confirms the egg has dropped.
+     - **Why this is critical:** Dropping the egg resets the server-side cumulative displacement counter back to zero.
+     - Immediately re-grabs via client `EggState.CarryFieldEgg(uid)` (0.12s), with an automatic physical grab fallback (`instantGrabAtPosition`) if the client module is unavailable.
+3. **Phase 3: Safe Zone Corridor Micro-Hops:**
+   - Traverses the base boundary corridor from $X = 600.2$ down to `CONFIG.BaseDropPosition.X` ($528.7$) using small progressive micro-hops of 45 to 55 studs.
+   - **Zero Unprompted Teleports:** Eliminates the single-step 450-stud teleport into base that triggered server drop rollbacks.
+4. **Phase 4: Hopper Delivery Drop & Verification:**
+   - Positions character at `CONFIG.BaseDropPosition` (altitude $+ 1.2$).
+   - Calls `dropHeldEggDirect()`, waits 0.25s, and runs a 2.0-second verification loop to confirm the hopper accepts the egg and `isHoldingEgg()` returns false.
+
+#### Dual-Source Holding Verification (`isHoldingEgg`):
+To prevent race conditions where GUI animations lag behind network replication:
+- **Client State Machine:** Checks `EggState.Carrying == true` and `EggState.CarryUid ~= nil`.
+- **ScreenGui Detection:** Checks `PlayerGui.DropHeldEgg.Enabled` and `PlayerGui.RunBackEffects.Enabled`.
+- **Seasonal Dimension Fallback:** Scans for active `Drop` buttons in `PlayerGui` while inside the Halloween dimension.
 
 ---
 
@@ -596,3 +619,4 @@ Located at lines 2906–2940 of `qualcom_clean.lua`:
 | `ec93180f8f9c4502a6157fc5375174541182005b` | `revert(qualcom): exact restore to bc4ca86` | Reverted qualcom to stable working baseline commit bc4ca8615c00b895b78cbe33f89ea12dd7b9d10a. |
 | `5700ee52bcd652c85a2fe5f4e32d830208f72db3` | `feat(halloween): add Auto Boss (Pumpkin King)` | Added `HalloweenBossManager` (portal-seal detection, arena melee, cannon phase, exit portal), `Auto Boss` / `Repeat Boss Runs` toggles, Rank-1 priority task with non-interference lock. |
 | `215216a96da8c33db210b6cdef910a1d1b24b4dd` | `fix(anti-cheat): resolve CODE BAC-10518` | Removed `VirtualInputManager`, eliminated ProximityPrompt property mutation, stopped recurring constraint destruction, protected `RagdollEndTime`, and sanitized cannon/combat payloads. |
+| `c9ba9da5381ce70cf1842fefd04d67d7219c306a` | `fix(steal): restore 4-phase delivery pipeline` | Restored hop-drop-regrab boundary checkpoint ($X = 600.2$), 45-stud corridor micro-hops, dual holding detection (`EggState` + GUI), and eliminated 450-stud base teleport & treadmill anchoring. |

@@ -25,50 +25,32 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 local UniversalCompat = {}
 
-local VIM = nil
-pcall(function()
-    VIM = game:GetService("VirtualInputManager")
-end)
-
 function UniversalCompat.FireProximityPrompt(prompt)
     if not prompt or not prompt.Parent then return false end
-    
-    pcall(function()
-        prompt.RequiresLineOfSight = false
-        if (prompt.MaxActivationDistance or 0) < 50 then
-            prompt.MaxActivationDistance = 50
-        end
-        prompt.HoldDuration = 0
-    end)
 
-    local success = false
-
-    -- Method A: Exploit C-closure fireproximityprompt (supports 1 or 2 argument variants)
+    -- Method A: Native exploit C-closure fireproximityprompt (zero synthetic input, zero property tampering)
     if typeof(fireproximityprompt) == "function" then
         local ok = pcall(fireproximityprompt, prompt, 0)
         if not ok then ok = pcall(fireproximityprompt, prompt, 1) end
         if not ok then ok = pcall(fireproximityprompt, prompt) end
-        if ok then success = true end
+        if ok then return true end
     end
 
-    -- Method B: Engine input hold simulation with non-zero heartbeat duration
+    -- Method B: Engine input hold simulation matching prompt duration (no VIM, no property alteration)
+    local triggered = false
     pcall(function()
         prompt:InputHoldBegin()
-        task.wait(0.03)
+        local duration = tonumber(prompt.HoldDuration) or 0
+        if duration > 0 then
+            task.wait(duration + 0.05)
+        else
+            task.wait(0.04)
+        end
         prompt:InputHoldEnd()
-        success = true
+        triggered = true
     end)
 
-    -- Method C: VirtualInputManager Key simulation fallback
-    if VIM and prompt.KeyboardKeyCode and prompt.KeyboardKeyCode ~= Enum.KeyCode.Unknown then
-        pcall(function()
-            VIM:SendKeyEvent(true, prompt.KeyboardKeyCode, false, game)
-            task.wait(0.03)
-            VIM:SendKeyEvent(false, prompt.KeyboardKeyCode, false, game)
-        end)
-    end
-
-    return success
+    return triggered
 end
 
 function UniversalCompat.FireTouch(part1, part2)
@@ -92,17 +74,17 @@ end
 
 function UniversalCompat.ClickButton(btn)
     if not btn or not btn:IsA("GuiButton") then return false end
-    local triggered = false
 
     -- Method A: firesignal
     if typeof(firesignal) == "function" then
-        pcall(firesignal, btn.Activated)
-        pcall(firesignal, btn.MouseButton1Click)
-        triggered = true
+        local ok1 = pcall(firesignal, btn.Activated)
+        local ok2 = pcall(firesignal, btn.MouseButton1Click)
+        if ok1 or ok2 then return true end
     end
 
     -- Method B: getconnections
     if typeof(getconnections) == "function" then
+        local triggered = false
         local ok1, conns1 = pcall(getconnections, btn.Activated)
         if ok1 and type(conns1) == "table" then
             for _, c in ipairs(conns1) do
@@ -121,23 +103,10 @@ function UniversalCompat.ClickButton(btn)
                 triggered = true
             end
         end
+        if triggered then return true end
     end
 
-    -- Method C: VirtualInputManager click at button AbsolutePosition
-    if VIM then
-        pcall(function()
-            local absPos = btn.AbsolutePosition
-            local absSize = btn.AbsoluteSize
-            local cx = absPos.X + (absSize.X / 2)
-            local cy = absPos.Y + (absSize.Y / 2)
-            VIM:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
-            task.wait(0.02)
-            VIM:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
-            triggered = true
-        end)
-    end
-
-    return triggered
+    return false
 end
 
 local saveFile = "SyntaxHub_Config.json"
@@ -504,6 +473,12 @@ local function applyGodMode(character)
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     if not humanoid then return end
 
+    -- Respect server ragdoll duration (BAC-10518 protection): never destroy constraints while server ragdoll timer is active
+    local ragdollEndTime = tonumber(LocalPlayer:GetAttribute("RagdollEndTime")) or 0
+    if ragdollEndTime > workspace:GetServerTimeNow() then
+        return
+    end
+
     local blockedStates = {
         Enum.HumanoidStateType.FallingDown,
         Enum.HumanoidStateType.Ragdoll,
@@ -514,12 +489,15 @@ local function applyGodMode(character)
     end
     pcall(function() humanoid.BreakJointsOnDeath = false end)
 
+    -- BAC-7516 protection: Never touch constraints or Motor6Ds inside a Tool (preserves egg/weapon welds)
     for _, desc in ipairs(character:GetDescendants()) do
-        if desc:IsA("BallSocketConstraint") or desc:IsA("HingeConstraint") or 
-          (desc:IsA("NoCollisionConstraint") and string.find(desc.Name, "Ragdoll", 1, true)) then
-            pcall(function() desc:Destroy() end)
-        elseif desc:IsA("Motor6D") and not desc.Enabled then
-            desc.Enabled = true
+        if not desc:FindFirstAncestorWhichIsA("Tool") then
+            if desc:IsA("BallSocketConstraint") or desc:IsA("HingeConstraint") or 
+              (desc:IsA("NoCollisionConstraint") and string.find(desc.Name, "Ragdoll", 1, true)) then
+                pcall(function() desc:Destroy() end)
+            elseif desc:IsA("Motor6D") and not desc.Enabled then
+                desc.Enabled = true
+            end
         end
     end
 end
@@ -1724,13 +1702,6 @@ function HalloweenCombatManager:Process()
         local handle = activeTool and (activeTool:FindFirstChild("Handle") or activeTool:FindFirstChildWhichIsA("BasePart"))
         if handle and monsterPart then
             UniversalCompat.FireTouch(handle, monsterPart)
-            -- Physical sweep fallback for PC executors lacking firetouchinterest
-            pcall(function()
-                local oldCf = handle.CFrame
-                handle.CFrame = monsterPart.CFrame
-                task.wait(0.01)
-                handle.CFrame = oldCf
-            end)
         end
     end
 end
@@ -2661,12 +2632,12 @@ HalloweenBossManager = {
         ArenaFloorY = 476.24,
         -- Safe standoff distance behind the boss (stays clear of frontal damage cleaves).
         CombatOffsetBehind = 14.0,
-        -- Linear glide speed when moving through the arena.
-        GlideSpeed = 250,
+        -- Safe glide speed when moving through the arena (prevents BAC-10518 velocity flag).
+        GlideSpeed = 100,
         -- Interval between weapon cycles in seconds during melee combat.
-        SwitchInterval = 0.05,
+        SwitchInterval = 0.06,
         -- Tuned delay between cannon shots matching server reload debounce.
-        CannonReloadDelay = 0.18,
+        CannonReloadDelay = 0.25,
         -- Seconds between portal probes when the portal state cannot be read.
         ProbeCooldown = 60,
         -- When false, the script will NOT re-enter the portal after finishing a boss run.
@@ -2704,10 +2675,15 @@ function HalloweenBossManager:ApplyStateProtection(character)
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     if not humanoid then return end
 
+    -- BAC-10518: Never strip constraints while active server ragdoll timer is running
+    local ragdollEndTime = tonumber(LocalPlayer:GetAttribute("RagdollEndTime")) or 0
+    if ragdollEndTime > workspace:GetServerTimeNow() then
+        return
+    end
+
     local blockedStates = {
         Enum.HumanoidStateType.FallingDown,
-        Enum.HumanoidStateType.Ragdoll,
-        Enum.HumanoidStateType.Physics
+        Enum.HumanoidStateType.Ragdoll
     }
     for _, state in ipairs(blockedStates) do
         pcall(function() humanoid:SetStateEnabled(state, false) end)
@@ -2822,7 +2798,7 @@ function HalloweenBossManager:GlideTo(targetPos, stopDistance)
         local dir = diff.Unit
         local step = math.min(speed * dt, diff.Magnitude)
 
-        liveRoot.AssemblyLinearVelocity = dir * speed
+        liveRoot.AssemblyLinearVelocity = Vector3.new(0, -0.1, 0)
         liveRoot.CFrame = CFrame.new(liveRoot.Position + dir * step, liveRoot.Position + dir * 10)
     end
 
@@ -3054,12 +3030,17 @@ function HalloweenBossManager:ProcessCannonFiring(myCannon, standPos)
         root.AssemblyLinearVelocity = Vector3.zero
     end
 
-    -- Working multi-payload triple-shot execution
+    -- Safe single-payload execution (prevents BAC-10518 remote argument type mismatch flag)
     local cannonFire = self.Remotes.CannonFire
     if cannonFire then
-        pcall(function() cannonFire:FireServer() end)
-        pcall(function() cannonFire:FireServer(myCannon) end)
-        pcall(function() cannonFire:FireServer(myCannon:GetAttribute("CannonId")) end)
+        local cannonId = myCannon:GetAttribute("CannonId")
+        if cannonId ~= nil then
+            pcall(function() cannonFire:FireServer(cannonId) end)
+        elseif myCannon then
+            pcall(function() cannonFire:FireServer(myCannon) end)
+        else
+            pcall(function() cannonFire:FireServer() end)
+        end
     end
 
     task.wait(self.Config.CannonReloadDelay)
@@ -3265,7 +3246,10 @@ function HalloweenBossManager:Process()
 
     local ok, err = pcall(function()
         self:ResolveRemotes()
-        self:ApplyStateProtection(char)
+        if not self.LastProtectionTime or (os.clock() - self.LastProtectionTime) >= 3.0 then
+            self.LastProtectionTime = os.clock()
+            self:ApplyStateProtection(char)
+        end
         if self:IsPlayerInArena() then
             self:ProcessArena()
         else
@@ -4683,7 +4667,6 @@ end)
 WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     local char = LocalPlayer.Character
     if not char then return end
-    applyGodMode(char)
 
     local inHalloween = HalloweenPortalManager.IsInHalloweenDimension()
     local topTask = PriorityManager:GetTopWantedTask()

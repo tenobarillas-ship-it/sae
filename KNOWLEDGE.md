@@ -417,21 +417,25 @@ sequenceDiagram
   - Glides to pumpkin, grabs, and carries to the Altar.
   - Marked **non-interruptible** while `IsCarrying() = true` to prevent pumpkin dropping.
 - **Auto Boss (Pumpkin King) — `HalloweenBossManager` in `qualcom`:**
-  - **GUI:** `Halloween Event 2026` category → `Auto Boss` toggle (`currentSettings.AutoBossEvent` → `getgenv().config.autoBossEvent`, mirrored to `getgenv().AutoBossEvent`) and `Repeat Boss Runs` toggle (`currentSettings.AutoBossRepeat` → `HalloweenBossManager.Config.AutoRepeatRuns`).
+  - **GUI:** `Halloween Event 2026` category → `Auto Boss` toggle (`currentSettings.AutoBossEvent` → `getgenv().config.autoBossEvent`, mirrored to `getgenv().AutoBossEvent`). The separate `Repeat Boss Runs` toggle was removed; event repeating is managed autonomously via internal lifecycle state tracking.
   - **Driver:** `WorkerScheduler:Register("HalloweenBoss", 0.05, ...)` → `PriorityManager:CanRun("Boss")` → `HalloweenBossManager:Process()` (one loop iteration per tick, guarded by `getgenv().BossFarmerState.IsBusy`).
-  - **Persistent state:** `getgenv().BossFarmerState = { IsBusy, CurrentBatIndex, KingEncountered, RunCompleted }` (`IsBusy` force-reset on script load).
-  - **Stage 1 — Outside arena (`ProcessOutside`):**
-    1. Reads the portal from the model: `HalloweenDimension.BossPortal.BossPortalSeal` — any seal `BasePart` with `Transparency < 0.5` = **closed**, all transparent / seal missing = **open** (`GetPortalState()` returns `known, open`).
-    2. Sealed portal re-arms the `RunCompleted` latch (the next opening starts a fresh run).
-    3. **Rule 6.5.1 (1):** if outside the Halloween Dimension → `HalloweenPortalManager.EnterDimension(5.0)` first.
-    4. Invokes `RF/BossEvent/AskEnter`, glides (noclip, `GlideSpeed = 250`) to `BossPortal.Hitbox`, waits ≤ 2s for arena arrival.
-    5. If the portal model is not replicated (`known = false`), a rate-limited probe (`ProbeCooldown = 60s`) enters the dimension to read it.
-  - **Stage 2 — Inside `PumpkinArena` (`ProcessArena`):** arena detected via `InPumpkinArena` attribute or ≤ 600 studs from `(-133552.1, 477.7, 980.7)`.
-    - **Defeat check** (`IsBossDefeated`, only after `KingEncountered`): arena `Health <= 0`, `Phase ∈ {Defeated, Finished, Victory, Ended}`, or King humanoid dead → glide into `BossExitPortal` → `RunCompleted = true` → restore collisions.
-    - **Cannon phase** (arena `Phase == "Shield"`/`ShieldActive` or `Phase == "Stunned"`/`StunEnds`/King `Stunned`): find own cannon (`Cannons/*` with `OwnerUserId`, else `TutorialBeam` target) → if roots/vines still block it, bat-attack them → otherwise raycast-ground onto the green stand pad and fire `RE/PumpkinBoss/CannonFire` every `0.18s`.
-    - **Melee phase:** target `King` (or any `brute`/`king`/`pumpkinboss` model), stand `14` studs behind its `LookVector` at `FloorY + 3` (default `476.24`), cycle all bats (`IsBat` attribute or name contains "bat") every `0.05s` + `RE/HalloweenDimension/MonsterHit`.
-  - **Character protection:** `ApplyStateProtection` mirrors `applyGodMode` but **skips all `Tool` descendants** (BAC-7516 mitigation #2).
-  - **Priority integration:** task `"Auto Boss"` (aliases `Boss`, `AutoBoss`), default **Rank 1**, dimension `"Self"`. `HalloweenBossManager:IsLocked()` (enabled **and** mid-run or in arena) forces `GetTopWantedTask()` to return `"Auto Boss"`; the Dimension Supervisor returns early, and the Candy Cane / Pumpkin workers skip their `Abort()` (no collision resets) while locked.
+  - **Persistent Event Scoping State:** `getgenv().BossFarmerState = { IsBusy, CurrentBatIndex, KingEncountered, CurrentEventCompleted, WaitingForPortalClose, ArenaEntryTime }` (`IsBusy` force-reset on script load).
+  - **Event Lifecycle & Portal Resealing Mechanics:**
+    1. **Stage 1 — Outside arena (`ProcessOutside` & `HasWork`):**
+       - Reads the portal model: `HalloweenDimension.BossPortal.BossPortalSeal` — any seal `BasePart` with `Transparency < 0.5` = **closed**, all transparent or seal missing = **open** (`GetPortalState()` returns `known, open`).
+       - **Sealed Portal Resets Completion:** When the portal closes/seals, `CurrentEventCompleted` and `WaitingForPortalClose` are reset to `false`. The system is now fully armed for the next genuinely new event.
+       - **Finished Event Window Ignore:** After King Boss is defeated, the entrance portal remains open for several minutes before closing. Auto Boss sets `CurrentEventCompleted = true` and `WaitingForPortalClose = true`, ignoring the lingering open portal so it will **never re-enter a finished event**.
+       - **New Event Entry:** When `open == true` and `CurrentEventCompleted == false`, a genuinely new boss event has started. Invokes `RF/BossEvent/AskEnter`, glides to `BossPortal.Hitbox`, and transitions into the arena.
+    2. **Stage 2 — Inside `PumpkinArena` (`ProcessArena`):**
+       - Arena detected via `InPumpkinArena` attribute or $\le 600$ studs from arena center `(-133552.1, 477.7, 980.7)`.
+       - **Immediate Defeat / Disappearance Exit (`IsBossDefeated`):**
+         - Detects victory if arena `Health <= 0`, `Phase ∈ {Defeated, Finished, Victory, Ended}`, King humanoid is dead, OR King Boss model has completely despawned/disappeared after being encountered alive (`state.KingEncountered == true`).
+         - Immediately marks `CurrentEventCompleted = true` and `WaitingForPortalClose = true`.
+         - Calls `HandleArenaExit(arena)` (glides to `BossExitPortal`, fires touch/prompt listeners) to exit the arena immediately instead of idling inside.
+       - **Cannon Phase:** When King Boss has an active shield (`Phase == "Shield"` / `ShieldActive == true`) or is stunned (`Phase == "Stunned"` / `StunEnds` / King `Stunned`): locates assigned cannon (`Cannons/*` with `OwnerUserId`), clears obstructing roots/vines with bat strikes, aligns character onto the green stand circle, and fires `RE/PumpkinBoss/CannonFire` with rate-limited debounce (0.25s).
+       - **Melee Phase:** When King Boss is unshielded and active, stands $14$ studs behind its `LookVector` at `FloorY + 3` (default `476.24`), cycling all bats in Character/Backpack every $0.06$s and triggering touch interest / `RE/HalloweenDimension/MonsterHit`.
+  - **Character protection:** `ApplyStateProtection` mirrors `applyGodMode` but **skips all `Tool` descendants** (BAC-7516 mitigation) and respects active `RagdollEndTime` (BAC-10518 mitigation).
+  - **Priority integration:** task `"Auto Boss"` (aliases `Boss`, `AutoBoss`), default **Rank 1**, dimension `"Self"`. `HalloweenBossManager:IsLocked()` (enabled **and** mid-run or in arena) forces `GetTopWantedTask()` to return `"Auto Boss"`; Dimension Supervisor never interferes while locked. When an event run is completed and waiting outside for the portal to close, `HasWork()` returns `false`, allowing other tasks (Auto Steal, etc.) to run.
 - **Live World Events:**
   - **Shooting Stars:** Intercepts falling `ShootingStarClient` models, tracks landing position, and fires `RE/ShootingStar/Catch`.
   - **Phantom Express:** Navigates to ghost train station platform and boards via `RF/TrainEvent/Action("Board")`.
@@ -620,3 +624,4 @@ Located at lines 2906–2940 of `qualcom_clean.lua`:
 | `5700ee52bcd652c85a2fe5f4e32d830208f72db3` | `feat(halloween): add Auto Boss (Pumpkin King)` | Added `HalloweenBossManager` (portal-seal detection, arena melee, cannon phase, exit portal), `Auto Boss` / `Repeat Boss Runs` toggles, Rank-1 priority task with non-interference lock. |
 | `215216a96da8c33db210b6cdef910a1d1b24b4dd` | `fix(anti-cheat): resolve CODE BAC-10518` | Removed `VirtualInputManager`, eliminated ProximityPrompt property mutation, stopped recurring constraint destruction, protected `RagdollEndTime`, and sanitized cannon/combat payloads. |
 | `c9ba9da5381ce70cf1842fefd04d67d7219c306a` | `fix(steal): restore 4-phase delivery pipeline` | Restored hop-drop-regrab boundary checkpoint ($X = 600.2$), 45-stud corridor micro-hops, dual holding detection (`EggState` + GUI), and eliminated 450-stud base teleport & treadmill anchoring. |
+| `edf23532509cd58510152fad819eb5aba89f312d` | `refactor(boss): event-scoped completion & auto-repeat` | Removed Repeat Boss Runs toggle; scoped completion to current event; King disappearance triggers immediate arena exit; ignores lingering open portal until it closes, automatically re-arming for next event. |

@@ -229,7 +229,7 @@ getgenv().config.ghostTarget = currentSettings.GhostTarget or "Rarest First"
 getgenv().config.autoTradeSouls = currentSettings.AutoTradeSouls == true
 getgenv().config.autoBuyHalloweenEgg = currentSettings.AutoBuyHalloweenEgg == true
 
-local HalloweenPortalManager, HalloweenAreaManager, HalloweenCombatManager, HalloweenPumpkinManager, HalloweenStealManager, HalloweenBossManager, GhostDogManager, HalloweenFishingManager, PhantomExpressManager, GhoulerBossManager, PriorityManager, getBestEgg, DynamicRarityResolver, activeTheme, Window
+local HalloweenPortalManager, HalloweenAreaManager, HalloweenCombatManager, HalloweenPumpkinManager, HalloweenStealManager, HalloweenBossManager, GhostDogManager, HalloweenFishingManager, PhantomExpressManager, GhoulerBossManager, SoulTradeManager, PriorityManager, getBestEgg, DynamicRarityResolver, activeTheme, Window
 
 local State = {
     currentStealSession = 0,
@@ -1601,7 +1601,6 @@ local function isInsideBoundingBox(worldPos, part)
     local localPoint = part.CFrame:PointToObjectSpace(worldPos)
     local halfSize = part.Size / 2
     return math.abs(localPoint.X) <= halfSize.X
-       and math.abs(localPoint.Y) <= (halfSize.Y + 20) -- generous Y tolerance for terrain slopes
        and math.abs(localPoint.Z) <= halfSize.Z
 end
 
@@ -1610,7 +1609,7 @@ function HalloweenAreaManager.NormalizeName(rawName)
     if not rawName then return "Unknown Area" end
     local lower = string.lower(tostring(rawName)):gsub("[^%w]", "")
 
-    if lower:find("graveyard") or lower:find("zone1") then
+    if lower:find("graveyard") or lower:find("zone1") or lower:find("cemetery") then
         return HalloweenAreaManager.CanonicalNames.Zone1
     elseif lower:find("swamp") or lower:find("hauntedswamp") or lower:find("zone2") then
         return HalloweenAreaManager.CanonicalNames.Zone2
@@ -1621,17 +1620,29 @@ function HalloweenAreaManager.NormalizeName(rawName)
     return tostring(rawName)
 end
 
--- Locates and binds the 3 master bounding box parts directly from Workspace
+-- Locates and binds the master zone parts directly from HalloweenDimension.Zones
 function HalloweenAreaManager:InitMasterBoundaries()
     table.clear(self.MasterBoundaries)
     local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
     if not dim then return false end
 
-    for _, desc in ipairs(dim:GetDescendants()) do
-        if desc:IsA("BasePart") and desc.Size.X > 500 then
-            local clean = self.NormalizeName(desc.Name)
-            if clean == self.CanonicalNames.Zone1 or clean == self.CanonicalNames.Zone2 or clean == self.CanonicalNames.Zone3 then
-                self.MasterBoundaries[clean] = desc
+    local zonesFolder = dim:FindFirstChild("Zones")
+    if zonesFolder then
+        local z1 = zonesFolder:FindFirstChild("Zone1") or zonesFolder:FindFirstChild("Graveyard")
+        local z2 = zonesFolder:FindFirstChild("Zone2") or zonesFolder:FindFirstChild("Haunted Swamps") or zonesFolder:FindFirstChild("Swamps")
+        local z3 = zonesFolder:FindFirstChild("Zone3") or zonesFolder:FindFirstChild("Abandoned Manor") or zonesFolder:FindFirstChild("Manor")
+        if z1 and z1:IsA("BasePart") then self.MasterBoundaries[self.CanonicalNames.Zone1] = z1 end
+        if z2 and z2:IsA("BasePart") then self.MasterBoundaries[self.CanonicalNames.Zone2] = z2 end
+        if z3 and z3:IsA("BasePart") then self.MasterBoundaries[self.CanonicalNames.Zone3] = z3 end
+    end
+
+    if not self.MasterBoundaries[self.CanonicalNames.Zone1] or not self.MasterBoundaries[self.CanonicalNames.Zone2] or not self.MasterBoundaries[self.CanonicalNames.Zone3] then
+        for _, desc in ipairs(dim:GetDescendants()) do
+            if desc:IsA("BasePart") then
+                local clean = self.NormalizeName(desc.Name)
+                if (clean == self.CanonicalNames.Zone1 or clean == self.CanonicalNames.Zone2 or clean == self.CanonicalNames.Zone3) and not self.MasterBoundaries[clean] then
+                    self.MasterBoundaries[clean] = desc
+                end
             end
         end
     end
@@ -1652,7 +1663,7 @@ function HalloweenAreaManager:GetArea(eggOrPosition)
     if typeof(eggOrPosition) == "Vector3" then
         targetPos = eggOrPosition
     elseif typeof(eggOrPosition) == "Instance" then
-        zoneAttr = eggOrPosition:GetAttribute("Zone") or eggOrPosition:GetAttribute("AreaId")
+        zoneAttr = eggOrPosition:GetAttribute("Zone") or eggOrPosition:GetAttribute("AreaId") or eggOrPosition:GetAttribute("Area")
         if eggOrPosition:IsA("Model") then
             targetPos = eggOrPosition:GetPivot().Position
         elseif eggOrPosition:IsA("BasePart") then
@@ -1660,37 +1671,56 @@ function HalloweenAreaManager:GetArea(eggOrPosition)
         end
     end
 
-    -- 1. Check primary master bounding box parts (Point-In-Part)
+    -- 1. Check primary master bounding box parts (Descending order Zone3 -> Zone2 -> Zone1 matching hot.lua)
     if targetPos then
-        for canonicalName, boundPart in pairs(self.MasterBoundaries) do
-            if isInsideBoundingBox(targetPos, boundPart) then
-                return canonicalName
-            end
+        if self.MasterBoundaries[self.CanonicalNames.Zone3] and isInsideBoundingBox(targetPos, self.MasterBoundaries[self.CanonicalNames.Zone3]) then
+            return self.CanonicalNames.Zone3
+        end
+        if self.MasterBoundaries[self.CanonicalNames.Zone2] and isInsideBoundingBox(targetPos, self.MasterBoundaries[self.CanonicalNames.Zone2]) then
+            return self.CanonicalNames.Zone2
+        end
+        if self.MasterBoundaries[self.CanonicalNames.Zone1] and isInsideBoundingBox(targetPos, self.MasterBoundaries[self.CanonicalNames.Zone1]) then
+            return self.CanonicalNames.Zone1
         end
     end
 
     -- 2. Check the game's official server Zone attribute
-    if type(zoneAttr) == "number" then
-        if zoneAttr == 1 then return self.CanonicalNames.Zone1 end
-        if zoneAttr == 2 then return self.CanonicalNames.Zone2 end
-        if zoneAttr == 3 then return self.CanonicalNames.Zone3 end
+    if zoneAttr then
+        local zNum = tonumber(zoneAttr)
+        if zNum == 1 or zoneAttr == "Zone1" then return self.CanonicalNames.Zone1 end
+        if zNum == 2 or zoneAttr == "Zone2" then return self.CanonicalNames.Zone2 end
+        if zNum == 3 or zoneAttr == "Zone3" then return self.CanonicalNames.Zone3 end
     end
 
-    -- 3. Fallback: Distance to master boundary part centers
-    if targetPos and next(self.MasterBoundaries) ~= nil then
-        local closestArea = "Unknown Area"
-        local minDistance = math.huge
-        for canonicalName, boundPart in pairs(self.MasterBoundaries) do
-            local dist = (Vector3.new(targetPos.X, 0, targetPos.Z) - Vector3.new(boundPart.Position.X, 0, boundPart.Position.Z)).Magnitude
-            if dist < minDistance then
-                minDistance = dist
-                closestArea = canonicalName
+    -- 3. Check instance name or location keyword
+    if typeof(eggOrPosition) == "Instance" then
+        local rawName = tostring(eggOrPosition:GetAttribute("PreparedSourceName") or eggOrPosition:GetAttribute("Location") or eggOrPosition.Name):lower()
+        if rawName:find("manor") or rawName:find("abandoned") then
+            return self.CanonicalNames.Zone3
+        elseif rawName:find("swamp") then
+            return self.CanonicalNames.Zone2
+        elseif rawName:find("graveyard") or rawName:find("cemetery") then
+            return self.CanonicalNames.Zone1
+        end
+    end
+
+    -- 4. Distance heuristic fallback relative to SafeZone
+    if targetPos then
+        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+        local safeZone = dim and dim:FindFirstChild("Zones") and dim.Zones:FindFirstChild("SafeZone")
+        if safeZone and safeZone:IsA("BasePart") then
+            local dist = (Vector3.new(targetPos.X, 0, targetPos.Z) - Vector3.new(safeZone.Position.X, 0, safeZone.Position.Z)).Magnitude
+            if dist <= 550 then
+                return self.CanonicalNames.Zone1
+            elseif dist >= 1200 then
+                return self.CanonicalNames.Zone3
+            else
+                return self.CanonicalNames.Zone2
             end
         end
-        return closestArea
     end
 
-    return "Unknown Area"
+    return self.CanonicalNames.Zone1
 end
 
 -- Scans all active eggs in WorldEggs and groups them by canonical area
@@ -2355,34 +2385,24 @@ getgenv().DynamicRarityResolver = DynamicRarityResolver
 -- [ HALLOWEEN DIMENSION: HEADLESS INSTANT STEAL SERVICE (MODERNIZED) ]
 -- ==============================================================================
 HalloweenStealManager = {
+    CONFIG = {
+        StepDistance = 40,
+        StepDelay = 0.025,
+        NaturalWalkSpeed = 26,
+        GateSearchRadius = 130.0,
+        OriginSettleTime = 0.4,
+        GraveyardDeliverDelay = 1.5,
+        GraveyardMaxDistance = 550.0,
+        ManorMinDistance = 1200.0,
+        TargetZoneNumber = 3,
+        TargetAreaKeyword = "manor"
+    },
     IsActive = false,
     CurrentSession = 0,
     CachedCarryRemote = nil,
     CachedDropRemote = nil,
     LastGrabbedUid = nil,
-    LastGrabbedEgg = nil,
-
-    CONFIG = {
-        -- Stepped transit distance across the map (studs per step)
-        StepDistance = 40,
-        StepDelay = 0.025,
-
-        -- Speed when walking from the gate into the SafeZone (natural run speed)
-        NaturalWalkSpeed = 26,
-
-        -- Radius to locate the dropped egg near the gate (expanded for physics rolls)
-        GateSearchRadius = 130.0,
-
-        -- Settle delay after regrabbing distant eggs (Manor/Swamp)
-        OriginSettleTime = 0.4,
-
-        -- Pacing delay for Graveyard eggs before crossing the delivery line
-        GraveyardDeliverDelay = 1.5,
-
-        -- Zone boundary parameters
-        GraveyardMaxDistance = 550.0,
-        ManorMinDistance = 1200.0
-    }
+    LastGrabbedEgg = nil
 }
 
 -- Resolves the server RemoteFunction for picking up an egg
@@ -2457,10 +2477,15 @@ function HalloweenStealManager:InteractPrompt(target)
         prompt.RequiresLineOfSight = false
         prompt.MaxActivationDistance = 45
         prompt.HoldDuration = 0
-        if typeof(fireproximityprompt) == "function" then
+        if UniversalCompat and UniversalCompat.FireProximityPrompt then
+            UniversalCompat.FireProximityPrompt(prompt)
+        elseif typeof(fireproximityprompt) == "function" then
             fireproximityprompt(prompt, 0)
         else
-            UniversalCompat.FireProximityPrompt(prompt)
+            pcall(function()
+                prompt:InputHoldBegin()
+                prompt:InputHoldEnd()
+            end)
         end
         return true
     end
@@ -2741,20 +2766,24 @@ function HalloweenStealManager:SelectTargetEgg()
                 end
 
                 if rarityPass then
-                    -- 3. Priority Scoring (Highest rank, scale & base value)
-                    local score = 0
-                    if DynamicRarityResolver and DynamicRarityResolver.GetEggScore then
-                        score = DynamicRarityResolver:GetEggScore(egg)
-                    end
-                    local pivot = egg:IsA("Model") and egg:GetPivot().Position or egg.Position
-                    local dist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(pivot.X, 0, pivot.Z)).Magnitude
+                    -- 3. Prompt availability check
+                    local prompt = egg:FindFirstChildWhichIsA("ProximityPrompt", true)
+                    local hasPrompt = (prompt ~= nil and prompt.Enabled) or true
 
-                    -- Tie-breaker: prefer closer egg if score is identical
-                    local finalScore = score - (dist * 0.1)
+                    if hasPrompt then
+                        local score = 0
+                        if DynamicRarityResolver and DynamicRarityResolver.GetEggScore then
+                            score = DynamicRarityResolver:GetEggScore(egg)
+                        end
+                        local pivot = egg:IsA("Model") and egg:GetPivot().Position or egg.Position
+                        local dist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(pivot.X, 0, pivot.Z)).Magnitude
 
-                    if finalScore > bestScore then
-                        bestScore = finalScore
-                        bestEgg = egg
+                        local finalScore = score - (dist * 0.1)
+
+                        if finalScore > bestScore then
+                            bestScore = finalScore
+                            bestEgg = egg
+                        end
                     end
                 end
             end
@@ -2788,6 +2817,11 @@ function HalloweenStealManager:RunCompleteStealCycle(targetEgg, session)
 
         local grabStart = os.clock()
         while (os.clock() - grabStart) < 2.5 and not self:IsCarryingEgg() do
+            local _, curRoot = getAliveRig()
+            if curRoot then
+                curRoot.CFrame = CFrame.new(eggPos.X, eggPos.Y + 2.0, eggPos.Z)
+            end
+
             self:InteractPrompt(targetEgg)
             if carryRemote and eggUid ~= "" then
                 pcall(function() carryRemote:InvokeServer(eggUid) end)
@@ -2821,6 +2855,7 @@ function HalloweenStealManager:RunCompleteStealCycle(targetEgg, session)
 
     -- STAGE 3: ORIGIN RESET (OR GRAVEYARD SETTLE)
     if fromGraveyard then
+        -- WORKFLOW B: Graveyard Eggs (NO DROP, NO REGRAB, 1.5s delay)
         local _, curRoot = getAliveRig()
         if curRoot then
             curRoot.AssemblyLinearVelocity = Vector3.zero
@@ -2828,7 +2863,7 @@ function HalloweenStealManager:RunCompleteStealCycle(targetEgg, session)
         end
         task.wait(self.CONFIG.GraveyardDeliverDelay)
     else
-        -- Distant egg origin reset
+        -- WORKFLOW A: Haunted Swamps & Abandoned Manor (DROP AND REGRAB MANDATORY)
         if dropRemote then
             pcall(function() dropRemote:InvokeServer() end)
         end
@@ -4410,29 +4445,51 @@ function PhantomExpressManager:Board()
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root or not hum then return false end
 
-    -- If a physical ticket tool exists, equip it into hands before boarding
-    if ticketTool and hum and ticketTool.Parent ~= char then
-        pcall(function() hum:EquipTool(ticketTool) end)
-        task.wait(0.3)
+    -- Station Summon: if train is not docked at station, call it
+    local state = self:GetState()
+    if state and not state.AtStation then
+        invokeRemote("RF/TrainEvent/Action", "Station")
+        task.wait(3.0)
     end
 
     local boardPrompt = self:FindPrompt("Name", "TrainBoard")
     if not boardPrompt then return false end
 
-    local part = boardPrompt.Parent
-    if part and part:IsA("BasePart") then
-        local targetPos = part.Position + Vector3.new(0, 3, 0)
-        local startAttr = boardPrompt:GetAttribute("BoardRailStart")
-        local endAttr = boardPrompt:GetAttribute("BoardRailEnd")
-        if typeof(startAttr) == "Vector3" and typeof(endAttr) == "Vector3" then
-            targetPos = (startAttr + endAttr) * 0.5 + Vector3.new(0, 3, 0)
-        end
+    -- Rail Line Projection Approach (Matching hot.lua J(L, "BoardRailStart", "BoardRailEnd"))
+    local targetPos = nil
+    local startAttr = boardPrompt:GetAttribute("BoardRailStart")
+    local endAttr = boardPrompt:GetAttribute("BoardRailEnd")
+    if typeof(startAttr) == "Vector3" and typeof(endAttr) == "Vector3" then
+        local seg = endAttr - startAttr
+        local segMagSq = seg:Dot(seg)
+        local t = (segMagSq > 0) and math.clamp((root.Position - startAttr):Dot(seg) / segMagSq, 0, 1) or 0
+        targetPos = startAttr + seg * t + Vector3.new(0, 3, 0)
+    elseif boardPrompt.Parent and boardPrompt.Parent:IsA("BasePart") then
+        targetPos = boardPrompt.Parent.Position + Vector3.new(0, 3, 0)
+    end
+
+    if targetPos then
         if GhostDogManager and GhostDogManager.MoveTo then
             GhostDogManager:MoveTo(targetPos, 8.0)
+        else
+            root.CFrame = CFrame.new(targetPos)
         end
     end
 
+    -- If a physical ticket tool exists and permanent access not unlocked, equip it into hands
+    local accessUnlocked = false
+    local tState = self:GetState()
+    if type(tState) == "table" and tState.AccessUnlocked == true then
+        accessUnlocked = true
+    end
+    if not accessUnlocked and ticketTool and hum and ticketTool.Parent ~= char then
+        pcall(function() hum:EquipTool(ticketTool) end)
+        task.wait(0.4)
+    end
+
     -- Trigger proximity prompt
+    boardPrompt.HoldDuration = 0
+    boardPrompt.RequiresLineOfSight = false
     UniversalCompat.FireProximityPrompt(boardPrompt)
     task.wait(0.2)
 
@@ -4592,64 +4649,29 @@ function PhantomExpressManager:Process()
         return
     end
 
-    -- Phase 2: Operations inside Forgotten Town
+    -- Phase 2: Operations inside Forgotten Town until departure
     local townStart = os.clock()
     local maxTownDuration = 180 -- safety timeout (3 mins)
 
     while self:IsInTown() and (os.clock() - townStart) < maxTownDuration do
         if isHalloweenMapClosed() then break end
-
-        -- Retain active task lock throughout entire stay in town
         PriorityManager:Acquire("Train", 30.0)
 
-        local processedAction = false
+        local state = self:GetState()
+        local dep = state and tonumber(state.DepartureAt)
+        local now = Services.Workspace:GetServerTimeNow()
 
-        -- 1. Ghouler Boss combat (if autoVacuum is enabled)
-        if getgenv().config.autoVacuum and GhoulerBossManager then
-            local ghouler = GhoulerBossManager:GetGhoulerBoss()
-            if ghouler then
-                GhoulerBossManager:ProcessBoss(ghouler)
-                processedAction = true
-            end
+        -- If train departure is approaching (<= 6s left) or expired
+        if dep and (now >= dep - 6 or dep <= now) then
+            self:ReturnHome()
+            break
         end
 
-        -- 2. Invasion Ghosts vacuuming with 16-point orbit (if autoVacuum is enabled and not fighting boss)
-        if not processedAction and getgenv().config.autoVacuum and GhoulerBossManager then
-            local ghost = GhoulerBossManager:GetBestGhost()
-            if ghost then
-                GhoulerBossManager:CaptureActiveGhost(ghost)
-                processedAction = true
-            end
-        end
-
-        -- 3. If no active combat / ghosts: check departure or trade souls
-        if not processedAction then
-            local state = self:GetState()
-            local dep = state and tonumber(state.DepartureAt)
-            local now = Services.Workspace:GetServerTimeNow()
-
-            -- If train departure is approaching (<= 8s left) or expired
-            if dep and (now >= dep - 8 or dep <= now) then
-                if getgenv().config.autoTradeSouls then
-                    self:TradeSouls()
-                end
-                self:ReturnHome()
-                break
-            elseif getgenv().config.autoTradeSouls then
-                self:TradeSouls()
-            end
-
-            task.wait(0.5)
-        else
-            Services.RunService.Heartbeat:Wait()
-        end
+        task.wait(0.5)
     end
 
     -- Safety check: return home if town phase ended or timed out
     if self:IsInTown() then
-        if getgenv().config.autoTradeSouls then
-            self:TradeSouls()
-        end
         self:ReturnHome()
     end
 
@@ -4790,17 +4812,39 @@ function GhoulerBossManager:CalculateOptimalVacuumPosition(ghostPos, currentProg
     return bestPosition or (ghostPos + Vector3.new(0, 0, orbitRadius))
 end
 
+function GhoulerBossManager:EquipVacuum(forBoss)
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local vac = self:GetGhostVacuum(forBoss)
+    if vac and hum and vac.Parent ~= char then
+        pcall(function() hum:EquipTool(vac) end)
+        local waitEquip = os.clock() + 1.5
+        while os.clock() < waitEquip and vac.Parent ~= char do
+            Services.RunService.Heartbeat:Wait()
+        end
+    end
+    return vac
+end
+
 function GhoulerBossManager:CaptureActiveGhost(ghost)
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not ghost or not root then return end
 
+    -- HARD GATE: Obtain vacuum if not owned, and wait up to 3s
     local vac = self:GetGhostVacuum(false)
     if not vac then
         self:PickupVacuum()
-        vac = self:GetGhostVacuum(false)
+        local start = os.clock()
+        while (os.clock() - start) < 3.0 and not self:GetGhostVacuum(false) do
+            Services.RunService.Heartbeat:Wait()
+        end
+        return -- HALT! DO NOT RUN CAPTURE LOGIC WITH EMPTY HANDS!
     end
+
+    -- HELD VERIFICATION: Verify that vacuum is held in hand before suction/orbit
     self:EquipVacuum(false)
+    if not vac or vac.Parent ~= char then return end
 
     local ghostPivot = ghost:IsA("PVInstance") and ghost or ghost:FindFirstChildWhichIsA("BasePart")
     if not ghostPivot then return end
@@ -4828,15 +4872,25 @@ function GhoulerBossManager:CaptureActiveGhost(ghost)
 end
 
 function GhoulerBossManager:ProcessBoss(ghouler)
-    local _, root, hum = getAliveRig()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not root or not hum then return end
 
+    -- HARD GATE: Obtain boss vacuum if not owned
     local vac = self:GetGhostVacuum(true)
     if not vac then
         self:PickupVacuum()
-        vac = self:GetGhostVacuum(true)
+        local start = os.clock()
+        while (os.clock() - start) < 3.0 and not self:GetGhostVacuum(true) do
+            Services.RunService.Heartbeat:Wait()
+        end
+        return -- HALT! DO NOT FIGHT BOSS WITH EMPTY HANDS!
     end
+
+    -- HELD VERIFICATION: Verify held
     self:EquipVacuum(true)
+    if not vac or vac.Parent ~= char then return end
 
     local groundPos = ghouler:GetAttribute("Ground")
     if typeof(groundPos) == "Vector3" then
@@ -4878,6 +4932,83 @@ function GhoulerBossManager:Abort()
     self.IsActive = false
     PriorityManager:Release("Vacuum")
 end
+
+-- ==============================================================================
+-- [ STANDALONE AUTO SOUL TRADE IN MANAGER ]
+-- ==============================================================================
+local SoulTradeManager = {
+    IsActive = false,
+    LastTradeDeparture = nil
+}
+
+function SoulTradeManager:HasWork()
+    if not getgenv().config.autoTradeSouls then return false end
+    if isHalloweenMapClosed() then return false end
+    if not PhantomExpressManager or not PhantomExpressManager:IsInTown() then return false end
+
+    local state = PhantomExpressManager:GetState()
+    local soulShop = type(state) == "table" and state.SoulShop or nil
+    if type(soulShop) == "table" and soulShop.CanTrade == true then
+        local souls = tonumber(soulShop.Souls) or 0
+        local cost = tonumber(soulShop.Cost) or 1/0
+        return souls >= cost
+    end
+    return false
+end
+
+function SoulTradeManager:TradeSouls()
+    local shopPrompt = PhantomExpressManager and (PhantomExpressManager:FindPrompt("TrainEventAction", "OpenSoulShop") or PhantomExpressManager:FindPrompt("Name", "OpenSoulShop"))
+    if shopPrompt and shopPrompt.Parent and shopPrompt.Parent:IsA("BasePart") then
+        local _, root = getAliveRig()
+        if root and (root.Position - shopPrompt.Parent.Position).Magnitude > 15 then
+            if GhostDogManager and GhostDogManager.MoveTo then
+                GhostDogManager:MoveTo(shopPrompt.Parent.Position + Vector3.new(0, 3, 0), 6.0)
+            end
+        end
+        UniversalCompat.FireProximityPrompt(shopPrompt)
+        task.wait(0.3)
+    end
+
+    local sOk, sRes = invokeRemote("RF/TrainEvent/Action", "OpenSoulShop")
+    local soulShop = (sOk and type(sRes) == "table" and sRes.SoulShop) or nil
+    if not soulShop and PhantomExpressManager then
+        local state = PhantomExpressManager:GetState(true)
+        soulShop = type(state) == "table" and state.SoulShop or nil
+    end
+
+    if type(soulShop) == "table" and soulShop.CanTrade then
+        local currentSouls = tonumber(soulShop.Souls) or 0
+        local cost = tonumber(soulShop.Cost) or 100
+
+        for _ = 1, 50 do
+            if currentSouls < cost then break end
+            local tOk, tRes = invokeRemote("RF/TrainEvent/Action", "TradeSouls", cost)
+            if not tOk or tRes == false then break end
+
+            if type(tRes) == "table" and tRes.Souls ~= nil then
+                currentSouls = tonumber(tRes.Souls) or 0
+            else
+                currentSouls = currentSouls - cost
+            end
+            task.wait(0.3)
+        end
+    end
+end
+
+function SoulTradeManager:Process()
+    if self.IsActive then return end
+    self.IsActive = true
+
+    if PriorityManager then PriorityManager:Acquire("Train", 15.0) end
+    pcall(function() self:TradeSouls() end)
+    self.IsActive = false
+    if PriorityManager then PriorityManager:Release("Train") end
+end
+
+function SoulTradeManager:Abort()
+    self.IsActive = false
+end
+
 -- [ TASK PRIORITY ARBITRATOR ]
 -- ==============================================================================
 PriorityManager = {
@@ -4888,6 +5019,7 @@ PriorityManager = {
         "Auto Ghost Dog",
         "Auto Train",
         "Auto Vacuum",
+        "Auto Soul Trade In",
         "Auto Steal",
         "Candy Cane Farm",
         "Auto Pumpkin",
@@ -4919,6 +5051,11 @@ PriorityManager = {
         ["GhoulerBoss"] = "Auto Vacuum",
         ["Auto Vacuum Ghouler Boss"] = "Auto Vacuum",
         ["Auto Vacuum"] = "Auto Vacuum",
+        ["SoulTradeIn"] = "Auto Soul Trade In",
+        ["AutoSoulTradeIn"] = "Auto Soul Trade In",
+        ["Auto Soul Trade In"] = "Auto Soul Trade In",
+        ["Soul Trade"] = "Auto Soul Trade In",
+        ["SoulTrade"] = "Auto Soul Trade In",
         ["CandyCane"] = "Candy Cane Farm",
         ["Candy Cane Farm"] = "Candy Cane Farm",
         ["Auto Candy Cane"] = "Candy Cane Farm",
@@ -5035,7 +5172,7 @@ function PriorityManager:GetTaskDimension(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
     if resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Halloween Steal" 
        or resolved == "Auto Ghost Dog" or resolved == "Auto Train" or resolved == "Auto Vacuum" 
-       or resolved == "Auto Fishing" or resolved == "Auto Buy Halloween Egg" then
+       or resolved == "Auto Fishing" or resolved == "Auto Buy Halloween Egg" or resolved == "Auto Soul Trade In" then
         return "Halloween"
     elseif resolved == "Auto Steal" or resolved == "Enchanted / Bloom Event" or resolved == "Auto Treadmill" then
         return "Normal"
@@ -5056,6 +5193,8 @@ function PriorityManager:IsTaskEnabled(taskName)
         return getgenv().config.autoTrain == true and not isHalloweenMapClosed()
     elseif resolved == "Auto Vacuum" then
         return getgenv().config.autoVacuum == true and not isHalloweenMapClosed()
+    elseif resolved == "Auto Soul Trade In" then
+        return getgenv().config.autoTradeSouls == true and not isHalloweenMapClosed()
     elseif resolved == "Auto Steal" then
         return isStealEnabled() and not isMapClosed()
     elseif resolved == "Halloween Steal" then
@@ -5067,7 +5206,7 @@ function PriorityManager:IsTaskEnabled(taskName)
     elseif resolved == "Auto Fishing" then
         return getgenv().config.autoFishing == true and not isHalloweenMapClosed()
     elseif resolved == "Auto Buy Halloween Egg" then
-        return getgenv().config.autoBuyHalloweenEgg == true and not isHalloweenMapClosed()
+        return getgenv().config.autoBuyHalloweenEgg == true
     elseif resolved == "Enchanted / Bloom Event" then
         return (getgenv().config.autoCatchButterfly == true or getgenv().config.autoWispQuest == true or getgenv().config.autoTradeUp == true or getgenv().config.autoCraftEssence == true) and not isMapClosed()
     elseif resolved == "Auto Upgrades" then
@@ -5092,6 +5231,9 @@ function PriorityManager:HasWork(taskName)
 
     elseif resolved == "Auto Vacuum" then
         return GhoulerBossManager ~= nil and GhoulerBossManager:HasWork()
+
+    elseif resolved == "Auto Soul Trade In" then
+        return SoulTradeManager ~= nil and SoulTradeManager:HasWork()
 
     elseif resolved == "Auto Steal" then
         if isMapClosed() or not isStealEnabled() then return false end
@@ -5148,7 +5290,7 @@ function PriorityManager:HasWork(taskName)
         return HalloweenFishingManager ~= nil and HalloweenFishingManager:HasWork()
 
     elseif resolved == "Auto Buy Halloween Egg" then
-        if isHalloweenMapClosed() or getgenv().config.autoBuyHalloweenEgg ~= true then return false end
+        if getgenv().config.autoBuyHalloweenEgg ~= true then return false end
         local inHalloween = HalloweenPortalManager and HalloweenPortalManager.IsInHalloweenDimension()
         return inHalloween and (os.clock() >= (State.halloweenEggBuyCooldown or 0))
 
@@ -6410,17 +6552,33 @@ WorkerScheduler:Register("PhantomExpress", 0.2, function()
 end)
 
 WorkerScheduler:Register("GhoulerBoss", 0.05, function()
-    -- GhoulerBoss and PhantomExpress are unified under the town processing loop.
-    -- If player is in town and not yet active, ensure town operations run.
     if not getgenv().config.autoVacuum or isHalloweenMapClosed() then return end
     if not PhantomExpressManager:IsInTown() then return end
     if not PriorityManager:CanRun("Train") then return end
 
-    pcall(function() PhantomExpressManager:Process() end)
+    if GhoulerBossManager then
+        local ghouler = GhoulerBossManager:GetGhoulerBoss()
+        if ghouler then
+            GhoulerBossManager:ProcessBoss(ghouler)
+        else
+            local ghost = GhoulerBossManager:GetBestGhost()
+            if ghost then
+                GhoulerBossManager:CaptureActiveGhost(ghost)
+            end
+        end
+    end
+end)
+
+WorkerScheduler:Register("SoulTradeIn", 0.25, function()
+    if not getgenv().config.autoTradeSouls or isHalloweenMapClosed() then return end
+    if not SoulTradeManager or not SoulTradeManager:HasWork() then return end
+    if not PriorityManager:CanRun("Train") then return end
+
+    pcall(function() SoulTradeManager:Process() end)
 end)
 
 WorkerScheduler:Register("AutoBuyHalloweenEgg", 1.5, function()
-    if not getgenv().config.autoBuyHalloweenEgg or isHalloweenMapClosed() then return end
+    if not getgenv().config.autoBuyHalloweenEgg then return end
     if not HalloweenPortalManager.IsInHalloweenDimension() then return end
     if not PriorityManager:CanRun("BuyHalloweenEgg") then return end
 
@@ -6833,10 +6991,13 @@ halloweenCategory:CreateDropdown("Ghost Target Mode", "Targeting hierarchy for i
     saveStuff()
 end)
 
-halloweenCategory:CreateToggle("Auto Trade Souls", "Auto trade collected souls at Soul Shop", currentSettings.AutoTradeSouls, function(state)
+halloweenCategory:CreateToggle("Auto Soul Trade In", "Auto trade collected souls at Soul Shop", currentSettings.AutoTradeSouls, function(state)
     getgenv().config.autoTradeSouls = state
     currentSettings.AutoTradeSouls = state
     saveStuff()
+    if not state and SoulTradeManager and SoulTradeManager.Abort then
+        SoulTradeManager:Abort()
+    end
 end)
 
 halloweenCategory:CreateToggle("Auto Buy Halloween Egg", "Auto buy seasonal eggs in Halloween Dimension", currentSettings.AutoBuyHalloweenEgg, function(state)

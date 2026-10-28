@@ -143,14 +143,11 @@ local currentSettings = {
     AutoBuyHalloweenEgg = false,
     TaskPriorities = {
         "Auto Boss",
-        "Auto Train",
         "Auto Steal",
-        "Auto Ghost Dog",
-        "Auto Pumpkin",
-        "Auto Fishing",
         "Candy Cane Farm",
-        "Halloween Steal",
+        "Auto Pumpkin",
         "Enchanted / Bloom Event",
+        "Auto Upgrades",
         "Auto Treadmill"
     }
 }
@@ -1384,32 +1381,7 @@ HalloweenPortalManager = {}
 local HALLOWEEN_DIM_CENTER = Vector3.new(-5808, -200, -7376)
 local HALLOWEEN_RADIUS = 2500
 
-function HalloweenPortalManager.GetCurrentRealm()
-    local char = LocalPlayer.Character
-    local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
-    if not root then return "Unknown" end
-
-    -- 1. Forgotten Town check (Train Event)
-    local inTown = LocalPlayer:GetAttribute("TrainEventInForgottenTown") == true
-                or LocalPlayer:GetAttribute("Realm") == "Town"
-                or (root and root:GetAttribute("Realm") == "Town")
-                or Services.Workspace:FindFirstChild("TrainGhostVisuals") ~= nil
-    if inTown then return "Town" end
-
-    -- 2. Boss Arena check (Pumpkin King)
-    local arena = Services.Workspace:FindFirstChild("PumpkinArena", true)
-    if arena and root:IsDescendantOf(arena) then return "Arena" end
-
-    -- 3. Halloween Dimension check
-    if isInHalloweenDimension() then return "Halloween" end
-
-    -- 4. Default: Normal Simulator World
-    return "Normal"
-end
-
 function HalloweenPortalManager.IsInHalloweenDimension()
-    local realm = HalloweenPortalManager.GetCurrentRealm()
-    if realm == "Town" or realm == "Arena" then return false end
     return isInHalloweenDimension()
 end
 
@@ -4107,8 +4079,7 @@ function PhantomExpressManager:FindPrompt(attrName, attrVal)
 end
 
 function PhantomExpressManager:HasWork()
-    if isHalloweenMapClosed() then return false end
-    if not (getgenv().config.autoTrain == true or getgenv().config.autoVacuum == true) then return false end
+    if getgenv().config.autoTrain ~= true or isHalloweenMapClosed() then return false end
     if self:IsInTown() then return true end
     if not self:HasTicket() then return false end
     local state = self:GetState()
@@ -4135,22 +4106,6 @@ function PhantomExpressManager:Board()
         end
         if GhostDogManager and GhostDogManager.MoveTo then
             GhostDogManager:MoveTo(targetPos, 8.0)
-        end
-    end
-
-    -- Ensure Conductor Ticket is equipped if physical tool
-    local char = LocalPlayer.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-    for _, c in ipairs({bp, char}) do
-        if c then
-            for _, item in ipairs(c:GetChildren()) do
-                if item:IsA("Tool") and (item:GetAttribute("ConductorTicket") == true or item.Name:lower():find("conductorticket")) then
-                    if item.Parent ~= char and hum then pcall(function() hum:EquipTool(item) end) end
-                    task.wait(0.2)
-                    break
-                end
-            end
         end
     end
 
@@ -4188,73 +4143,10 @@ end
 function PhantomExpressManager:Process()
     if self.IsActive then return end
     self.IsActive = true
-    PriorityManager:Acquire("Train", 60.0)
+    PriorityManager:Acquire("Train", 30.0)
 
-    -- Phase 1: If outside Forgotten Town, board the Phantom Express
     if not self:IsInTown() then
-        local boarded = self:Board()
-        if not boarded and not self:IsInTown() then
-            self.IsActive = false
-            PriorityManager:Release("Train")
-            return
-        end
-    end
-
-    -- Phase 2: Operations inside Forgotten Town
-    local townStart = os.clock()
-    local maxTownDuration = 180 -- safety timeout (3 mins)
-
-    while self:IsInTown() and (os.clock() - townStart) < maxTownDuration do
-        if isHalloweenMapClosed() then break end
-
-        -- Retain active task lock throughout entire stay in town
-        PriorityManager:Acquire("Train", 30.0)
-
-        -- 1. Ghouler Boss combat & Invasion Ghosts vacuuming
-        local handledCombat = false
-        if getgenv().config.autoVacuum and GhoulerBossManager then
-            local ghouler = GhoulerBossManager:GetGhoulerBoss()
-            if ghouler then
-                GhoulerBossManager:Process()
-                handledCombat = true
-            else
-                local ghosts = GhoulerBossManager:GetInvasionGhosts()
-                if #ghosts > 0 then
-                    GhoulerBossManager:Process()
-                    handledCombat = true
-                end
-            end
-        end
-
-        if not handledCombat then
-            -- 2. Trade Souls if enabled
-            if getgenv().config.autoTradeSouls and GhoulerBossManager then
-                local state = self:GetState()
-                local shop = state and state.SoulShop
-                if type(shop) == "table" and shop.CanTrade and (tonumber(shop.Souls) or 0) >= (tonumber(shop.Cost) or math.huge) then
-                    GhoulerBossManager:TradeSouls()
-                end
-            end
-
-            -- 3. Check departure / return home condition
-            local state = self:GetState()
-            local dep = state and tonumber(state.DepartureAt)
-            local now = Services.Workspace:GetServerTimeNow()
-
-            if dep and (now >= dep - 8 or dep <= now) then
-                self:ReturnHome()
-                break
-            end
-
-            task.wait(0.5)
-        else
-            Services.RunService.Heartbeat:Wait()
-        end
-    end
-
-    -- Safety check: return home if town phase ended or timed out
-    if self:IsInTown() then
-        self:ReturnHome()
+        self:Board()
     end
 
     self.IsActive = false
@@ -4473,14 +4365,16 @@ PriorityManager = {
     ActiveTaskExpiresAt = 0,
     List = {
         "Auto Boss",
-        "Auto Train",
-        "Auto Steal",
         "Auto Ghost Dog",
+        "Auto Train",
+        "Auto Vacuum",
+        "Auto Steal",
+        "Candy Cane Farm",
         "Auto Pumpkin",
         "Auto Fishing",
-        "Candy Cane Farm",
-        "Halloween Steal",
+        "Auto Buy Halloween Egg",
         "Enchanted / Bloom Event",
+        "Auto Upgrades",
         "Auto Treadmill"
     },
     TaskAliases = {
@@ -4531,14 +4425,16 @@ PriorityManager = {
 function PriorityManager:Initialize(savedPriorities)
     local canonicalList = {
         "Auto Boss",
-        "Auto Train",
-        "Auto Steal",
         "Auto Ghost Dog",
+        "Auto Train",
+        "Auto Vacuum",
+        "Auto Steal",
+        "Candy Cane Farm",
         "Auto Pumpkin",
         "Auto Fishing",
-        "Candy Cane Farm",
-        "Halloween Steal",
+        "Auto Buy Halloween Egg",
         "Enchanted / Bloom Event",
+        "Auto Upgrades",
         "Auto Treadmill"
     }
 
@@ -4617,15 +4513,15 @@ end
 
 function PriorityManager:GetTaskDimension(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
-    if resolved == "Auto Boss" then
-        return "Self" -- Autonomous portal and arena navigation
-    elseif resolved == "Auto Train" or resolved == "Auto Vacuum" then
-        return "Train" -- Autonomous multi-realm navigation (Halloween station <-> Forgotten Town)
-    elseif resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Halloween Steal" 
-       or resolved == "Auto Ghost Dog" or resolved == "Auto Fishing" then
+    if resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Halloween Steal" 
+       or resolved == "Auto Ghost Dog" or resolved == "Auto Train" or resolved == "Auto Vacuum" 
+       or resolved == "Auto Fishing" or resolved == "Auto Buy Halloween Egg" then
         return "Halloween"
     elseif resolved == "Auto Steal" or resolved == "Enchanted / Bloom Event" or resolved == "Auto Treadmill" then
         return "Normal"
+    elseif resolved == "Auto Boss" then
+        -- Autonomous navigation (KNOWLEDGE.md 6.5.1 rule 2): supervisor never routes it
+        return "Self"
     end
     return "Any"
 end
@@ -4636,8 +4532,10 @@ function PriorityManager:IsTaskEnabled(taskName)
         return getgenv().config.autoBossEvent == true
     elseif resolved == "Auto Ghost Dog" then
         return getgenv().config.autoGhostDog == true and not isHalloweenMapClosed()
-    elseif resolved == "Auto Train" or resolved == "Auto Vacuum" then
-        return (getgenv().config.autoTrain == true or getgenv().config.autoVacuum == true) and not isHalloweenMapClosed()
+    elseif resolved == "Auto Train" then
+        return getgenv().config.autoTrain == true and not isHalloweenMapClosed()
+    elseif resolved == "Auto Vacuum" then
+        return getgenv().config.autoVacuum == true and not isHalloweenMapClosed()
     elseif resolved == "Auto Steal" then
         return isStealEnabled() and not isMapClosed()
     elseif resolved == "Halloween Steal" then
@@ -4669,12 +4567,11 @@ function PriorityManager:HasWork(taskName)
     elseif resolved == "Auto Ghost Dog" then
         return GhostDogManager ~= nil and GhostDogManager:HasWork()
 
-    elseif resolved == "Auto Train" or resolved == "Auto Vacuum" then
-        if isHalloweenMapClosed() then return false end
-        if not (getgenv().config.autoTrain == true or getgenv().config.autoVacuum == true) then return false end
-        if PhantomExpressManager and PhantomExpressManager:HasWork() then return true end
-        if GhoulerBossManager and GhoulerBossManager:HasWork() then return true end
-        return false
+    elseif resolved == "Auto Train" then
+        return PhantomExpressManager ~= nil and PhantomExpressManager:HasWork()
+
+    elseif resolved == "Auto Vacuum" then
+        return GhoulerBossManager ~= nil and GhoulerBossManager:HasWork()
 
     elseif resolved == "Auto Steal" then
         if isMapClosed() or not isStealEnabled() then return false end
@@ -4819,7 +4716,10 @@ function PriorityManager:CanRun(taskName)
 
     local resolved = self.TaskAliases[taskName] or taskName
 
--- Note: Auto Upgrades is a passive background worker and does not check CanRun
+    -- Independent task: Auto Upgrades never contends for the character
+    if resolved == "Auto Upgrades" then
+        return self:IsTaskEnabled("Auto Upgrades")
+    end
 
     -- If another task holds the character lock, no other task can run
     if self:IsLocked() and self.ActiveTask ~= resolved then
@@ -5971,15 +5871,11 @@ WorkerScheduler:Register("HalloweenFishing", 0.1, function()
 end)
 
 WorkerScheduler:Register("PhantomExpress", 0.2, function()
-    if not (getgenv().config.autoTrain or getgenv().config.autoVacuum) or isHalloweenMapClosed() then
-        PriorityManager:Release("Train")
-        return
-    end
+    if not getgenv().config.autoTrain or isHalloweenMapClosed() then return end
     if not PriorityManager:CanRun("Train") then return end
     if not PhantomExpressManager:HasWork() then return end
 
-    -- If in normal world, enter Halloween dimension first to reach the station
-    if HalloweenPortalManager.GetCurrentRealm() == "Normal" then
+    if not HalloweenPortalManager.IsInHalloweenDimension() and not PhantomExpressManager:IsInTown() then
         if PriorityManager:Acquire("Train", 10.0) then
             HalloweenPortalManager.EnterDimension(5.0)
             PriorityManager:Release("Train")
@@ -5990,20 +5886,18 @@ WorkerScheduler:Register("PhantomExpress", 0.2, function()
     pcall(function() PhantomExpressManager:Process() end)
 end)
 
-WorkerScheduler:Register("GhoulerBoss", 0.1, function()
+WorkerScheduler:Register("GhoulerBoss", 0.05, function()
     if not getgenv().config.autoVacuum or isHalloweenMapClosed() then return end
-    if HalloweenPortalManager.GetCurrentRealm() ~= "Town" then return end
-    -- If Train is actively running, it coordinates GhoulerBoss inside its town loop
-    if PhantomExpressManager and PhantomExpressManager.IsActive then return end
+    if not PriorityManager:CanRun("Vacuum") then return end
     if not GhoulerBossManager:HasWork() then return end
 
     pcall(function() GhoulerBossManager:Process() end)
 end)
 
--- Passive Background Worker: Auto Buy Halloween Egg (never blocks or competes with movement)
 WorkerScheduler:Register("AutoBuyHalloweenEgg", 1.5, function()
     if not getgenv().config.autoBuyHalloweenEgg or isHalloweenMapClosed() then return end
-    if HalloweenPortalManager.GetCurrentRealm() ~= "Halloween" then return end
+    if not HalloweenPortalManager.IsInHalloweenDimension() then return end
+    if not PriorityManager:CanRun("BuyHalloweenEgg") then return end
 
     if os.clock() >= (State.halloweenEggBuyCooldown or 0) then
         State.halloweenEggBuyCooldown = os.clock() + 3.0
@@ -6011,8 +5905,8 @@ WorkerScheduler:Register("AutoBuyHalloweenEgg", 1.5, function()
     end
 end)
 
--- Passive Background Worker: Auto Upgrades (never blocks or competes with movement)
 WorkerScheduler:Register("AutoUpgrades", 6.0, function()
+    if not PriorityManager:CanRun("Upgrades") then return end
     if getgenv().config.autoUpgradeTreadmill then tryUpgradeTreadmill() end
     if getgenv().config.autoUpgradeBase then tryUpgradeBase() end
 end)
@@ -6034,70 +5928,34 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     local char = LocalPlayer.Character
     if not char then return end
 
-    local currentRealm = HalloweenPortalManager.GetCurrentRealm()
-
-    -- 1. Town & Arena Immunity: Features in Forgotten Town or Boss Arena control their own transit
-    if currentRealm == "Town" or currentRealm == "Arena" then
-        return
-    end
-
+    local inHalloween = HalloweenPortalManager.IsInHalloweenDimension()
     local topTask = PriorityManager:GetTopWantedTask()
 
-    -- 2. Autonomous Navigation Features Immunity: Never redirect Auto Boss or Auto Train
-    if topTask == "Auto Boss" or topTask == "Auto Train" then
+    -- Auto Boss owns its own portal/arena navigation: never redirect it (KNOWLEDGE.md 6.5.1)
+    if topTask == "Auto Boss" then
         return
     end
 
-    -- 3. Mutex Lock Immunity: NEVER switch dimensions while a movement task holds character ownership
+    -- Dimension Supervisor: NEVER switch dimensions while character lock is held!
     if PriorityManager:IsLocked() then
         return
     end
 
-    -- 4. Check whether Halloween movement tasks currently have work
-    local hasHalloweenWork = false
-    local halloweenTasks = {"Candy Cane Farm", "Auto Pumpkin", "Halloween Steal", "Auto Ghost Dog", "Auto Fishing"}
-    for _, tName in ipairs(halloweenTasks) do
-        if PriorityManager:IsTaskEnabled(tName) and PriorityManager:HasWork(tName) then
-            hasHalloweenWork = true
-            break
-        end
-    end
-
-    if hasHalloweenWork then
-        State.halloweenIdleSince = nil
-    else
-        State.halloweenIdleSince = State.halloweenIdleSince or os.clock()
-    end
-
-    -- 5. Realm Routing Decisions
-    if currentRealm == "Halloween" then
-        -- Inactivity Hysteresis: Only exit Halloween if no Halloween task has work for >= 5 consecutive seconds
-        -- AND an enabled Normal world task has verified work waiting
-        if not hasHalloweenWork and (os.clock() - State.halloweenIdleSince >= 5.0) then
-            local hasNormalWork = false
-            local normalTasks = {"Auto Steal", "Enchanted / Bloom Event", "Auto Treadmill"}
-            for _, tName in ipairs(normalTasks) do
-                if PriorityManager:IsTaskEnabled(tName) and PriorityManager:HasWork(tName) then
-                    hasNormalWork = true
-                    break
-                end
-            end
-
-            if hasNormalWork then
-                HalloweenPortalManager.ExitDimension(5.0)
-                return
-            end
-        end
-
-        -- Inside Halloween dimension, main world Steal & Treadmill must NOT run!
-        return
-    elseif currentRealm == "Normal" then
-        -- Only enter Halloween if topTask requires Halloween and player is not carrying a normal egg
-        if topTask and PriorityManager:GetTaskDimension(topTask) == "Halloween" and not isHoldingEgg() then
+    if topTask then
+        local targetDim = PriorityManager:GetTaskDimension(topTask)
+        if targetDim == "Normal" and inHalloween then
+            HalloweenPortalManager.ExitDimension(5.0)
+            return
+        elseif targetDim == "Halloween" and not inHalloween then
             hopOffTreadmill()
             HalloweenPortalManager.EnterDimension(5.0)
             return
         end
+    end
+
+    -- If player is inside Halloween dimension, main world Steal & Treadmill must NOT run!
+    if inHalloween then
+        return
     end
 
     -- 1. Auto Steal & Steal Panel Execution

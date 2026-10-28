@@ -421,8 +421,14 @@ sequenceDiagram
   - **Automated Batch Soul Trading (`TradeSouls`):** Automatically trades accumulated souls in batches of `Cost` at `OpenSoulShop` when ghost invasion concludes or when the departure timer reaches $\le 8$ seconds.
 - **Auto Buy Halloween Dimension Egg:**
   - Automated merchant purchasing in the Halloween Dimension via `RF/HalloweenDimension/AskBuyEgg` with rate-limiting debounce.
-- **Auto Steal Halloween Eggs (Awaiting Clean Rebuild):**
-  - **Status:** Completely removed from codebase (`HalloweenStealManager`, settings, UI controls, `WorkerScheduler` task, and `PriorityManager` branches eliminated). Clean removal performed to prepare for an isolated from-scratch rebuild adhering strictly to the user-provided dual-workflow reference (`Halloweenautostealfixversion.txt`).
+- **Auto Steal Halloween Eggs (`HalloweenStealManager`):**
+  - **Exact Dual-Workflow Headless Pipeline:** Rebuilt directly from user reference script (`HalloweenDimension: Headless Instant Steal Service`).
+    - *Stage 1 (Nest Acquisition):* Discrete 40-stud traversal (`StepMove`) to egg nest $+ (0, 2, 0)$, prompt trigger (`interactPrompt`), and `RF/HalloweenDimension/AskCarryEgg` network loop up to 2.5s.
+    - *Stage 2 (Boundary Transit):* Steps to SafeZone boundary (+10 studs outside via ObjectSpace projection) with 3-pass anti-rollback position validation.
+    - *Stage 3 (Origin Reset vs Graveyard Settle):* Graveyard eggs (Zone 1, $\le 550$ studs) pause 1.5s (`GraveyardDeliverDelay`) with zeroed velocities without dropping; Swamp / Manor eggs invoke `RF/HalloweenDimension/AskDropEgg`, scan 130-stud radius around gate (`FindDroppedEggAtGate`), physically step onto dropped egg, regrab with prompt + remote, and settle 0.4s (`OriginSettleTime`).
+    - *Stage 4 (Natural Walk-In Delivery):* Heartbeat natural walk (`NaturalWalkTo`) at `hum.WalkSpeed` into SafeZone (-10 studs inside) until `HalloweenDelivered` increments or hands are empty.
+  - **Dimension Check & Validation Gate:** Explicitly verifies whether character is in the normal dimension or Halloween dimension. If in the normal dimension, enters portal via `HalloweenPortalManager.EnterDimension(8.0)` and validates dimension arrival before executing any steal cycle.
+  - **Target Area & Dynamic Rarity Filtering:** Fully integrated with `HalloweenAreaManager:GetArea(egg)` (Graveyard, Haunted Swamps, Abandoned Manor) and `DynamicRarityResolver:MeetsMinRarity` / `GetEggScore`.
 - **Candy Cane Monster Farm (`HalloweenCombatManager`):**
   - Rapid multi-bat auto-switching melee combat targeting seasonal monsters at safe hover elevation.
 - **Auto Boss (Pumpkin King) — 6-State Autonomous Recurring Event State Machine (`HalloweenBossManager`):**
@@ -439,10 +445,10 @@ sequenceDiagram
     6. **`COOLDOWN`:** While outside the arena, ignores the lingering open portal. Yields character ownership (`HasWork() == false`) so other tasks can execute. Confirms `elapsed >= 10.0s` and verifies all seal parts have locked (`desc.Transparency < 0.5`) via `isBossPortalLocked()` $\rightarrow$ transitions to `WAITING` to rearm for the next event.
 
 - **Universal Map Closed Rule & Auto Buy Exception:**
-  - All Halloween event features (`Candy Cane Farm`, `Auto Pumpkin`, `Halloween Boss`, `Ghost Dog`, `Halloween Fishing`, `Phantom Express`, `Auto Vacuum`, `Auto Soul Trade In`) observe the universal map gate `isHalloweenMapClosed()`. When closed, they pause and wait; once open, they proceed with actions.
+  - All Halloween event features (`Halloween Steal`, `Candy Cane Farm`, `Auto Pumpkin`, `Halloween Boss`, `Ghost Dog`, `Halloween Fishing`, `Phantom Express`, `Auto Vacuum`, `Auto Soul Trade In`) observe the universal map gate `isHalloweenMapClosed()`. When closed, they pause and wait; once open, they proceed with actions.
   - **Exception:** `Auto Buy Halloween Egg` is explicitly exempt from `isHalloweenMapClosed()` and operates continuously.
-- **Auto Halloween Steal Eggs (Clean Rebuild Pending):**
-  - Completely excised from codebase to allow a clean rebuild directly based on the user-provided reference script (`Halloweenautostealfixversion.txt`). All remnants removed.
+- **Auto Halloween Steal Eggs (Rebuilt & Validated):**
+  - Rebuilt clean and validated from user reference script with strict dimension check & entry validation before egg search, dual-workflow Graveyard settle vs Swamp/Manor drop-regrab, dynamic SafeZone boundaries, target area and rarity filtering.
 - **Auto Phantom Express Boarding Modernization:**
   - Station Summon: client invokes `RF/TrainEvent/Action("Station")` and waits 3.0s if train is not docked.
   - Rail Projection: calculates exact boarding coordinates via vector projection onto the prompt's `BoardRailStart` and `BoardRailEnd` segment attributes.
@@ -656,3 +662,4 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `0e8f1a3286208caec1217ec2f623ab590bf26b9a` | `fix(gui): unhide Auto Steal Halloween Eggs UI toggle, target areas & min rarity controls` | Unhid Auto Steal Halloween Eggs toggle, Target Areas multi-dropdown, and Min Rarity dropdown under Halloween Event 2026 category in GUI. Removed forced disable in loadStuff() and isHalloweenStealEnabled(), enabling full autonomous operation and user visibility. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 
 | `d45bdd24999a761cef7d463ee59154986cd86ce7` | `refactor(halloween): completely remove Auto Halloween Steal Eggs implementation for fresh rebuild` | Completely removed Auto Halloween Steal Eggs feature (HalloweenStealManager, settings keys, UI controls, WorkerScheduler registration, and PriorityManager branches) from qualcom_clean.lua to prepare for clean rebuild from scratch based on user reference. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `5923143582481c73d5433e22bf1def97a8bfb80e` | `feat(halloween-steal): rebuild Auto Halloween Steal Eggs with dimension check & validation, dual-workflow delivery & filtering` | Rebuilt Auto Halloween Steal Eggs from user reference script: strict dimension verification and portal entry validation, 4-stage dual-workflow pipeline (Graveyard 1.5s settle vs Swamp/Manor drop-and-regrab with 130-stud gate scan), discrete 40-stud StepMove, natural WalkSpeed delivery, full HalloweenAreaManager and DynamicRarityResolver filtering, and UI controls. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |

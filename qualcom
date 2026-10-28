@@ -194,8 +194,6 @@ local function loadStuff()
     if type(currentSettings.HalloweenMinRarity) ~= "string" or string.find(currentSettings.HalloweenMinRarity, "table:") then
         currentSettings.HalloweenMinRarity = "All"
     end
-    -- Temporarily force AutoHalloweenSteal off while feature is hidden
-    currentSettings.AutoHalloweenSteal = false
     end
 
 loadStuff()
@@ -394,7 +392,6 @@ local function isStealEnabled()
 end
 
 local function isHalloweenStealEnabled()
-    if true then return false end -- Temporarily disabled while Auto Steal Halloween Eggs is hidden
     if isHalloweenMapClosed() then return false end
     if isNormalStealPanelTarget() then return false end
     return getgenv().config.autoHalloweenSteal == true or isHalloweenStealPanelTarget()
@@ -6726,33 +6723,30 @@ end)
 -- Halloween Event Category
 local halloweenCategory = FarmTab:CreateCategory("Halloween Event 2026", false, 2)
 
--- [TEMPORARILY HIDDEN: Auto Steal Halloween Eggs UI Controls]
-if false then
-    halloweenCategory:CreateToggle("Halloween Auto Steal", "Auto direct-remote grab & gate tween", currentSettings.AutoHalloweenSteal, function(state)
-        getgenv().config.autoHalloweenSteal = state
-        currentSettings.AutoHalloweenSteal = state
-        saveStuff()
-        if not state and HalloweenStealManager and HalloweenStealManager.Abort then
-            HalloweenStealManager:Abort()
-        end
-    end)
+halloweenCategory:CreateToggle("Auto Steal Halloween Eggs", "Steal seasonal eggs in Halloween Dimension", currentSettings.AutoHalloweenSteal, function(state)
+    getgenv().config.autoHalloweenSteal = state
+    currentSettings.AutoHalloweenSteal = state
+    saveStuff()
+    if not state and HalloweenStealManager and HalloweenStealManager.Abort then
+        HalloweenStealManager:Abort()
+    end
+end)
 
-    local halloweenAreaList = {
-        "All", "Graveyard", "Haunted Swamps", "Abandoned Manor"
-    }
+local halloweenAreaList = {
+    "All", "Graveyard", "Haunted Swamps", "Abandoned Manor"
+}
 
-    halloweenCategory:CreateMultiDropdown("Target Areas", "Select Halloween areas to steal from", halloweenAreaList, currentSettings.HalloweenTargetAreas, function(selectedMap)
-        getgenv().config.halloweenTargetAreas = selectedMap
-        currentSettings.HalloweenTargetAreas = selectedMap
-        saveStuff()
-    end)
+halloweenCategory:CreateMultiDropdown("Target Areas", "Select Halloween areas to steal from", halloweenAreaList, currentSettings.HalloweenTargetAreas, function(selectedMap)
+    getgenv().config.halloweenTargetAreas = selectedMap
+    currentSettings.HalloweenTargetAreas = selectedMap
+    saveStuff()
+end)
 
-    halloweenCategory:CreateDropdown("Min Rarity", "Only steal Halloween eggs with rarity >= this", rarityList, currentSettings.HalloweenMinRarity, function(selected)
-        getgenv().config.halloweenMinRarity = selected
-        currentSettings.HalloweenMinRarity = selected
-        saveStuff()
-    end)
-end
+halloweenCategory:CreateDropdown("Min Rarity", "Only steal Halloween eggs with rarity >= this", rarityList, currentSettings.HalloweenMinRarity, function(selected)
+    getgenv().config.halloweenMinRarity = selected
+    currentSettings.HalloweenMinRarity = selected
+    saveStuff()
+end)
 
 halloweenCategory:CreateToggle("Candy Cane Monster Farm", "Auto weapon swap combat in dimension", currentSettings.AutoCandyCane, function(state)
     getgenv().config.autoCandyCane = state

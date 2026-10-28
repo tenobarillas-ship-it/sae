@@ -3035,8 +3035,11 @@ do
                         end
                     end
                 else
-                    -- Normal dimension handling: if enabled and map is open, enter the portal first!
-                    if not (typeof(isHalloweenMapClosed) == "function" and isHalloweenMapClosed()) then
+                    -- Normal dimension: ONLY enter portal if an action is actually needed!
+                    local hasAction = isCarryingEgg() or (selectTargetEgg() ~= nil)
+                    local mapOpen = not (typeof(isHalloweenMapClosed) == "function" and isHalloweenMapClosed())
+
+                    if hasAction and mapOpen then
                         if HalloweenPortalManager and HalloweenPortalManager.EnterDimension then
                             HalloweenPortalManager.EnterDimension(5.0)
                         else
@@ -3513,6 +3516,13 @@ function HalloweenBossManager:Process()
     local state = getgenv().BossAutomationState
 
     if not (char and root and hum) or state.IsBusy then return end
+
+    if not HalloweenPortalManager.IsInHalloweenDimension() then
+        HalloweenPortalManager.EnterDimension(5.0)
+        state.IsBusy = false
+        self.IsActive = false
+        return
+    end
     state.IsBusy = true
     self.IsActive = true
     self:ResolveRemotes()
@@ -5227,15 +5237,12 @@ end
 
 function PriorityManager:GetTaskDimension(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
-    if resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Halloween Steal"
+    if resolved == "Auto Boss" or resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Halloween Steal" 
        or resolved == "Auto Ghost Dog" or resolved == "Auto Train" or resolved == "Auto Vacuum" 
        or resolved == "Auto Fishing" or resolved == "Auto Buy Halloween Egg" or resolved == "Auto Soul Trade In" then
         return "Halloween"
     elseif resolved == "Auto Steal" or resolved == "Enchanted / Bloom Event" or resolved == "Auto Treadmill" then
         return "Normal"
-    elseif resolved == "Auto Boss" then
-        -- Autonomous navigation (KNOWLEDGE.md 6.5.1 rule 2): supervisor never routes it
-        return "Self"
     end
     return "Any"
 end
@@ -5263,7 +5270,7 @@ function PriorityManager:IsTaskEnabled(taskName)
         if HalloweenStealManager and HalloweenStealManager.SelectTargetEgg then
             return HalloweenStealManager.SelectTargetEgg() ~= nil
         end
-        return true
+        return false
     elseif resolved == "Candy Cane Farm" then
         return getgenv().config.autoCandyCane == true and not isHalloweenMapClosed()
     elseif resolved == "Auto Pumpkin" then
@@ -6522,6 +6529,14 @@ WorkerScheduler:Register("HalloweenBoss", 0.05, function()
     end
     if not PriorityManager:CanRun("Boss") then return end
 
+    if not HalloweenPortalManager.IsInHalloweenDimension() then
+        if PriorityManager:Acquire("Boss", 10.0) then
+            HalloweenPortalManager.EnterDimension(5.0)
+            PriorityManager:Release("Boss")
+        end
+        return
+    end
+
     if PriorityManager:Acquire("Boss", 30.0) then
         HalloweenBossManager:Process()
         PriorityManager:Release("Boss")
@@ -6659,10 +6674,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
 
     if topTask then
         local targetDim = PriorityManager:GetTaskDimension(topTask)
-        if targetDim == "Normal" and inHalloween then
-            HalloweenPortalManager.ExitDimension(5.0)
-            return
-        elseif targetDim == "Halloween" and not inHalloween then
+        if targetDim == "Halloween" and not inHalloween then
             hopOffTreadmill()
             HalloweenPortalManager.EnterDimension(5.0)
             return

@@ -407,18 +407,6 @@ sequenceDiagram
   - **Character Orientation & Velocity Pinning:** Directly orients character CFrame towards target water point (`CFrame.lookAt`) and suppresses linear/angular velocity during cast and bite wait.
   - **Ghost Dog Quest Stage 3 Interception:** Detects if the player is currently on Stage 3 of the Ghost Dog Quest. Because standard fishing is locked by the server until the quest fish is caught, Auto Fishing automatically delegates to `GhostDogManager:Process()` to perform the ripple cast, underwater spline dive, and ticket claim.
   - **Tension Hold & Reel Simulation:** Computes hold duration: $\text{holdDuration} = 1.2 \times \text{Charge}^{0.7142857}$. Fires `RE/Fishing/Hold`, waits duration, and invokes `RF/Fishing/Cast`. Simulates reel clicks via client `FishingController.Ui.PunchReel` over the 1.2s bite window, then invokes `RF/Fishing/Reel(biteId, "Caught", 16)`. Automatically diverts ghost fish bites to underwater spline chase.
-- **Phantom Express & Ghost Train Event (`PhantomExpressManager`):**
-  - **Ticket & Access Validation:** 3-tier validation (physical tool with `ConductorTicket` attribute or ticket/conductor name, `Save.TrainEvent.AccessUnlocked == true`, `Tickets > 0`, or Ghost Dog quest completion). If physical ticket tool exists, it is automatically equipped into the character's hands before triggering the prompt.
-  - **Boarding Sequence:** Glides to `BoardRailStart`/`BoardRailEnd`, fires `TrainBoard` prompt via `UniversalCompat.FireProximityPrompt`, invokes `"Board"` remote, and **maintains the character mutex lock** (`PriorityManager:Acquire("Train", ...)`) throughout the boarding wait and train departure.
-  - **Multi-Source Forgotten Town Detection (`IsInTown`):** Evaluates `TrainEventPhase == "Town"`, `char:GetAttribute("TrainEventInForgottenTown") == true`, `#workspace.TrainGhostVisuals > 0`, spatial radius $\le 1200$ studs from town center `(-3888, 38, -6370)`, and town workspace models.
-  - **Dimension Supervisor Immunity:** When `IsInTown()` is true, the global Dimension Supervisor grants total immunity, eliminating unintended portal transitions.
-  - **Return Train Boarding & Town Exit Cleanup:** 25-second return call debounce, un-equips vacuum tools, glides to `ReturnRailStart`, triggers `TrainReturn` prompt, invokes `"Return"` remote, records `DoneDeparture`, and resets humanoid states (`AutoRotate = true`, `PlatformStand = false`, zero velocity).
-- **Auto Vacuum Ghouler Boss & Soul Trading (`GhoulerBossManager`):**
-  - **Smart Ghost Selection:** Scans `workspace.TrainGhostVisuals`, validates `TrainGhost` attribute and `PVInstance`, scores by rarity weight minus distance: $\text{score} = \text{rarityWeight} - \text{dist}$ (`Vengeful` = +300k, `Haunted` = +200k, `Standard` = +100k).
-  - **16-Point Circle Raycast & Line-of-Sight Protection:** Tests 16 radial points ($i \times \pi / 8$) around target ghost with wall raycasts excluding `{character, ghostFolder}` to ensure an unobstructed vacuum beam.
-  - **Adaptive Distance Standoff:** Dynamically scales standoff distance: 15 studs ($\text{progress} < 0.5$), 10 studs ($\text{progress} \ge 0.5$), 7 studs ($\text{progress} \ge 0.75$). Smoothly rotates body to face ghost center (`CFrame.lookAt`) and streams suction remote.
-  - **Ghouler Boss 42-Stud Predictive Velocity Standoff:** Extrapolates boss position with velocity lead: $\mathbf{p} + \mathbf{v} \times \Delta t$, maintains 42 studs, and streams suction remote at 0.25s cadence.
-  - **Automated Batch Soul Trading (`TradeSouls`):** Automatically trades accumulated souls in batches of `Cost` at `OpenSoulShop` when ghost invasion concludes or when the departure timer reaches $\le 8$ seconds.
 - **Auto Buy Halloween Dimension Egg:**
   - Automated merchant purchasing in the Halloween Dimension via `RF/HalloweenDimension/AskBuyEgg` with rate-limiting debounce.
 - **Auto Steal Halloween Eggs (`HalloweenStealManager`):**
@@ -445,24 +433,8 @@ sequenceDiagram
     6. **`COOLDOWN`:** While outside the arena, ignores the lingering open portal. Yields character ownership (`HasWork() == false`) so other tasks can execute. Confirms `elapsed >= 10.0s` and verifies all seal parts have locked (`desc.Transparency < 0.5`) via `isBossPortalLocked()` $\rightarrow$ transitions to `WAITING` to rearm for the next event.
 
 - **Universal Map Closed Rule & Auto Buy Exception:**
-  - All Halloween event features (`Candy Cane Farm`, `Auto Pumpkin`, `Halloween Boss`, `Ghost Dog`, `Halloween Fishing`, `Phantom Express`, `Auto Vacuum`, `Auto Soul Trade In`) observe the universal map gate `isHalloweenMapClosed()`. When closed, they pause and wait; once open, they proceed with actions.
+  - All Halloween event features (`Candy Cane Farm`, `Auto Pumpkin`, `Halloween Boss`, `Ghost Dog`, `Halloween Fishing`, `Halloween Steal`) observe the universal map gate `isHalloweenMapClosed()`. When closed, they pause and wait; once open, they proceed with actions.
   - **Exception:** `Auto Buy Halloween Egg` is explicitly exempt from `isHalloweenMapClosed()` and operates continuously.
-- **Auto Halloween Steal Eggs (Clean Rebuild Pending):**
-  - Completely excised from codebase to allow a clean rebuild directly based on the user-provided reference script (`Halloweenautostealfixversion.txt`). All remnants removed.
-- **Auto Phantom Express Boarding Modernization:**
-  - Station Summon: client invokes `RF/TrainEvent/Action("Station")` and waits 3.0s if train is not docked.
-  - Rail Projection: calculates exact boarding coordinates via vector projection onto the prompt's `BoardRailStart` and `BoardRailEnd` segment attributes.
-  - Ticket Auto-Equip: equips `ConductorTicket` tool before approaching prompt if permanent access is unowned.
-  - Boarding Prompt & Remote: sets `HoldDuration = 0`, fires `TrainBoard` prompt, invokes `"Board"`, and waits up to 25s for town arrival.
-- **Auto Vacuum Ghouler (Equipment Gating & Capture):**
-  - Strict Vacuum Ownership Gate: if `GetGhostVacuum(false)` is nil, paths to `PickupVacuum` prompt, triggers prompt, and waits up to 3.0s for tool to appear in inventory. If unowned, immediately returns/halts without running orbit or suction logic.
-  - Held Verification: verifies `vac.Parent == LocalPlayer.Character` before running 16-point orbit or 42-stud boss standoff.
-  - Zero Soul Trading: soul trading is completely decoupled and removed from this feature.
-- **Standalone Auto Soul Trade In (`SoulTradeManager`):**
-  - Dedicated UI toggle `"Auto Soul Trade In"` (`currentSettings.AutoTradeSouls` / `getgenv().config.autoTradeSouls`).
-  - Independent worker in `WorkerScheduler` operating inside Forgotten Town before train departure ($t \le 12\text{s}$) or upon invasion conclusion.
-  - Glides to `OpenSoulShop` prompt, triggers prompt, opens shop, and batch trades souls in a remote loop while `CanTrade == true` and `Souls >= Cost`.
-
 ### 6.5.1 Architectural Rules: Halloween Event 2026 = Halloween Dimension
 
 > [!IMPORTANT]
@@ -665,3 +637,4 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `67efb3b186509f9c3db91d03cd2e99e5dc12b216` | `feat(halloween): add Auto Steal Halloween Eggs with portal navigation & toggle` | Integrated headless instant steal service with dual-workflow architecture (Graveyard 1.5s settle vs Swamp/Manor drop-regrab), autonomous normal dimension portal entry via HalloweenPortalManager, clean toggle integration with instant abort, and PriorityManager mutual exclusivity. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `517702ac1f3bbe3baee16ec7132cf4938d7e0b77` | `feat(halloween): add Target Area and Min Rarity filters to Auto Steal Halloween Eggs` | Added user-configurable Target Areas multi-dropdown and Min Rarity dropdown to Auto Steal Halloween Eggs. Integrates reference spatial boundary thresholds (Graveyard <= 550, Manor >= 1200, Swamps between) with HalloweenAreaManager and DynamicRarityResolver, selecting rarest/highest value candidates first. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `6802c7189eb3eba1a24a78751e7abc3074e5754a` | `fix(halloween): action-gated egg steal portal entry, auto boss dimension gateway & remove forced auto-exit` | Fixed Auto Halloween Egg Steal to only enter portal when an egg action is needed (carrying egg or matching egg exists). Fixed Auto Boss to check for Halloween Dimension arrival before gliding to BossPortal. Removed forced ExitDimension call in Dimension Supervisor so turning off features never forcefully ejects the player. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `fd690bac084b746f8984a19831bb0c22e6f4a983` | `refactor(halloween): completely remove Auto Phantom Express, Auto Vacuum Ghouler & Auto Soul Trade In` | Completely excised Auto Phantom Express, Auto Vacuum Ghouler Boss, and Auto Soul Trade In (modules, settings, UI toggles, worker registrations, and PriorityManager branches) from codebase per user request. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |

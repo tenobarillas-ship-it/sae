@@ -1385,11 +1385,10 @@ function HalloweenPortalManager.IsInHalloweenDimension()
     return isInHalloweenDimension()
 end
 
-HalloweenPortalManager.ActiveTween = nil
 HalloweenPortalManager.IsEntering = false
 
 function HalloweenPortalManager.EnterDimension(timeout)
-    timeout = timeout or 7.0
+    timeout = timeout or 8.0
     if HalloweenPortalManager.IsInHalloweenDimension() then
         return true
     end
@@ -1420,36 +1419,39 @@ function HalloweenPortalManager.EnterDimension(timeout)
         return false
     end
 
-    -- Calculate distance and smooth travel duration (average ~65 studs/sec)
+    -- Heartbeat Linear Glide (KNOWLEDGE.md section 6.7 compliant)
     local targetPos = hitbox.Position + Vector3.new(0, 1.0, 0)
-    local dist = (root.Position - targetPos).Magnitude
-    local duration = math.clamp(dist / 65, 0.4, 4.0)
+    local speed = 240 -- Standardized travel speed (180-280 studs/s)
+    local stopDist = 3.0
 
+    -- Interceptions & Bypasses
     setCollisions(false)
     hum.PlatformStand = true
+    hum.AutoRotate = false
 
-    local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
-    local tween = Services.TweenService:Create(root, tweenInfo, {
-        CFrame = CFrame.new(targetPos, hitbox.Position)
-    })
-    HalloweenPortalManager.ActiveTween = tween
-    tween:Play()
-
-    local tweenStart = os.clock()
-    while (os.clock() - tweenStart) < (duration + 0.5) do
+    local glideStart = os.clock()
+    while (os.clock() - glideStart) < timeout do
         if HalloweenPortalManager.IsInHalloweenDimension() then
             break
         end
+
         local _, cRoot, cHum = getAliveRig()
         if not cRoot or not cHum or cHum.Health <= 0 then
             break
         end
-        Services.RunService.Heartbeat:Wait()
-    end
 
-    if HalloweenPortalManager.ActiveTween then
-        pcall(function() HalloweenPortalManager.ActiveTween:Cancel() end)
-        HalloweenPortalManager.ActiveTween = nil
+        local diff = targetPos - cRoot.Position
+        if diff.Magnitude <= stopDist then
+            break
+        end
+
+        local dt = Services.RunService.Heartbeat:Wait()
+        local dir = diff.Unit
+        local step = math.min(speed * dt, diff.Magnitude)
+
+        -- Synchronize AssemblyLinearVelocity to match displacement
+        cRoot.AssemblyLinearVelocity = dir * speed
+        cRoot.CFrame = CFrame.new(cRoot.Position + (dir * step), cRoot.Position + (dir * 10))
     end
 
     -- Trigger touch interest upon contact
@@ -1465,7 +1467,15 @@ function HalloweenPortalManager.EnterDimension(timeout)
         end)
     end
 
-    if fHum then fHum.PlatformStand = false end
+    -- Restore humanoid states & collisions
+    if fHum then
+        fHum.PlatformStand = false
+        fHum.AutoRotate = true
+    end
+    if fRoot then
+        fRoot.AssemblyLinearVelocity = Vector3.zero
+        fRoot.AssemblyAngularVelocity = Vector3.zero
+    end
     setCollisions(true)
 
     -- Wait up to 3 seconds for server dimension replication
@@ -1512,27 +1522,69 @@ function HalloweenPortalManager.ExitDimension(timeout)
 
     if not exitPart then return false end
 
-    local deadline = os.clock() + timeout
-    while os.clock() < deadline do
-        if not HalloweenPortalManager.IsInHalloweenDimension() then break end
+    -- Heartbeat Linear Glide to exit portal
+    local targetPos = exitPart.Position + Vector3.new(0, 1.0, 0)
+    local speed = 240
+    local stopDist = 3.0
 
-        local _, cRoot = getAliveRig()
-        if cRoot and exitPart and exitPart.Parent then
-            cRoot.CFrame = exitPart.CFrame
-            cRoot.AssemblyLinearVelocity = Vector3.zero
-            cRoot.AssemblyAngularVelocity = Vector3.zero
+    setCollisions(false)
+    hum.PlatformStand = true
+    hum.AutoRotate = false
 
-            cRoot.AssemblyLinearVelocity = Vector3.new(0, -0.5, 0)
-            UniversalCompat.FireTouch(cRoot, exitPart)
+    local glideStart = os.clock()
+    while (os.clock() - glideStart) < timeout do
+        if not HalloweenPortalManager.IsInHalloweenDimension() then
+            break
         end
-        task.wait(0.2)
+
+        local _, cRoot, cHum = getAliveRig()
+        if not cRoot or not cHum or cHum.Health <= 0 then
+            break
+        end
+
+        local diff = targetPos - cRoot.Position
+        if diff.Magnitude <= stopDist then
+            break
+        end
+
+        local dt = Services.RunService.Heartbeat:Wait()
+        local dir = diff.Unit
+        local step = math.min(speed * dt, diff.Magnitude)
+
+        cRoot.AssemblyLinearVelocity = dir * speed
+        cRoot.CFrame = CFrame.new(cRoot.Position + (dir * step), cRoot.Position + (dir * 10))
     end
 
-    task.wait(0.5)
+    local _, fRoot, fHum = getAliveRig()
+    if fRoot and exitPart and exitPart.Parent then
+        fRoot.AssemblyLinearVelocity = Vector3.new(0, -0.5, 0)
+        pcall(function()
+            if UniversalCompat and UniversalCompat.FireTouch then
+                UniversalCompat.FireTouch(fRoot, exitPart, 0)
+                task.wait(0.04)
+                UniversalCompat.FireTouch(fRoot, exitPart, 1)
+            end
+        end)
+    end
+
+    if fHum then
+        fHum.PlatformStand = false
+        fHum.AutoRotate = true
+    end
+    if fRoot then
+        fRoot.AssemblyLinearVelocity = Vector3.zero
+        fRoot.AssemblyAngularVelocity = Vector3.zero
+    end
+    setCollisions(true)
+
+    local deadline = os.clock() + 3.0
+    while os.clock() < deadline and HalloweenPortalManager.IsInHalloweenDimension() do
+        Services.RunService.Heartbeat:Wait()
+    end
+
     return not HalloweenPortalManager.IsInHalloweenDimension()
 end
 
--- ==============================================================================
 -- [ HALLOWEEN CANONICAL AREA MANAGER ]
 -- ==============================================================================
 HalloweenAreaManager = {

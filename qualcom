@@ -1768,9 +1768,22 @@ function HalloweenCombatManager:Process()
     if not monsterPart then return end
 
     local hoverPosition = monsterPart.Position + Vector3.new(0, self.HoverHeight, 0)
-    root.CFrame = CFrame.lookAt(hoverPosition, monsterPart.Position)
-    root.AssemblyLinearVelocity = Vector3.zero
-    root.AssemblyAngularVelocity = Vector3.zero
+    local combatDiff = hoverPosition - root.Position
+    if combatDiff.Magnitude > 12 then
+        local cSpeed = 260
+        local cDir = combatDiff.Unit
+        local dt = Services.RunService.Heartbeat:Wait()
+        local _, liveR = getAliveRig()
+        if liveR then
+            liveR.AssemblyLinearVelocity = cDir * cSpeed
+            liveR.CFrame = CFrame.new(liveR.Position + cDir * math.min(cSpeed * dt, combatDiff.Magnitude), monsterPart.Position)
+        end
+        return
+    else
+        root.CFrame = CFrame.lookAt(hoverPosition, monsterPart.Position)
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end
 
     if os.clock() - self.LastSwapTime >= self.SwapDelay then
         self.LastSwapTime = os.clock()
@@ -1819,6 +1832,7 @@ end
 HalloweenPumpkinManager = {
     IsBusy = false,
     PumpkinsDeposited = 0,
+    CurrentTarget = nil,
     Config = {
         AltarDepositPos = Vector3.new(-5521.6, -195.0, -6623.0),
         Bounds = {
@@ -1827,7 +1841,7 @@ HalloweenPumpkinManager = {
             MinZ = -7700.0,
             MaxZ = -4800.0
         },
-        TravelSpeed = 260,
+        TravelSpeed = 280,
         DepositTimeout = 2.0
     }
 }
@@ -1867,6 +1881,20 @@ function HalloweenPumpkinManager:GetTarget()
     local _, root = getAliveRig()
     if not root then return nil, nil, nil end
 
+    -- Sticky Target Lock: re-evaluate only when the current target is no longer available or valid
+    if self.CurrentTarget then
+        local tModel = self.CurrentTarget.Model
+        local tPrompt = self.CurrentTarget.Prompt
+        local tPart = self.CurrentTarget.Part
+        if tModel and tModel.Parent and tPrompt and tPrompt.Parent and tPrompt.Enabled and tPart and tPart.Parent then
+            local distToAltar = (tPart.Position - self.Config.AltarDepositPos).Magnitude
+            if distToAltar <= 300 then
+                return tModel, tPrompt, tPart
+            end
+        end
+        self.CurrentTarget = nil
+    end
+
     local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
     if not dim then return nil, nil, nil end
 
@@ -1879,19 +1907,17 @@ function HalloweenPumpkinManager:GetTarget()
     local minDistance = math.huge
 
     for _, model in ipairs(searchList) do
-        if model:IsA("Model") and model:IsDescendantOf(dim) then
+        if model:IsA("Model") and model.Parent then
             local prompt = model:FindFirstChildWhichIsA("ProximityPrompt", true)
             local part = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart") or model:FindFirstChildWhichIsA("BasePart")
 
             if prompt and prompt.Enabled and part then
                 local p = part.Position
-                local insideBounds = (p.X >= self.Config.Bounds.MinX and p.X <= self.Config.Bounds.MaxX)
-                                 and (p.Z >= self.Config.Bounds.MinZ and p.Z <= self.Config.Bounds.MaxZ)
-
-                if insideBounds then
-                    local dist = (root.Position - p).Magnitude
-                    if dist < minDistance then
-                        minDistance = dist
+                local distToAltar = (p - self.Config.AltarDepositPos).Magnitude
+                if distToAltar <= 280 then
+                    local distToPlayer = (root.Position - p).Magnitude
+                    if distToPlayer < minDistance then
+                        minDistance = distToPlayer
                         closestModel = model
                         closestPrompt = prompt
                         closestPart = part
@@ -1901,32 +1927,16 @@ function HalloweenPumpkinManager:GetTarget()
         end
     end
 
-    if not closestModel then
-        for _, desc in ipairs(dim:GetChildren()) do
-            if desc:IsA("Model") and desc.Name:find("Pumpkin") and desc.Name ~= "Altar" then
-                local prompt = desc:FindFirstChildWhichIsA("ProximityPrompt", true)
-                local part = desc.PrimaryPart or desc:FindFirstChild("HumanoidRootPart") or desc:FindFirstChildWhichIsA("BasePart")
-
-                if prompt and prompt.Enabled and part then
-                    local p = part.Position
-                    local insideBounds = (p.X >= self.Config.Bounds.MinX and p.X <= self.Config.Bounds.MaxX)
-                                     and (p.Z >= self.Config.Bounds.MinZ and p.Z <= self.Config.Bounds.MaxZ)
-
-                    if insideBounds then
-                        local dist = (root.Position - p).Magnitude
-                        if dist < minDistance then
-                            minDistance = dist
-                            closestModel = desc
-                            closestPrompt = prompt
-                            closestPart = part
-                        end
-                    end
-                end
-            end
-        end
+    if closestModel and closestPrompt and closestPart then
+        self.CurrentTarget = {
+            Model = closestModel,
+            Prompt = closestPrompt,
+            Part = closestPart
+        }
+        return closestModel, closestPrompt, closestPart
     end
 
-    return closestModel, closestPrompt, closestPart
+    return nil, nil, nil
 end
 
 function HalloweenPumpkinManager:GlideTo(targetPos, stopDist)
@@ -2004,17 +2014,47 @@ function HalloweenPumpkinManager:Process()
         local pumpkinModel, prompt, targetPart = self:GetTarget()
 
         if pumpkinModel and prompt and targetPart then
-            local pPos = targetPart.Position
+            local speed = self.Config.TravelSpeed
+            setCollisions(false)
 
-            -- Glide to the moving target NPC.
-            self:GlideTo(pPos + Vector3.new(0, 1.2, 0), 4.5)
+            -- Dynamically pursue the live moving runaway pumpkin
+            local chaseStart = os.clock()
+            local chaseTimeout = 8.0
 
-            -- Latch onto the target NPC and trigger the Catch prompt until picked up.
+            while (os.clock() - chaseStart) < chaseTimeout and not self:IsCarrying() do
+                if not getgenv().config.autoPumpkin or isHalloweenMapClosed() then break end
+                local _, curRoot = getAliveRig()
+                if not curRoot or not targetPart.Parent or not prompt.Enabled then break end
+
+                local pPos = targetPart.Position
+                local diff = pPos - curRoot.Position
+                local dist = diff.Magnitude
+
+                if dist <= (prompt.MaxActivationDistance + 2) then
+                    triggerPumpkinPrompt(prompt)
+                end
+
+                if dist <= 2.5 then
+                    curRoot.CFrame = CFrame.new(pPos)
+                    curRoot.AssemblyLinearVelocity = Vector3.zero
+                    triggerPumpkinPrompt(prompt)
+                    break
+                end
+
+                local dt = Services.RunService.Heartbeat:Wait()
+                local dir = diff.Unit
+                local step = math.min(speed * dt, dist)
+
+                curRoot.AssemblyLinearVelocity = dir * speed
+                curRoot.CFrame = CFrame.new(curRoot.Position + dir * step, curRoot.Position + dir * 10)
+            end
+
+            -- Latch onto the target NPC and trigger the Catch prompt until picked up
             local latchStart = os.clock()
             while (os.clock() - latchStart) < 0.65 and not self:IsCarrying() do
                 if not getgenv().config.autoPumpkin or isHalloweenMapClosed() then break end
                 local _, curRoot = getAliveRig()
-                if curRoot and targetPart and targetPart.Parent then
+                if curRoot and targetPart and targetPart.Parent and prompt.Enabled then
                     curRoot.CFrame = CFrame.new(targetPart.Position)
                     curRoot.AssemblyLinearVelocity = Vector3.zero
                     triggerPumpkinPrompt(prompt)
@@ -2022,10 +2062,15 @@ function HalloweenPumpkinManager:Process()
                 Services.RunService.Heartbeat:Wait()
             end
 
+            setCollisions(true)
+            local _, endRoot = getAliveRig()
+            if endRoot then endRoot.AssemblyLinearVelocity = Vector3.zero end
+
             task.wait(0.1)
 
-            -- If successfully acquired, travel directly to the Altar pad.
+            -- If successfully acquired, clear locked target and deliver to Altar
             if self:IsCarrying() then
+                self.CurrentTarget = nil
                 self:GlideTo(self.Config.AltarDepositPos, 3.5)
 
                 local depositStart = os.clock()
@@ -2041,10 +2086,14 @@ function HalloweenPumpkinManager:Process()
 
                 task.wait(0.2)
                 self.PumpkinsDeposited = self.PumpkinsDeposited + 1
+            else
+                if not targetPart.Parent or not prompt.Enabled then
+                    self.CurrentTarget = nil
+                end
             end
         else
-            -- Standby pause when no valid pumpkins are active in the 3 zones.
-            task.wait(0.8)
+            -- Standby pause when no valid pumpkins are active in the altar area
+            task.wait(0.3)
         end
     end
 
@@ -3468,28 +3517,36 @@ function GhostDogManager:HasTicket()
 end
 
 function GhostDogManager:MoveTo(pos, timeout)
-    timeout = timeout or 6.0
+    timeout = timeout or 8.0
     local _, root, hum = getAliveRig()
     if not root or not hum then return false end
     local dist = (root.Position - pos).Magnitude
     if dist <= 4 then return true end
 
-    local speed = 55
-    local duration = math.clamp(dist / speed, 0.3, timeout)
+    local speed = 180
     setCollisions(false)
-    local tw = Services.TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {
-        CFrame = CFrame.new(pos) * root.CFrame.Rotation
-    })
-    tw:Play()
 
     local start = os.clock()
-    while (os.clock() - start) < (duration + 0.3) do
-        if not self.IsActive then pcall(function() tw:Cancel() end) break end
-        local _, cRoot = getAliveRig()
-        if not cRoot or (cRoot.Position - pos).Magnitude <= 4 then break end
-        Services.RunService.Heartbeat:Wait()
+    while (os.clock() - start) < timeout do
+        if isHalloweenMapClosed() then break end
+        local _, cRoot, cHum = getAliveRig()
+        if not cRoot or not cHum or cHum.Health <= 0 then break end
+
+        local diff = pos - cRoot.Position
+        if diff.Magnitude <= 4 then break end
+
+        local dt = Services.RunService.Heartbeat:Wait()
+        local dir = diff.Unit
+        local step = math.min(speed * dt, diff.Magnitude)
+
+        cRoot.AssemblyLinearVelocity = dir * speed
+        cRoot.CFrame = CFrame.new(cRoot.Position + dir * step, cRoot.Position + dir * 10)
     end
-    pcall(function() tw:Cancel() end)
+
+    local _, fRoot = getAliveRig()
+    if fRoot then
+        fRoot.AssemblyLinearVelocity = Vector3.zero
+    end
     setCollisions(true)
     local _, endRoot = getAliveRig()
     return endRoot and (endRoot.Position - pos).Magnitude <= 6
@@ -3704,7 +3761,8 @@ end
 HalloweenFishingManager = {
     IsActive = false,
     CooldownUntil = 0,
-    FishCaught = 0
+    FishCaught = 0,
+    CurrentFishingSpot = nil
 }
 
 function HalloweenFishingManager:HasRod()
@@ -3780,6 +3838,68 @@ function HalloweenFishingManager:FindWaterTarget()
     return nil
 end
 
+function HalloweenFishingManager:GetFishingSpot()
+    local _, root = getAliveRig()
+    if not root then return nil end
+
+    if self.CurrentFishingSpot and (self.CurrentFishingSpot - root.Position).Magnitude <= 10 then
+        return self.CurrentFishingSpot
+    end
+
+    local returnSpot = GhostDogManager and GhostDogManager:GetMarker("ReturnSpot")
+    if returnSpot and returnSpot:IsA("BasePart") then
+        self.CurrentFishingSpot = returnSpot.Position + Vector3.new(0, 3, 0)
+        return self.CurrentFishingSpot
+    end
+
+    local fisherman = Services.Workspace:FindFirstChild("GhostFisherman")
+    if fisherman and fisherman:IsA("Model") then
+        local pivot = fisherman:GetPivot()
+        self.CurrentFishingSpot = pivot.Position + Vector3.new(0, 3, 0)
+        return self.CurrentFishingSpot
+    end
+
+    return Vector3.new(-5478.0, -195.0, -6830.0)
+end
+
+function HalloweenFishingManager:GlideToSpot(targetPos, timeout)
+    local char, root = getAliveRig()
+    if not root then return false end
+
+    timeout = timeout or 12.0
+    local speed = 260
+    local stopDist = 4.0
+
+    setCollisions(false)
+    local start = os.clock()
+
+    while (targetPos - root.Position).Magnitude > stopDist do
+        if not self.IsActive or getgenv().config.autoFishing ~= true or isHalloweenMapClosed() or (os.clock() - start) > timeout then
+            break
+        end
+
+        local dt = Services.RunService.Heartbeat:Wait()
+        local _, cRoot = getAliveRig()
+        if not cRoot then break end
+        root = cRoot
+
+        local diff = targetPos - cRoot.Position
+        if diff.Magnitude <= stopDist then break end
+        local dir = diff.Unit
+        local step = math.min(speed * dt, diff.Magnitude)
+
+        cRoot.AssemblyLinearVelocity = dir * speed
+        cRoot.CFrame = CFrame.new(cRoot.Position + dir * step, cRoot.Position + dir * 10)
+    end
+
+    local _, fRoot = getAliveRig()
+    if fRoot then
+        fRoot.AssemblyLinearVelocity = Vector3.zero
+    end
+    setCollisions(true)
+    return fRoot and (targetPos - fRoot.Position).Magnitude <= 6.0
+end
+
 function HalloweenFishingManager:HasWork()
     if getgenv().config.autoFishing ~= true or isHalloweenMapClosed() then return false end
     if os.clock() < self.CooldownUntil then return false end
@@ -3803,12 +3923,10 @@ function HalloweenFishingManager:Process()
         return
     end
 
-    local returnSpot = GhostDogManager and GhostDogManager:GetMarker("ReturnSpot")
+    local spotPos = self:GetFishingSpot()
     local _, root = getAliveRig()
-    if returnSpot and root and ((root.Position - returnSpot.Position).Magnitude > 8 or returnSpot.Position.Y + 1 > root.Position.Y) then
-        if GhostDogManager and GhostDogManager.MoveTo then
-            GhostDogManager:MoveTo(returnSpot.Position + Vector3.new(0, 3, 0), 6.0)
-        end
+    if spotPos and root and ((root.Position - spotPos).Magnitude > 6 or spotPos.Y + 1 > root.Position.Y) then
+        self:GlideToSpot(spotPos, 12.0)
     end
 
     local waterTarget = self:FindWaterTarget()

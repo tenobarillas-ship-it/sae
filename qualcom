@@ -4032,22 +4032,91 @@ end
 PhantomExpressManager = {
     IsActive = false,
     State = nil,
+    LastStatusPoll = 0,
     DoneDeparture = 0,
-    CooldownUntil = 0
+    CooldownUntil = 0,
+    ReturnState = {
+        LastReturnCall = 0,
+        HasLeftTown = false,
+        DoneDepartureTime = nil
+    }
 }
 
-function PhantomExpressManager:HasTicket()
-    local b = LocalPlayer:FindFirstChild("TrainEvent")
-    if b and b:GetAttribute("AccessUnlocked") == true then return true end
-    if GhostDogManager and GhostDogManager:HasTicket() then return true end
-    local save = getSaveData()
-    if save and type(save.TrainEvent) == "table" and (save.TrainEvent.AccessUnlocked == true or (tonumber(save.TrainEvent.Tickets) or 0) > 0) then
-        return true
+function PhantomExpressManager:FindTicketTool()
+    local searchContainers = {
+        LocalPlayer.Character,
+        LocalPlayer:FindFirstChildOfClass("Backpack")
+    }
+    for _, container in ipairs(searchContainers) do
+        if container then
+            for _, item in ipairs(container:GetChildren()) do
+                if item:IsA("Tool") then
+                    if item:GetAttribute("ConductorTicket") == true then
+                        return item
+                    end
+                    local n = item.Name:lower()
+                    if n:find("ticket") or n:find("conductor") then
+                        return item
+                    end
+                end
+            end
+        end
     end
-    return false
+    return nil
 end
 
-function PhantomExpressManager:GetState()
+function PhantomExpressManager:HasBoardingAccess()
+    local ticketTool = self:FindTicketTool()
+    if ticketTool ~= nil then
+        return true, "Inventory Tool", ticketTool
+    end
+
+    local b = LocalPlayer:FindFirstChild("TrainEvent")
+    if b and b:GetAttribute("AccessUnlocked") == true then
+        return true, "Attribute Access", nil
+    end
+
+    local ok, saveModule = pcall(function()
+        return require(Services.ReplicatedStorage.Shared.Save)
+    end)
+    if ok and type(saveModule) == "table" then
+        local getData = saveModule.Get or saveModule.Peek
+        local data = type(getData) == "function" and getData() or nil
+        local trainData = type(data) == "table" and data.TrainEvent or nil
+        if type(trainData) == "table" then
+            if trainData.AccessUnlocked == true then
+                return true, "Permanent Access", nil
+            end
+            if (tonumber(trainData.Tickets) or 0) > 0 then
+                return true, "Ticket Balance", nil
+            end
+        end
+    end
+
+    local save = getSaveData and getSaveData()
+    if save and type(save.TrainEvent) == "table" then
+        if save.TrainEvent.AccessUnlocked == true or (tonumber(save.TrainEvent.Tickets) or 0) > 0 then
+            return true, "Save Profile", nil
+        end
+    end
+
+    if GhostDogManager and GhostDogManager.HasTicket and GhostDogManager:HasTicket() then
+        return true, "GhostDog Access", nil
+    end
+
+    return false, "No Ticket", nil
+end
+
+function PhantomExpressManager:HasTicket()
+    local hasAccess = self:HasBoardingAccess()
+    return hasAccess == true
+end
+
+function PhantomExpressManager:GetState(force)
+    if not force and self.State and (os.clock() - self.LastStatusPoll < 2.0) then
+        return self.State
+    end
+    self.LastStatusPoll = os.clock()
     local ok, res = invokeRemote("RF/TrainEvent/Action", "Status")
     if ok and type(res) == "table" then
         self.State = res
@@ -4056,16 +4125,38 @@ function PhantomExpressManager:GetState()
 end
 
 function PhantomExpressManager:IsInTown()
+    -- 1. Direct player train phase attribute
+    local attrPhase = LocalPlayer:GetAttribute("TrainEventPhase")
+    if attrPhase == "Town" then return true end
+
+    -- 2. Character-level tag applied by client
     local char = LocalPlayer.Character
+    if char and char:GetAttribute("TrainEventInForgottenTown") == true then return true end
+
+    -- 3. Presence of active ghost visual instances in workspace
+    local ghostFolder = Services.Workspace:FindFirstChild("TrainGhostVisuals")
+    if ghostFolder and #ghostFolder:GetChildren() > 0 then return true end
+
+    -- 4. Spatial distance to Forgotten Town center (-3888, 38, -6370)
     local root = char and char:FindFirstChild("HumanoidRootPart")
-    local realm = LocalPlayer:GetAttribute("Realm") or (root and root:GetAttribute("Realm"))
-    if realm == "Town" or realm == "GhostTown" then return true end
-    local townPart = Services.Workspace:FindFirstChild("TrainGhostVisuals")
-    return townPart ~= nil
+    if root and (root.Position - Vector3.new(-3888, 38, -6370)).Magnitude <= 1200 then
+        return true
+    end
+
+    -- 5. Workspace folder checks
+    if Services.Workspace:FindFirstChild("GhostTown") or Services.Workspace:FindFirstChild("ForgottenTown") then
+        return true
+    end
+
+    return false
 end
 
 function PhantomExpressManager:FindPrompt(attrName, attrVal)
-    local roots = {Services.Workspace:FindFirstChild("TrainEventRuntime"), Services.Workspace:FindFirstChild("TrainEventAssets"), Services.Workspace}
+    local roots = {
+        Services.Workspace:FindFirstChild("TrainEventRuntime"),
+        Services.Workspace:FindFirstChild("TrainEventAssets"),
+        Services.Workspace
+    }
     for _, r in ipairs(roots) do
         if r then
             for _, d in ipairs(r:GetDescendants()) do
@@ -4079,9 +4170,16 @@ function PhantomExpressManager:FindPrompt(attrName, attrVal)
 end
 
 function PhantomExpressManager:HasWork()
-    if getgenv().config.autoTrain ~= true or isHalloweenMapClosed() then return false end
-    if self:IsInTown() then return true end
+    if isHalloweenMapClosed() then return false end
+    -- If already in town, we have active town operations if either train, vacuum, or soul trade is on
+    if self:IsInTown() then
+        return getgenv().config.autoTrain == true or getgenv().config.autoVacuum == true or getgenv().config.autoTradeSouls == true
+    end
+
+    -- Outside town: boarding requires autoTrain
+    if getgenv().config.autoTrain ~= true then return false end
     if not self:HasTicket() then return false end
+
     local state = self:GetState()
     if state and state.ArrivalOpen == true then
         local dep = tonumber(state.DepartureAt) or 0
@@ -4094,8 +4192,25 @@ function PhantomExpressManager:HasWork()
 end
 
 function PhantomExpressManager:Board()
+    local hasAccess, _, ticketTool = self:HasBoardingAccess()
+    if not hasAccess then
+        return false
+    end
+
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root or not hum then return false end
+
+    -- If a physical ticket tool exists, equip it into hands before boarding
+    if ticketTool and hum and ticketTool.Parent ~= char then
+        pcall(function() hum:EquipTool(ticketTool) end)
+        task.wait(0.3)
+    end
+
     local boardPrompt = self:FindPrompt("Name", "TrainBoard")
     if not boardPrompt then return false end
+
     local part = boardPrompt.Parent
     if part and part:IsA("BasePart") then
         local targetPos = part.Position + Vector3.new(0, 3, 0)
@@ -4109,52 +4224,235 @@ function PhantomExpressManager:Board()
         end
     end
 
+    -- Trigger proximity prompt
+    UniversalCompat.FireProximityPrompt(boardPrompt)
+    task.wait(0.2)
+
+    -- Invoke authoritative server remote
     local ok, res = invokeRemote("RF/TrainEvent/Action", "Board")
-    if ok and res then
-        local deadline = os.clock() + 25
-        while os.clock() < deadline and not self:IsInTown() do
-            Services.RunService.Heartbeat:Wait()
-        end
+    if ok and res == true then
         return true
     end
     return false
 end
 
-function PhantomExpressManager:ReturnHome()
-    local returnPrompt = self:FindPrompt("Name", "TrainReturn")
-    if returnPrompt and returnPrompt.Parent and returnPrompt.Parent:IsA("BasePart") then
-        local targetPos = returnPrompt.Parent.Position + Vector3.new(0, 3, 0)
-        local startAttr = returnPrompt:GetAttribute("ReturnRailStart")
-        local endAttr = returnPrompt:GetAttribute("ReturnRailEnd")
-        if typeof(startAttr) == "Vector3" and typeof(endAttr) == "Vector3" then
-            targetPos = (startAttr + endAttr) * 0.5 + Vector3.new(0, 3, 0)
+function PhantomExpressManager:TradeSouls()
+    local state = self:GetState(true)
+    local soulShop = type(state) == "table" and state.SoulShop or nil
+
+    -- Check if soul shop requires nearby prompt
+    local shopPrompt = self:FindPrompt("TrainEventAction", "OpenSoulShop") or self:FindPrompt("Name", "OpenSoulShop")
+    if shopPrompt and shopPrompt.Parent and shopPrompt.Parent:IsA("BasePart") then
+        local _, root = getAliveRig()
+        if root and (root.Position - shopPrompt.Parent.Position).Magnitude > 15 then
+            if GhostDogManager and GhostDogManager.MoveTo then
+                GhostDogManager:MoveTo(shopPrompt.Parent.Position + Vector3.new(0, 3, 0), 6.0)
+            end
         end
-        if GhostDogManager and GhostDogManager.MoveTo then
-            GhostDogManager:MoveTo(targetPos, 8.0)
+        UniversalCompat.FireProximityPrompt(shopPrompt)
+        task.wait(0.3)
+    end
+
+    -- Query status / OpenSoulShop remote
+    local sOk, sRes = invokeRemote("RF/TrainEvent/Action", "OpenSoulShop")
+    if sOk and type(sRes) == "table" and sRes.SoulShop then
+        soulShop = sRes.SoulShop
+    elseif not soulShop then
+        local qOk, qRes = invokeRemote("RF/TrainEvent/Action", "Status")
+        if qOk and type(qRes) == "table" then
+            soulShop = qRes.SoulShop
         end
     end
 
-    invokeRemote("RF/TrainEvent/Action", "Return")
-    if self.State and self.State.DepartureAt then
-        self.DoneDeparture = self.State.DepartureAt
+    if type(soulShop) == "table" and soulShop.CanTrade then
+        local currentSouls = tonumber(soulShop.Souls) or 0
+        local cost = tonumber(soulShop.Cost) or 100
+
+        for _ = 1, 50 do
+            if currentSouls < cost then break end
+            local tOk, tRes = invokeRemote("RF/TrainEvent/Action", "TradeSouls", cost)
+            if not tOk or tRes == false then break end
+
+            if type(tRes) == "table" and tRes.Souls ~= nil then
+                currentSouls = tonumber(tRes.Souls) or 0
+            else
+                currentSouls = currentSouls - cost
+            end
+            task.wait(0.3)
+        end
+    end
+end
+
+function PhantomExpressManager:ReturnHome()
+    -- Prevent spamming return requests within 25 seconds
+    if os.clock() - self.ReturnState.LastReturnCall < 25 then
+        return false
+    end
+    self.ReturnState.LastReturnCall = os.clock()
+    self.ReturnState.HasLeftTown = true
+
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+    -- 1. Unequip any tools (e.g. Ghost Vacuum)
+    if hum then
+        pcall(function() hum:UnequipTools() end)
+    end
+
+    -- 2. Find physical return train prompt and glide to its rail
+    local returnPrompt = self:FindPrompt("Name", "TrainReturn")
+    if returnPrompt and returnPrompt.Parent and root then
+        local railStart = returnPrompt:GetAttribute("ReturnRailStart")
+        local targetPos = (typeof(railStart) == "Vector3") and railStart or returnPrompt.Parent:GetPivot().Position
+
+        -- Glide character to return platform
+        if GhostDogManager and GhostDogManager.MoveTo then
+            GhostDogManager:MoveTo(targetPos + Vector3.new(0, 3, 0), 8.0)
+        else
+            pcall(function()
+                root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
+                root.AssemblyLinearVelocity = Vector3.zero
+            end)
+        end
+        task.wait(0.2)
+
+        -- Trigger the prompt
+        UniversalCompat.FireProximityPrompt(returnPrompt)
+    end
+
+    -- 3. Invoke authoritative server remote to start return trip
+    local ok, res = invokeRemote("RF/TrainEvent/Action", "Return")
+    if ok and res == true then
+        if self.State and self.State.DepartureAt then
+            self.DoneDeparture = self.State.DepartureAt
+            self.ReturnState.DoneDepartureTime = self.State.DepartureAt
+        end
+        return true
+    end
+
+    return false
+end
+
+function PhantomExpressManager:CleanupAfterTownExit()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+
+    if hum then
+        pcall(function()
+            hum:UnequipTools()
+            hum.AutoRotate = true
+            hum.PlatformStand = false
+        end)
+    end
+
+    if root then
+        pcall(function()
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end)
     end
 end
 
 function PhantomExpressManager:Process()
     if self.IsActive then return end
     self.IsActive = true
-    PriorityManager:Acquire("Train", 30.0)
+    PriorityManager:Acquire("Train", 45.0)
 
+    -- Phase 1: Ingress & Board (if outside town)
     if not self:IsInTown() then
-        self:Board()
+        local boarded = self:Board()
+        if boarded then
+            -- Wait inside train car while maintaining character lock
+            local deadline = os.clock() + 30
+            while os.clock() < deadline and not self:IsInTown() do
+                if isHalloweenMapClosed() then break end
+                PriorityManager:Acquire("Train", 30.0)
+                Services.RunService.Heartbeat:Wait()
+            end
+        else
+            self.IsActive = false
+            PriorityManager:Release("Train")
+            return
+        end
     end
 
+    if not self:IsInTown() then
+        self.IsActive = false
+        PriorityManager:Release("Train")
+        return
+    end
+
+    -- Phase 2: Operations inside Forgotten Town
+    local townStart = os.clock()
+    local maxTownDuration = 180 -- safety timeout (3 mins)
+
+    while self:IsInTown() and (os.clock() - townStart) < maxTownDuration do
+        if isHalloweenMapClosed() then break end
+
+        -- Retain active task lock throughout entire stay in town
+        PriorityManager:Acquire("Train", 30.0)
+
+        local processedAction = false
+
+        -- 1. Ghouler Boss combat (if autoVacuum is enabled)
+        if getgenv().config.autoVacuum and GhoulerBossManager then
+            local ghouler = GhoulerBossManager:GetGhoulerBoss()
+            if ghouler then
+                GhoulerBossManager:ProcessBoss(ghouler)
+                processedAction = true
+            end
+        end
+
+        -- 2. Invasion Ghosts vacuuming with 16-point orbit (if autoVacuum is enabled and not fighting boss)
+        if not processedAction and getgenv().config.autoVacuum and GhoulerBossManager then
+            local ghost = GhoulerBossManager:GetBestGhost()
+            if ghost then
+                GhoulerBossManager:CaptureActiveGhost(ghost)
+                processedAction = true
+            end
+        end
+
+        -- 3. If no active combat / ghosts: check departure or trade souls
+        if not processedAction then
+            local state = self:GetState()
+            local dep = state and tonumber(state.DepartureAt)
+            local now = Services.Workspace:GetServerTimeNow()
+
+            -- If train departure is approaching (<= 8s left) or expired
+            if dep and (now >= dep - 8 or dep <= now) then
+                if getgenv().config.autoTradeSouls then
+                    self:TradeSouls()
+                end
+                self:ReturnHome()
+                break
+            elseif getgenv().config.autoTradeSouls then
+                self:TradeSouls()
+            end
+
+            task.wait(0.5)
+        else
+            Services.RunService.Heartbeat:Wait()
+        end
+    end
+
+    -- Safety check: return home if town phase ended or timed out
+    if self:IsInTown() then
+        if getgenv().config.autoTradeSouls then
+            self:TradeSouls()
+        end
+        self:ReturnHome()
+    end
+
+    self:CleanupAfterTownExit()
     self.IsActive = false
     PriorityManager:Release("Train")
 end
 
 function PhantomExpressManager:Abort()
     self.IsActive = false
+    self:CleanupAfterTownExit()
     PriorityManager:Release("Train")
 end
 
@@ -4166,19 +4464,35 @@ GhoulerBossManager = {
     LastSuckAt = 0
 }
 
-function GhoulerBossManager:HasVacuum()
+function GhoulerBossManager:GetGhostVacuum(forBoss)
     local char = LocalPlayer.Character
     local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
     local function check(c)
         if not c then return nil end
         for _, item in ipairs(c:GetChildren()) do
-            if item:IsA("Tool") and (item:GetAttribute("GhostVacuum") == true or item:GetAttribute("GhostBossVacuum") ~= nil or item.Name:lower():find("vacuum")) then
-                return item
+            if item:IsA("Tool") then
+                if forBoss and item:GetAttribute("GhostBossVacuum") ~= nil then
+                    return item
+                end
+                if item:GetAttribute("GhostVacuum") == true or item.Name:lower():find("vacuum") then
+                    return item
+                end
             end
         end
         return nil
     end
     return check(char) or check(bp)
+end
+
+function GhoulerBossManager:EquipVacuum(forBoss)
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local vac = self:GetGhostVacuum(forBoss)
+    if vac and hum and vac.Parent ~= char then
+        pcall(function() hum:EquipTool(vac) end)
+        task.wait(0.2)
+    end
+    return vac
 end
 
 function GhoulerBossManager:PickupVacuum()
@@ -4197,65 +4511,142 @@ function GhoulerBossManager:GetGhoulerBoss()
     if gState then
         local phase = gState:GetAttribute("Phase")
         local bossId = gState:GetAttribute("BossId")
-        if bossId ~= "" and (phase == "Alive" or phase == "Spawning") then
+        local realm = gState:GetAttribute("Realm")
+        if bossId ~= "" and (phase == "Alive" or phase == "Spawning") and (realm == "Town" or realm == nil) then
             return gState
         end
     end
     return nil
 end
 
-function GhoulerBossManager:GetInvasionGhosts()
-    local visuals = Services.Workspace:FindFirstChild("TrainGhostVisuals")
-    if not visuals then return {} end
-    local list = {}
-    for _, child in ipairs(visuals:GetChildren()) do
-        if child:GetAttribute("TrainGhost") or child:FindFirstChildWhichIsA("BasePart") then
-            table.insert(list, child)
-        end
-    end
-    return list
-end
-
-function GhoulerBossManager:SelectTargetGhost(ghosts, mode)
+function GhoulerBossManager:GetBestGhost()
+    local ghostFolder = Services.Workspace:FindFirstChild("TrainGhostVisuals")
     local _, root = getAliveRig()
-    if not root or #ghosts == 0 then return nil end
-    local best = nil
+    if not ghostFolder or not root then return nil end
+
+    local bestGhost = nil
     local bestScore = -math.huge
-    for _, g in ipairs(ghosts) do
-        local gPart = g:IsA("BasePart") and g or g:FindFirstChildWhichIsA("BasePart")
-        if gPart then
-            local dist = (gPart.Position - root.Position).Magnitude
-            local rarityWeight = g.Name:find("Vengeful") and 3 or (g.Name:find("Haunted") and 2 or 1)
-            local score = (mode == "Closest") and (-dist) or (rarityWeight * 100000 - dist)
+
+    for _, ghost in ipairs(ghostFolder:GetChildren()) do
+        if ghost:GetAttribute("TrainGhost") and ghost:IsA("PVInstance") then
+            local ghostPos = ghost:GetPivot().Position
+            local dist = (ghostPos - root.Position).Magnitude
+
+            local name = ghost.Name:lower()
+            local rarityWeight = name:find("vengeful") and 300000 or (name:find("haunted") and 200000 or 100000)
+
+            local score = rarityWeight - dist
             if score > bestScore then
                 bestScore = score
-                best = gPart
+                bestGhost = ghost
             end
         end
     end
-    return best
+
+    return bestGhost
 end
 
-function GhoulerBossManager:TradeSouls()
-    local prompt = PhantomExpressManager and PhantomExpressManager:FindPrompt("TrainEventAction", "OpenSoulShop")
-    if prompt and prompt.Parent and prompt.Parent:IsA("BasePart") then
-        if GhostDogManager and GhostDogManager.MoveTo then
-            GhostDogManager:MoveTo(prompt.Parent.Position + Vector3.new(0, 3, 0), 6.0)
-        end
-        UniversalCompat.FireProximityPrompt(prompt)
-        task.wait(0.5)
+function GhoulerBossManager:CalculateOptimalVacuumPosition(ghostPos, currentProgress)
+    local ghostFolder = Services.Workspace:FindFirstChild("TrainGhostVisuals")
+    local char = LocalPlayer.Character
+
+    local orbitRadius = 15
+    if currentProgress >= 0.75 then
+        orbitRadius = 7
+    elseif currentProgress >= 0.5 then
+        orbitRadius = 10
     end
 
-    local ok, res = invokeRemote("RF/TrainEvent/Action", "OpenSoulShop")
-    local shop = (ok and type(res) == "table" and res.SoulShop) or (PhantomExpressManager and PhantomExpressManager.State and PhantomExpressManager.State.SoulShop)
-    for i = 1, 50 do
-        if type(shop) == "table" and shop.CanTrade and (tonumber(shop.Souls) or 0) >= (tonumber(shop.Cost) or math.huge) then
-            local tOk = invokeRemote("RF/TrainEvent/Action", "TradeSouls", shop.Cost)
-            if not tOk then break end
-            shop.Souls = (tonumber(shop.Souls) or 0) - (tonumber(shop.Cost) or 0)
-            task.wait(0.3)
-        else
-            break
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = { char, ghostFolder }
+
+    local bestPosition = nil
+    local bestScore = -math.huge
+
+    for i = 0, 15 do
+        local angle = i * (math.pi / 8)
+        local offset = Vector3.new(math.cos(angle), 0, math.sin(angle)) * orbitRadius
+        local testPos = ghostPos + offset
+
+        local rayResult = Services.Workspace:Raycast(ghostPos, testPos - ghostPos, rayParams)
+        local hasWall = (rayResult ~= nil)
+
+        local score = (hasWall and -1000 or 100)
+        if score > bestScore then
+            bestScore = score
+            bestPosition = testPos
+        end
+    end
+
+    return bestPosition or (ghostPos + Vector3.new(0, 0, orbitRadius))
+end
+
+function GhoulerBossManager:CaptureActiveGhost(ghost)
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not ghost or not root then return end
+
+    local vac = self:GetGhostVacuum(false)
+    if not vac then
+        self:PickupVacuum()
+        vac = self:GetGhostVacuum(false)
+    end
+    self:EquipVacuum(false)
+
+    local ghostPivot = ghost:IsA("PVInstance") and ghost or ghost:FindFirstChildWhichIsA("BasePart")
+    if not ghostPivot then return end
+
+    local ghostPos = ghost:GetPivot().Position
+    local progress = math.clamp(tonumber(ghost:GetAttribute("ServerCaptureProgress")) or 0, 0, 1)
+
+    local standPos = self:CalculateOptimalVacuumPosition(ghostPos, progress)
+
+    local flatDiff = Vector3.new(standPos.X - root.Position.X, 0, standPos.Z - root.Position.Z)
+    if flatDiff.Magnitude > 2 then
+        local moveSpeed = (progress > 0.5) and 60 or 250
+        root.AssemblyLinearVelocity = flatDiff.Unit * moveSpeed
+    else
+        root.AssemblyLinearVelocity = Vector3.zero
+    end
+
+    root.CFrame = CFrame.lookAt(root.Position, Vector3.new(ghostPos.X, root.Position.Y, ghostPos.Z))
+
+    if os.clock() - self.LastSuckAt >= 0.2 then
+        self.LastSuckAt = os.clock()
+        local dir = ((ghostPos + Vector3.new(0, 4, 0)) - root.Position).Unit
+        fireRemote("RE/GhostBoss/Suction", true, dir)
+    end
+end
+
+function GhoulerBossManager:ProcessBoss(ghouler)
+    local _, root, hum = getAliveRig()
+    if not root or not hum then return end
+
+    local vac = self:GetGhostVacuum(true)
+    if not vac then
+        self:PickupVacuum()
+        vac = self:GetGhostVacuum(true)
+    end
+    self:EquipVacuum(true)
+
+    local groundPos = ghouler:GetAttribute("Ground")
+    if typeof(groundPos) == "Vector3" then
+        local vel = ghouler:GetAttribute("Velocity")
+        local movedAt = tonumber(ghouler:GetAttribute("MovedAt")) or Services.Workspace:GetServerTimeNow()
+        if typeof(vel) == "Vector3" then
+            groundPos = groundPos + vel * math.clamp(Services.Workspace:GetServerTimeNow() - movedAt, 0, 0.3)
+        end
+        local diff = root.Position - groundPos
+        local flatDiff = Vector3.new(diff.X, 0, diff.Z)
+        local unitDiff = (flatDiff.Magnitude > 0.5 and flatDiff.Unit or Vector3.new(1, 0, 0))
+        local standPos = groundPos + unitDiff * 42 + Vector3.new(0, 3, 0)
+        root.CFrame = CFrame.lookAt(standPos, Vector3.new(groundPos.X, standPos.Y, groundPos.Z))
+
+        if os.clock() - self.LastSuckAt >= 0.25 then
+            self.LastSuckAt = os.clock()
+            local dir = ((groundPos + Vector3.new(0, 8, 0)) - root.Position).Unit
+            fireRemote("RE/GhostBoss/Suction", true, dir)
         end
     end
 end
@@ -4264,100 +4655,21 @@ function GhoulerBossManager:HasWork()
     if getgenv().config.autoVacuum ~= true or isHalloweenMapClosed() then return false end
     if not (PhantomExpressManager and PhantomExpressManager:IsInTown()) then return false end
     if self:GetGhoulerBoss() ~= nil then return true end
-    local ghosts = self:GetInvasionGhosts()
-    if #ghosts > 0 then return true end
-    if getgenv().config.autoTradeSouls == true then
-        local shop = PhantomExpressManager and PhantomExpressManager.State and PhantomExpressManager.State.SoulShop
-        if type(shop) == "table" and shop.CanTrade and (tonumber(shop.Souls) or 0) >= (tonumber(shop.Cost) or math.huge) then
-            return true
-        end
-    end
+    local ghostFolder = Services.Workspace:FindFirstChild("TrainGhostVisuals")
+    if ghostFolder and #ghostFolder:GetChildren() > 0 then return true end
     return false
 end
 
 function GhoulerBossManager:Process()
-    if self.IsActive then return end
-    self.IsActive = true
-    PriorityManager:Acquire("Vacuum", 15.0)
-
-    local vacuum = self:HasVacuum()
-    if not vacuum then
-        self:PickupVacuum()
-        vacuum = self:HasVacuum()
+    if PhantomExpressManager and PhantomExpressManager.Process then
+        PhantomExpressManager:Process()
     end
-
-    local _, root, hum = getAliveRig()
-    if not root or not hum then
-        self.IsActive = false
-        PriorityManager:Release("Vacuum")
-        return
-    end
-
-    if vacuum and hum then hum:EquipTool(vacuum) end
-
-    local ghouler = self:GetGhoulerBoss()
-    if ghouler then
-        local groundPos = ghouler:GetAttribute("Ground")
-        if typeof(groundPos) == "Vector3" then
-            local vel = ghouler:GetAttribute("Velocity")
-            local movedAt = tonumber(ghouler:GetAttribute("MovedAt")) or Services.Workspace:GetServerTimeNow()
-            if typeof(vel) == "Vector3" then
-                groundPos = groundPos + vel * math.clamp(Services.Workspace:GetServerTimeNow() - movedAt, 0, 0.3)
-            end
-            local diff = root.Position - groundPos
-            local flatDiff = Vector3.new(diff.X, 0, diff.Z)
-            local unitDiff = (flatDiff.Magnitude > 0.5 and flatDiff.Unit or Vector3.new(1, 0, 0))
-            local standPos = groundPos + unitDiff * 42 + Vector3.new(0, 3, 0)
-            root.CFrame = CFrame.lookAt(standPos, Vector3.new(groundPos.X, standPos.Y, groundPos.Z))
-
-            if os.clock() - self.LastSuckAt >= 0.25 then
-                self.LastSuckAt = os.clock()
-                local dir = ((groundPos + Vector3.new(0, 8, 0)) - root.Position).Unit
-                fireRemote("RE/GhostBoss/Suction", true, dir)
-            end
-        end
-    else
-        local ghosts = self:GetInvasionGhosts()
-        local mode = getgenv().config.ghostTarget or "Rarest First"
-        local targetPart = self:SelectTargetGhost(ghosts, mode)
-        if targetPart then
-            local standDist = 12
-            local diff = root.Position - targetPart.Position
-            local flatDiff = Vector3.new(diff.X, 0, diff.Z)
-            local unitDiff = (flatDiff.Magnitude > 0.5 and flatDiff.Unit or Vector3.new(1, 0, 0))
-            local standPos = targetPart.Position + unitDiff * standDist + Vector3.new(0, 3, 0)
-
-            local rParams = RaycastParams.new()
-            rParams.FilterType = Enum.RaycastFilterType.Exclude
-            rParams.FilterDescendantsInstances = {LocalPlayer.Character}
-            local groundHit = Services.Workspace:Raycast(standPos + Vector3.new(0, 5, 0), Vector3.new(0, -20, 0), rParams)
-            if groundHit then standPos = Vector3.new(standPos.X, groundHit.Position.Y + 3, standPos.Z) end
-
-            root.CFrame = CFrame.lookAt(standPos, Vector3.new(targetPart.Position.X, standPos.Y, targetPart.Position.Z))
-
-            if os.clock() - self.LastSuckAt >= 0.25 then
-                self.LastSuckAt = os.clock()
-                local dir = ((targetPart.Position + Vector3.new(0, 4, 0)) - root.Position).Unit
-                fireRemote("RE/GhostBoss/Suction", true, dir)
-            end
-        elseif getgenv().config.autoTradeSouls == true then
-            self:TradeSouls()
-            if PhantomExpressManager and PhantomExpressManager.ReturnHome then
-                PhantomExpressManager:ReturnHome()
-            end
-        end
-    end
-
-    self.IsActive = false
-    PriorityManager:Release("Vacuum")
 end
 
 function GhoulerBossManager:Abort()
     self.IsActive = false
     PriorityManager:Release("Vacuum")
 end
-
--- ==============================================================================
 -- [ TASK PRIORITY ARBITRATOR ]
 -- ==============================================================================
 PriorityManager = {
@@ -5871,10 +6183,13 @@ WorkerScheduler:Register("HalloweenFishing", 0.1, function()
 end)
 
 WorkerScheduler:Register("PhantomExpress", 0.2, function()
-    if not getgenv().config.autoTrain or isHalloweenMapClosed() then return end
-    if not PriorityManager:CanRun("Train") then return end
-    if not PhantomExpressManager:HasWork() then return end
+    if not getgenv().config.autoTrain and not getgenv().config.autoVacuum and not getgenv().config.autoTradeSouls then return end
+    if isHalloweenMapClosed() then return end
 
+    if not PhantomExpressManager:HasWork() then return end
+    if not PriorityManager:CanRun("Train") then return end
+
+    -- Cross-dimension entry: if outside Halloween and not in town, enter through portal
     if not HalloweenPortalManager.IsInHalloweenDimension() and not PhantomExpressManager:IsInTown() then
         if PriorityManager:Acquire("Train", 10.0) then
             HalloweenPortalManager.EnterDimension(5.0)
@@ -5887,11 +6202,13 @@ WorkerScheduler:Register("PhantomExpress", 0.2, function()
 end)
 
 WorkerScheduler:Register("GhoulerBoss", 0.05, function()
+    -- GhoulerBoss and PhantomExpress are unified under the town processing loop.
+    -- If player is in town and not yet active, ensure town operations run.
     if not getgenv().config.autoVacuum or isHalloweenMapClosed() then return end
-    if not PriorityManager:CanRun("Vacuum") then return end
-    if not GhoulerBossManager:HasWork() then return end
+    if not PhantomExpressManager:IsInTown() then return end
+    if not PriorityManager:CanRun("Train") then return end
 
-    pcall(function() GhoulerBossManager:Process() end)
+    pcall(function() PhantomExpressManager:Process() end)
 end)
 
 WorkerScheduler:Register("AutoBuyHalloweenEgg", 1.5, function()
@@ -5927,6 +6244,11 @@ end)
 WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     local char = LocalPlayer.Character
     if not char then return end
+
+    -- Forgotten Town immunity: never route or teleport while in town!
+    if PhantomExpressManager and PhantomExpressManager:IsInTown() then
+        return
+    end
 
     local inHalloween = HalloweenPortalManager.IsInHalloweenDimension()
     local topTask = PriorityManager:GetTopWantedTask()

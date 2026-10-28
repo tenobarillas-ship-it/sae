@@ -18,6 +18,7 @@
    - 6.5 [Halloween Dimension & World Automations](#65-halloween-dimension--world-automations)
      - 6.5.1 [Halloween Dimension Rules & Autonomous Travel](#651-architectural-rules-halloween-event-2026--halloween-dimension)
    - 6.6 [Character Integrity, GodMode & Anti-Ragdoll](#66-character-integrity-godmode--anti-ragdoll)
+   - 6.7 [Travel, Movement & Tweening Architecture Rules](#67-travel-movement--tweening-architecture-rules)
 7. [Unified Priority System & Concurrency Architecture](#7-unified-priority-system--concurrency-architecture)
 8. [Anti-Cheat Detection Vectors & Hardening Guidelines](#8-anti-cheat-detection-vectors--hardening-guidelines)
 9. [Commit History & Version Milestones](#9-commit-history--version-milestones)
@@ -498,6 +499,29 @@ local function applyGodMode(character)
 end
 ```
 
+### 6.7 Travel, Movement & Tweening Architecture Rules
+
+To guarantee cross-executor stability, physics synchronization, and immunity to anti-cheat distance/speed rollback flags, all character movement and navigation across the script must adhere to the following architecture rules:
+
+#### 1. Tweening and Movement Constraints
+- **Do Not Use Ordinary `TweenService` for Character Travel:** Roblox's ordinary `TweenService:Create` moves a character's RootPart without updating `AssemblyLinearVelocity` or accounting for physics state transitions (`PlatformStand`, ragdoll hooks), triggering server-side teleport or speed rollback detections.
+- **Inspect Existing Movement Architecture First:** Before implementing any character movement, inspect the existing movement system and understand how its interception handling, movement hooks (`PlatformStand`, `setCollisions(false)`), and compatibility mechanisms (`UniversalCompat`) work.
+- **Reuse Established Movement Implementations:** Always reuse the established Heartbeat linear glide pattern (`GlideTo`: linear `dt` stepping + `AssemblyLinearVelocity` synchronization + collision suppression) rather than creating a separate, simplified or divergent movement system.
+- **Preserve Compatibility Mechanisms:** Movement speed can be adjusted when necessary, but changes must preserve the existing movement architecture and its compatibility mechanisms.
+- **Never Bypass Movement Handling for Raw Speed:** Do not remove or bypass existing movement handling just to make movement faster.
+- **Avoid Unnecessary Delays:** Avoid introducing arbitrary waits or slow movement behavior (e.g. 55 studs/s crawls).
+
+#### 2. Travel Speed Optimization Rules
+- **Speed Review Scope:** Features involving character travel (Auto Fish dock navigation, Auto Pumpkin pursuit, Ghost Dog quest markers, Phantom Express boarding, Ghouler Boss vacuum/souls) may have their movement speed reviewed and optimized (standardized at 180–280 studs/s).
+- **Separation from Teleportation (TP):** Teleportation (TP) behavior must remain strictly separate and must NOT be modified as part of ordinary travel-speed optimization.
+- **Feature-Specific Requirements:** Always check whether a feature has its own movement requirements (e.g. proximity prompt activation ranges, water detection, moving NPC lead tracking) before changing its speed.
+
+#### 3. Strict Boundary: Normal Dimension Auto Steal Exclusion
+- **Normal Dimension Auto Steal (`FastSteal` / `AutoFarm`, lines 4800–5500 & 5809–5920):** Is **100% EXCLUDED** from general travel-speed optimization or refactoring.
+- Its exact 4-phase delivery pipeline, hop-drop-regrab boundary checkpoint ($X = 600.2$), micro-hop corridor steps, and natural `hum.WalkSpeed` carry must remain completely untouched.
+
+---
+
 ---
 
 ## 7. Unified Priority System & Concurrency Architecture
@@ -605,3 +629,4 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `edf23532509cd58510152fad819eb5aba89f312d` | `refactor(boss): event-scoped completion & auto-repeat` | Removed Repeat Boss Runs toggle; scoped completion to current event; King disappearance triggers immediate arena exit; ignores lingering open portal until it closes, automatically re-arming for next event. |
 | `3eb79135aa589d6e281ccf3f90960c4862a73eff` | `feat(halloween): complete halloween automation suite & task mutex` | Integrated Auto Ghost Dog Quest (5 stages + spline dive), Auto Fishing (water raycast + charge luck + reel), Phantom Express (ticket boarding + return latch), Auto Vacuum Ghouler Boss (16-point orbit + aim lead + soul shop), TweenService portal entry, PumpkinMoon attribute gating, and Centralized Character Mutex (ActiveTask). |
 | `e55a8a4f1e630da82e9c45da2a95f5fab045c708` | `fix(fishing-boss): auto fishing multi-pass raycasting & 6-state auto boss` | Repaired Auto Fishing: radial direction scanner centered on dock LookVector, 6-pass transparency penetration raycast, character orientation & velocity pinning, and Ghost Dog Quest Stage 3 auto-delegation. Integrated 6-state Autonomous Recurring Event State Machine for Auto Boss: WAITING, ENTERING, INITIALIZING (3.0s buffer), ACTIVE, EXITING, COOLDOWN (portal lock verification). |
+| `3a1611c3f0c230d5673c3f6020aa3eae4a1da06e` | `feat(nav-pumpkin): auto fish dock navigation, sticky altar pumpkin selection & travel modernization` | Fixed Auto Fish navigation with dedicated dock GlideToSpot (260 studs/s) and sticky spot discovery; overhauled Auto Pumpkin with sticky nearest-target locking within Altar area (<= 280 studs) and dynamic moving pursuit; modernized GhostDogManager:MoveTo with Heartbeat linear glide (180 studs/s, fixing Phantom Express rail boarding and Ghouler vacuum/souls travel); added Section 6.7 Travel & Tweening Architecture Rules; preserved Normal Dimension Auto Steal 100% untouched. |

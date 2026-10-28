@@ -465,6 +465,20 @@ This is an essential architectural boundary. Some features possess their own ded
 - **No Portal Spam:** Do not repeatedly trigger portal entry while another feature is actively executing its own navigation.
 - **Zero Collision:** Eliminate conflicting movement, portal interactions, teleportation, or other navigation actions between concurrent features.
 
+### 6.5.2 4-State Realm Resolver, Dimension Isolation & Inactivity Hysteresis
+
+To eliminate dimension conflicts and prevent unintended portal transitions (such as trying to enter the Halloween portal while inside Forgotten Town or Boss Arena):
+1. **4-State Realm Resolver (`HalloweenPortalManager.GetCurrentRealm()`):**
+   The system categorizes the player's spatial context into one of four distinct realms:
+   - `"Town"`: Inside Forgotten Town (`workspace:FindFirstChild("GhostTown")` or `ForgottenTown`, or within 1,200 studs of Town center `(-3888, 38, -6370)`).
+   - `"Arena"`: Inside Boss Arena (`BossBattleArena`, `KingPumpkinBoss`, or within 600 studs of Arena center).
+   - `"Halloween"`: Inside Halloween Dimension main island ($\le 2500$ studs from Altar `(-924, 133, -6948)`).
+   - `"Normal"`: Standard overworld.
+2. **Autonomous Realm Immunity:**
+   When the current realm is `"Town"` or `"Arena"`, the global Dimension Supervisor grants total immunity: it does NOT attempt to navigate through `HalloweenDimensionPortal` or force the character into or out of portals. The owning feature (`PhantomExpressManager` or `AutoBossManager`) retains exclusive navigation authority.
+3. **5-Second Inactivity Hysteresis on Dimension Exit:**
+   When no Halloween tasks have work, the supervisor starts an inactivity timer (`halloweenInactivityStart`). It will only transition from Halloween back to Normal world if the realm has remained continuously inactive for at least 5.0 seconds (`os.clock() - halloweenInactivityStart >= 5.0`). This eliminates portal flip-flopping when seasonal tasks momentarily yield for respawns.
+
 > [!TIP]
 > **Core Principle:**
 > Halloween-specific features must ensure the player is in the Halloween Dimension before performing their actions. However, features with their own navigation requirements must retain full, unhindered control of their travel and execution logic.
@@ -540,23 +554,21 @@ To resolve concurrent task execution conflicts (where two active features fight 
 3. **Dimension Supervisor Non-Interference:**
    - The Dimension Supervisor will **NEVER** switch dimensions while `PriorityManager:IsLocked()` is `true`.
    - Dimension transitions only occur when the character is completely idle and free of ownership locks.
-4. **Independent Task Decoupling:**
-   - Tasks that do not control character movement (such as `Auto Upgrades`) run independently in the background without contending for or locking the character.
+4. **Decoupled Passive Network Workers:**
+   - Tasks that do not control character movement (such as `Auto Upgrades` base/treadmill and `Auto Buy Halloween Egg`) are decoupled from `PriorityManager.List` and run independently in `WorkerScheduler` as non-blocking remote workers, matching `ProgressionState.AddWorker` in reference implementations.
 
-### 7.2 Canonical 12-Task Supervisor Hierarchy in `qualcom`
-Tasks are evaluated strictly in canonical order (default order, user-reorderable in the Priority UI tab):
+### 7.2 Canonical 10-Task Movement Supervisor Hierarchy in `qualcom`
+Movement tasks are evaluated strictly in canonical order (default order, user-reorderable in the Priority UI tab):
 1. **`Auto Boss`** (Dimension: `Self` — autonomous portal/arena navigation)
-2. **`Auto Ghost Dog`** (Dimension: `Halloween`)
-3. **`Auto Train`** (Phantom Express & Train Event, Dimension: `Halloween`)
-4. **`Auto Vacuum`** (Auto Vacuum Ghouler Boss & Soul Trading, Dimension: `Halloween`)
-5. **`Auto Steal`** (Dimension: `Normal`)
-6. **`Candy Cane Farm`** (Dimension: `Halloween`)
-7. **`Auto Pumpkin`** (Dimension: `Halloween`)
-8. **`Auto Fishing`** (Dimension: `Halloween`)
-9. **`Auto Buy Halloween Egg`** (Dimension: `Halloween`)
-10. **`Enchanted / Bloom Event`** (Dimension: `Normal`)
-11. **`Auto Upgrades`** (Dimension: `Any` — independent background upgrades)
-12. **`Auto Treadmill`** (Dimension: `Normal` — idle training fallback)
+2. **`Auto Train`** (Unified Phantom Express, Forgotten Town, Ghouler Boss & Soul Trading, Dimension: `Halloween`)
+3. **`Auto Steal`** (Normal Dimension Auto Steal, Dimension: `Normal`)
+4. **`Auto Ghost Dog`** (Dimension: `Halloween`)
+5. **`Auto Pumpkin`** (Dimension: `Halloween`)
+6. **`Auto Fishing`** (Dimension: `Halloween`)
+7. **`Candy Cane Farm`** (Dimension: `Halloween`)
+8. **`Halloween Steal`** (Dimension: `Halloween`)
+9. **`Enchanted / Bloom Event`** (Dimension: `Normal`)
+10. **`Auto Treadmill`** (Dimension: `Normal` — idle training fallback)
 
 > [!NOTE]
 > `PriorityManager:Initialize()` inserts tasks missing from a saved `TaskPriorities` list at their **canonical index** (rather than dropping to the bottom), ensuring that new seasonal features naturally slot into their designated ranks upon script startup.
@@ -630,3 +642,4 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `3eb79135aa589d6e281ccf3f90960c4862a73eff` | `feat(halloween): complete halloween automation suite & task mutex` | Integrated Auto Ghost Dog Quest (5 stages + spline dive), Auto Fishing (water raycast + charge luck + reel), Phantom Express (ticket boarding + return latch), Auto Vacuum Ghouler Boss (16-point orbit + aim lead + soul shop), TweenService portal entry, PumpkinMoon attribute gating, and Centralized Character Mutex (ActiveTask). |
 | `e55a8a4f1e630da82e9c45da2a95f5fab045c708` | `fix(fishing-boss): auto fishing multi-pass raycasting & 6-state auto boss` | Repaired Auto Fishing: radial direction scanner centered on dock LookVector, 6-pass transparency penetration raycast, character orientation & velocity pinning, and Ghost Dog Quest Stage 3 auto-delegation. Integrated 6-state Autonomous Recurring Event State Machine for Auto Boss: WAITING, ENTERING, INITIALIZING (3.0s buffer), ACTIVE, EXITING, COOLDOWN (portal lock verification). |
 | `3a1611c3f0c230d5673c3f6020aa3eae4a1da06e` | `feat(nav-pumpkin): auto fish dock navigation, sticky altar pumpkin selection & travel modernization` | Fixed Auto Fish navigation with dedicated dock GlideToSpot (260 studs/s) and sticky spot discovery; overhauled Auto Pumpkin with sticky nearest-target locking within Altar area (<= 280 studs) and dynamic moving pursuit; modernized GhostDogManager:MoveTo with Heartbeat linear glide (180 studs/s, fixing Phantom Express rail boarding and Ghouler vacuum/souls travel); added Section 6.7 Travel & Tweening Architecture Rules; preserved Normal Dimension Auto Steal 100% untouched. |
+| `d8e869686f38fef24e9ee14b981908002960cc6d` | `refactor(dimension-priority): 4-state realm resolution, passive task decoupling & unified train lifecycle` | Overhauled dimension management with 4-state realm resolver (Normal, Halloween, Town, Arena), immune sub-dimension bypass, and 5-second exit hysteresis. Decoupled passive background tasks (Auto Upgrades, Auto Buy Halloween Egg) from PriorityManager movement mutex into independent WorkerScheduler routines. Unified Phantom Express and Ghouler Boss into continuous Auto Train lifecycle. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |

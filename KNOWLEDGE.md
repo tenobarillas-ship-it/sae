@@ -421,8 +421,12 @@ sequenceDiagram
   - **Automated Batch Soul Trading (`TradeSouls`):** Automatically trades accumulated souls in batches of `Cost` at `OpenSoulShop` when ghost invasion concludes or when the departure timer reaches $\le 8$ seconds.
 - **Auto Buy Halloween Dimension Egg:**
   - Automated merchant purchasing in the Halloween Dimension via `RF/HalloweenDimension/AskBuyEgg` with rate-limiting debounce.
-- **Auto Steal Halloween Eggs (Awaiting Clean Rebuild):**
-  - **Status:** Completely removed from codebase (`HalloweenStealManager`, settings, UI controls, `WorkerScheduler` task, and `PriorityManager` branches eliminated). Clean removal performed to prepare for an isolated from-scratch rebuild adhering strictly to the user-provided dual-workflow reference (`Halloweenautostealfixversion.txt`).
+- **Auto Steal Halloween Eggs (`HalloweenStealManager`):**
+  - **Dedicated UI Toggle:** `"Auto Steal Halloween Eggs"` in `halloweenCategory` with instant abort handling via `HalloweenStealManager.Abort()` on toggle-off.
+  - **Dimension Portal Integration:** When enabled while in the normal dimension, enters `HalloweenDimension` first via `HalloweenPortalManager.EnterDimension(5.0)`. Once in dimension, executes autonomous stealing cycle.
+  - **Dual-Workflow Architecture (Direct Reference Integration):**
+    - *Graveyard Eggs:* Discrete 40-stud `stepMove` to nest $\rightarrow$ grab via prompt & `AskCarryEgg` $\rightarrow$ `stepMove` to SafeZone boundary (+10 studs) $\rightarrow$ zero velocity & wait 1.5s (`GraveyardDeliverDelay`) $\rightarrow$ `naturalWalkTo` inside SafeZone (-10 studs) at natural WalkSpeed.
+    - *Haunted Swamps & Abandoned Manor Eggs:* `stepMove` to nest $\rightarrow$ grab $\rightarrow$ `stepMove` to boundary $\rightarrow$ drop via `AskDropEgg` $\rightarrow$ scan 130-stud radius around gate for dropped egg $\rightarrow$ `stepMove` onto dropped egg coordinates $\rightarrow$ regrab via prompt & remote $\rightarrow$ settle 0.4s (`OriginSettleTime`) $\rightarrow$ `naturalWalkTo` inside SafeZone.
 - **Candy Cane Monster Farm (`HalloweenCombatManager`):**
   - Rapid multi-bat auto-switching melee combat targeting seasonal monsters at safe hover elevation.
 - **Auto Boss (Pumpkin King) — 6-State Autonomous Recurring Event State Machine (`HalloweenBossManager`):**
@@ -656,3 +660,4 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `0e8f1a3286208caec1217ec2f623ab590bf26b9a` | `fix(gui): unhide Auto Steal Halloween Eggs UI toggle, target areas & min rarity controls` | Unhid Auto Steal Halloween Eggs toggle, Target Areas multi-dropdown, and Min Rarity dropdown under Halloween Event 2026 category in GUI. Removed forced disable in loadStuff() and isHalloweenStealEnabled(), enabling full autonomous operation and user visibility. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 
 | `d45bdd24999a761cef7d463ee59154986cd86ce7` | `refactor(halloween): completely remove Auto Halloween Steal Eggs implementation for fresh rebuild` | Completely removed Auto Halloween Steal Eggs feature (HalloweenStealManager, settings keys, UI controls, WorkerScheduler registration, and PriorityManager branches) from qualcom_clean.lua to prepare for clean rebuild from scratch based on user reference. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `67efb3b186509f9c3db91d03cd2e99e5dc12b216` | `feat(halloween): add Auto Steal Halloween Eggs with portal navigation & toggle` | Integrated headless instant steal service with dual-workflow architecture (Graveyard 1.5s settle vs Swamp/Manor drop-regrab), autonomous normal dimension portal entry via HalloweenPortalManager, clean toggle integration with instant abort, and PriorityManager mutual exclusivity. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |

@@ -139,6 +139,8 @@ local currentSettings = {
     AutoTradeSouls = false,
     AutoBuyHalloweenEgg = false,
     AutoHalloweenSteal = false,
+    HalloweenTargetAreas = { ["All"] = true },
+    HalloweenMinRarity = "All",
     TaskPriorities = {
         "Auto Boss",
         "Auto Steal",
@@ -166,6 +168,8 @@ local function loadStuff()
                 for k, v in pairs(decoded) do
                     if k == "TargetAreas" and type(v) == "table" then
                         currentSettings.TargetAreas = v
+                    elseif k == "HalloweenTargetAreas" and type(v) == "table" then
+                        currentSettings.HalloweenTargetAreas = v
                     elseif k == "TaskPriorities" and type(v) == "table" then
                         currentSettings.TaskPriorities = v
                     elseif type(v) == "table" and type(currentSettings[k]) == "table" then
@@ -183,6 +187,12 @@ local function loadStuff()
     end
         if type(currentSettings.MinRarity) ~= "string" or string.find(currentSettings.MinRarity, "table:") then
         currentSettings.MinRarity = "All"
+    end
+    if type(currentSettings.HalloweenTargetAreas) ~= "table" or next(currentSettings.HalloweenTargetAreas) == nil then
+        currentSettings.HalloweenTargetAreas = { ["All"] = true }
+    end
+    if type(currentSettings.HalloweenMinRarity) ~= "string" or string.find(currentSettings.HalloweenMinRarity, "table:") then
+        currentSettings.HalloweenMinRarity = "All"
     end
     end
 
@@ -204,6 +214,8 @@ getgenv().config.autoCraftEssence = currentSettings.AutoCraftEssence
 getgenv().config.butterflySpeed = currentSettings.ButterflySpeed
 getgenv().config.autoHalloweenSteal = currentSettings.AutoHalloweenSteal == true
 getgenv().InstantStealHalloween = currentSettings.AutoHalloweenSteal == true
+getgenv().config.halloweenTargetAreas = currentSettings.HalloweenTargetAreas
+getgenv().config.halloweenMinRarity = currentSettings.HalloweenMinRarity
 getgenv().config.autoCandyCane = currentSettings.AutoCandyCane
 getgenv().config.autoPumpkin = currentSettings.AutoPumpkin
 getgenv().AutoCatchPumpkins = currentSettings.AutoPumpkin
@@ -2707,7 +2719,39 @@ do
     -- [ SECTION 5: EGG SCANNING & RETRIEVAL ]
     -- ------------------------------------------------------------------------------
 
-    -- Scans WorldEggs for closest valid candidate (ignores prompt distance streaming)
+    -- Classifies egg area using friend's exact detection rules + HalloweenAreaManager
+    local function getEggArea(egg)
+        if not egg or not egg.Parent then return "Unknown" end
+        if HalloweenAreaManager and HalloweenAreaManager.GetArea then
+            return HalloweenAreaManager:GetArea(egg)
+        end
+
+        local zoneAttr = egg:GetAttribute("Zone")
+        if zoneAttr == 1 or zoneAttr == "1" or zoneAttr == "Zone1" then return "Graveyard"
+        elseif zoneAttr == 2 or zoneAttr == "2" or zoneAttr == "Zone2" then return "Haunted Swamps"
+        elseif zoneAttr == 3 or zoneAttr == "3" or zoneAttr == "Zone3" then return "Abandoned Manor"
+        end
+
+        local areaAttr = tostring(egg:GetAttribute("Area") or egg:GetAttribute("AreaId") or egg:GetAttribute("Location") or egg.Name):lower()
+        if areaAttr:find("manor") or areaAttr:find("abandoned") then return "Abandoned Manor"
+        elseif areaAttr:find("swamp") then return "Haunted Swamps"
+        elseif areaAttr:find("graveyard") or areaAttr:find("cemetery") then return "Graveyard"
+        end
+
+        local safeZone = getSafeZonePart()
+        if safeZone then
+            local eggPos = egg:GetPivot().Position
+            local distFromGate = (Vector3.new(eggPos.X, 0, eggPos.Z) - Vector3.new(safeZone.Position.X, 0, safeZone.Position.Z)).Magnitude
+            if distFromGate <= CONFIG.GraveyardMaxDistance then return "Graveyard"
+            elseif distFromGate >= CONFIG.ManorMinDistance then return "Abandoned Manor"
+            else return "Haunted Swamps"
+            end
+        end
+
+        return "Graveyard"
+    end
+
+    -- Scans WorldEggs for best valid candidate matching Target Areas and Min Rarity
     local function selectTargetEgg()
         local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
         local folder = dim and dim:FindFirstChild("WorldEggs")
@@ -2716,16 +2760,43 @@ do
         local _, root = getAliveRig()
         if not root then return nil end
 
+        local selectedAreas = getgenv().config.halloweenTargetAreas or currentSettings.HalloweenTargetAreas or { ["All"] = true }
+        local minFilter = getgenv().config.halloweenMinRarity or currentSettings.HalloweenMinRarity or "All"
+        local allowAllAreas = (selectedAreas["All"] == true) or (selectedAreas == "All")
+
         local bestEgg = nil
+        local bestScore = -math.huge
         local shortestDist = math.huge
 
         for _, egg in ipairs(folder:GetChildren()) do
             if egg:IsA("Model") or egg:IsA("BasePart") then
-                local pivot = egg:GetPivot().Position
-                local dist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(pivot.X, 0, pivot.Z)).Magnitude
-                if dist < shortestDist then
-                    shortestDist = dist
-                    bestEgg = egg
+                -- 1. Area Filter Check
+                local eggArea = getEggArea(egg)
+                local areaAllowed = allowAllAreas or (selectedAreas[eggArea] == true)
+
+                if areaAllowed then
+                    -- 2. Rarity Filter Check
+                    local rarityAllowed = true
+                    if minFilter ~= "All" and DynamicRarityResolver and DynamicRarityResolver.MeetsMinRarity then
+                        rarityAllowed = DynamicRarityResolver:MeetsMinRarity(egg, minFilter)
+                    end
+
+                    if rarityAllowed then
+                        -- 3. Candidate Scoring (Rarest/Highest Score first, with closest distance tie-breaker)
+                        local score = 0
+                        if DynamicRarityResolver and DynamicRarityResolver.GetEggScore then
+                            score = DynamicRarityResolver:GetEggScore(egg)
+                        end
+
+                        local pivot = egg:GetPivot().Position
+                        local dist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(pivot.X, 0, pivot.Z)).Magnitude
+
+                        if score > bestScore or (score == bestScore and dist < shortestDist) then
+                            bestScore = score
+                            shortestDist = dist
+                            bestEgg = egg
+                        end
+                    end
                 end
             end
         end
@@ -2912,6 +2983,8 @@ do
 
     -- External interface for toggle and PriorityManager
     HalloweenStealManager.State = State
+    HalloweenStealManager.SelectTargetEgg = selectTargetEgg
+    HalloweenStealManager.GetEggArea = getEggArea
     HalloweenStealManager.Abort = function()
         State.currentSession = State.currentSession + 1
         State.isBusy = false
@@ -5185,6 +5258,11 @@ function PriorityManager:IsTaskEnabled(taskName)
         return isStealEnabled() and not isMapClosed()
     elseif resolved == "Halloween Steal" then
         if isHalloweenMapClosed() or getgenv().InstantStealHalloween ~= true then return false end
+        if isCarryingEgg and isCarryingEgg() then return true end
+        if HalloweenStealManager and HalloweenStealManager.State and HalloweenStealManager.State.isBusy then return true end
+        if HalloweenStealManager and HalloweenStealManager.SelectTargetEgg then
+            return HalloweenStealManager.SelectTargetEgg() ~= nil
+        end
         return true
     elseif resolved == "Candy Cane Farm" then
         return getgenv().config.autoCandyCane == true and not isHalloweenMapClosed()
@@ -6839,6 +6917,22 @@ halloweenCategory:CreateToggle("Auto Steal Halloween Eggs", "Steal seasonal eggs
     if not state and HalloweenStealManager and HalloweenStealManager.Abort then
         HalloweenStealManager.Abort()
     end
+end)
+
+local halloweenAreaList = {
+    "All", "Graveyard", "Haunted Swamps", "Abandoned Manor"
+}
+
+halloweenCategory:CreateMultiDropdown("Target Areas", "Select Halloween areas to steal from", halloweenAreaList, currentSettings.HalloweenTargetAreas, function(selectedMap)
+    getgenv().config.halloweenTargetAreas = selectedMap
+    currentSettings.HalloweenTargetAreas = selectedMap
+    saveStuff()
+end)
+
+halloweenCategory:CreateDropdown("Min Rarity", "Only steal Halloween eggs with rarity >= this", rarityList, currentSettings.HalloweenMinRarity, function(selected)
+    getgenv().config.halloweenMinRarity = selected
+    currentSettings.HalloweenMinRarity = selected
+    saveStuff()
 end)
 
 halloweenCategory:CreateToggle("Candy Cane Monster Farm", "Auto weapon swap combat in dimension", currentSettings.AutoCandyCane, function(state)

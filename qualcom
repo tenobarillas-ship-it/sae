@@ -2704,53 +2704,37 @@ function HalloweenStealManager:Abort()
 end
 
 -- ==============================================================================
--- [ HALLOWEEN BOSS: AUTO-COMBAT, MODEL PORTAL & GROUNDED CANNON ENGINE ]
+-- [ HALLOWEEN BOSS: AUTONOMOUS RECURRING EVENT STATE MACHINE ]
 -- Halloween Event 2026 feature (KNOWLEDGE.md section 6.5.1).
 -- Auto Boss OWNS its navigation: Halloween Dimension -> BossPortal -> PumpkinArena
 -- -> BossExitPortal. The Dimension Supervisor must never interrupt it while active.
 -- ==============================================================================
 
--- Persistent global state table that survives thread restarts and prevents nil indexing.
-getgenv().BossFarmerState = getgenv().BossFarmerState or {
-    IsBusy = false,
-    CurrentBatIndex = 1,
-    -- Tracks whether the King has actually appeared alive during the current arena run.
+-- Shared lifecycle state table (backward compatible with BossFarmerState alias)
+getgenv().BossAutomationState = getgenv().BossAutomationState or {
+    CurrentState = "WAITING",
     KingEncountered = false,
-    -- Scoped to current boss event: true when King has been defeated.
-    CurrentEventCompleted = false,
-    -- Set when exiting after victory; waits for open portal to close before re-arming.
-    WaitingForPortalClose = false,
-    -- Timestamp when player entered the arena (for stale arena timeout).
-    ArenaEntryTime = 0,
-    -- Backward compatibility alias
-    RunCompleted = false
+    CurrentBatIndex = 1,
+    StateEnteredAt = os.clock(),
+    IsBusy = false
 }
--- A re-executed script must never inherit a stale busy lock from a killed thread.
+getgenv().BossFarmerState = getgenv().BossAutomationState
 getgenv().BossFarmerState.IsBusy = false
 
 HalloweenBossManager = {
     IsActive = false,
-    -- Rate limit for "probe" entries when the BossPortal model is not replicated yet.
     ProbeCooldownUntil = 0,
     Config = {
-        -- Default position of the BossPortal in HalloweenDimension.
         PortalPosition = Vector3.new(-5671.9, -202.6, -7314.7),
-        -- PumpkinArena spatial fallback (used when InPumpkinArena attribute is missing).
         ArenaCenter = Vector3.new(-133552.1, 477.7, 980.7),
         ArenaRadius = 600,
         ArenaFloorY = 476.24,
-        -- Safe standoff distance behind the boss (stays clear of frontal damage cleaves).
         CombatOffsetBehind = 14.0,
-        -- Safe glide speed when moving through the arena (prevents BAC-10518 velocity flag).
-        GlideSpeed = 100,
-        -- Interval between weapon cycles in seconds during melee combat.
-        SwitchInterval = 0.06,
-        -- Tuned delay between cannon shots matching server reload debounce.
-        CannonReloadDelay = 0.25,
-        -- Seconds between portal probes when the portal state cannot be read.
-        ProbeCooldown = 60
+        GlideSpeed = 250,
+        SwitchInterval = 0.05,
+        CannonReloadDelay = 0.18,
+        InitBufferTime = 3.0
     },
-    -- References to the game's networking remotes (resolved lazily, never blocks load).
     Remotes = {
         AskEnter = nil,
         CannonFire = nil,
@@ -2762,7 +2746,6 @@ function HalloweenBossManager:IsEnabled()
     return getgenv().config.autoBossEvent == true
 end
 
--- Resolves ReplicatedStorage remote objects without yielding.
 function HalloweenBossManager:ResolveRemotes()
     local r = self.Remotes
     if r.AskEnter and r.CannonFire and r.MonsterHit then return end
@@ -2775,22 +2758,23 @@ function HalloweenBossManager:ResolveRemotes()
     end
 end
 
--- Disables harmful humanoid physics states and strips ragdoll constraints.
--- Tool descendants are skipped so the bat/egg grip welds are never touched (BAC-7516 rule).
+function HalloweenBossManager:SetState(newState)
+    local state = getgenv().BossAutomationState
+    if state.CurrentState ~= newState then
+        state.CurrentState = newState
+        state.StateEnteredAt = os.clock()
+    end
+end
+
 function HalloweenBossManager:ApplyStateProtection(character)
     if not character then return end
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     if not humanoid then return end
 
-    -- BAC-10518: Never strip constraints while active server ragdoll timer is running
-    local ragdollEndTime = tonumber(LocalPlayer:GetAttribute("RagdollEndTime")) or 0
-    if ragdollEndTime > workspace:GetServerTimeNow() then
-        return
-    end
-
     local blockedStates = {
         Enum.HumanoidStateType.FallingDown,
-        Enum.HumanoidStateType.Ragdoll
+        Enum.HumanoidStateType.Ragdoll,
+        Enum.HumanoidStateType.Physics
     }
     for _, state in ipairs(blockedStates) do
         pcall(function() humanoid:SetStateEnabled(state, false) end)
@@ -2809,19 +2793,19 @@ function HalloweenBossManager:ApplyStateProtection(character)
     end
 end
 
--- Evaluates whether the local player is physically verified inside the PumpkinArena.
 function HalloweenBossManager:IsPlayerInArena()
     if LocalPlayer:GetAttribute("InPumpkinArena") == true then
         return true
     end
     local _, root = getAliveRig()
-    if root and (root.Position - self.Config.ArenaCenter).Magnitude <= self.Config.ArenaRadius then
-        return true
+    if root then
+        if (root.Position - self.Config.ArenaCenter).Magnitude <= self.Config.ArenaRadius then
+            return true
+        end
     end
     return false
 end
 
--- Scans Character and Backpack to return a list of all available bat tools.
 function HalloweenBossManager:GetInventoryBats()
     local bats = {}
     local seen = {}
@@ -2844,7 +2828,6 @@ function HalloweenBossManager:GetInventoryBats()
     return bats
 end
 
--- Executes the rapid weapon-switching attack method across all available bats.
 function HalloweenBossManager:PerformBatSwitchAttack(targetModel)
     local char, _, hum = getAliveRig()
     if not char or not hum then return end
@@ -2852,7 +2835,7 @@ function HalloweenBossManager:PerformBatSwitchAttack(targetModel)
     local bats = self:GetInventoryBats()
     if #bats == 0 then return end
 
-    local state = getgenv().BossFarmerState
+    local state = getgenv().BossAutomationState
     if state.CurrentBatIndex > #bats then
         state.CurrentBatIndex = 1
     end
@@ -2873,7 +2856,6 @@ function HalloweenBossManager:PerformBatSwitchAttack(targetModel)
     end
 end
 
--- Glides smoothly toward a target coordinate with collisions disabled.
 function HalloweenBossManager:GlideTo(targetPos, stopDistance)
     local char, root = getAliveRig()
     if not root then return false end
@@ -2905,7 +2887,7 @@ function HalloweenBossManager:GlideTo(targetPos, stopDistance)
         local dir = diff.Unit
         local step = math.min(speed * dt, diff.Magnitude)
 
-        liveRoot.AssemblyLinearVelocity = Vector3.new(0, -0.1, 0)
+        liveRoot.AssemblyLinearVelocity = dir * speed
         liveRoot.CFrame = CFrame.new(liveRoot.Position + dir * step, liveRoot.Position + dir * 10)
     end
 
@@ -2916,35 +2898,38 @@ function HalloweenBossManager:GlideTo(targetPos, stopDistance)
     return true
 end
 
--- PURE MODEL DETECTION: Determines portal state directly from the BossPortalSeal model.
--- Returns (known, isOpen). known = false when the BossPortal model is not replicated.
-function HalloweenBossManager:GetPortalState()
+function HalloweenBossManager:IsBossPortalOpen()
     local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
     local portal = dim and dim:FindFirstChild("BossPortal")
-    if not portal then return false, false end
+    if not portal then return false end
 
     local seal = portal:FindFirstChild("BossPortalSeal")
-    if not seal then
-        return true, true
-    end
+    if not seal then return true end
 
-    -- In closed state, Chains/Body have Transparency = 0.00
     for _, desc in ipairs(seal:GetDescendants()) do
         if desc:IsA("BasePart") and desc.Transparency < 0.5 then
-            return true, false
+            return false
         end
     end
-
-    -- In open state, all seal meshes have Transparency = 1.00
-    return true, true
+    return true
 end
 
-function HalloweenBossManager:IsBossPortalOpen()
-    local _, open = self:GetPortalState()
-    return open
+function HalloweenBossManager:IsBossPortalLocked()
+    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    local portal = dim and dim:FindFirstChild("BossPortal")
+    if not portal then return false end
+
+    local seal = portal:FindFirstChild("BossPortalSeal")
+    if not seal then return false end
+
+    for _, desc in ipairs(seal:GetDescendants()) do
+        if desc:IsA("BasePart") and desc.Transparency < 0.5 then
+            return true
+        end
+    end
+    return false
 end
 
--- Retrieves the entry point coordinate for BossPortal.
 function HalloweenBossManager:GetPortalTargetPos()
     local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
     local portal = dim and dim:FindFirstChild("BossPortal")
@@ -2958,11 +2943,10 @@ function HalloweenBossManager:GetPortalTargetPos()
     return self.Config.PortalPosition
 end
 
--- Locates the active boss model inside PumpkinArena and registers encounter state.
 function HalloweenBossManager:FindActiveBoss()
     local arena = Services.Workspace:FindFirstChild("PumpkinArena", true)
     if not arena then return nil, nil, nil end
-    local state = getgenv().BossFarmerState
+    local state = getgenv().BossAutomationState
 
     local king = arena:FindFirstChild("King")
     if king and king:IsA("Model") then
@@ -2992,7 +2976,6 @@ function HalloweenBossManager:FindActiveBoss()
     return nil, nil, nil
 end
 
--- Locates the player's personal assigned cannon model inside PumpkinArena.
 function HalloweenBossManager:GetAssignedCannon(arena)
     if not arena then return nil end
     local cannonsFolder = arena:FindFirstChild("Cannons")
@@ -3017,16 +3000,13 @@ function HalloweenBossManager:GetAssignedCannon(arena)
     return cannonsFolder:FindFirstChildWhichIsA("Model")
 end
 
--- Checks if the King Boss is in his shielded phase based on authoritative attributes.
 function HalloweenBossManager:IsKingShieldActive(arena)
     if not arena then return false end
     return arena:GetAttribute("Phase") == "Shield" or arena:GetAttribute("ShieldActive") == true
 end
 
--- Checks if the King Boss is currently stunned based on authoritative attributes.
 function HalloweenBossManager:IsKingStunned(arena)
     if not arena then return false end
-
     if arena:GetAttribute("Phase") == "Stunned" or arena:GetAttribute("StunEnds") ~= nil then
         return true
     end
@@ -3035,25 +3015,19 @@ function HalloweenBossManager:IsKingStunned(arena)
     if king and (king:GetAttribute("Stunned") == true or king:GetAttribute("Anim") == "Stunned") then
         return true
     end
-
     return false
 end
 
--- Determines whether the roots on the assigned cannon have been fully destroyed.
 function HalloweenBossManager:IsCannonFreed(cannon)
     if not cannon then return false end
 
-    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if playerGui then
-        for _, gui in ipairs(playerGui:GetChildren()) do
-            -- Skip our own hub GUI so its labels can never produce false positives.
-            if gui:IsA("ScreenGui") and gui.Enabled and gui.Name ~= "SyntaxHubGUI" then
-                for _, desc in ipairs(gui:GetDescendants()) do
-                    if desc:IsA("TextLabel") and desc.Visible then
-                        local t = desc.Text:lower()
-                        if t:find("man your cannon") or t:find("tap to fire") or t:find("stand on") or t:find("shoot at him") or t:find("stunned") then
-                            return true
-                        end
+    for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
+        if gui:IsA("ScreenGui") and gui.Enabled then
+            for _, desc in ipairs(gui:GetDescendants()) do
+                if desc:IsA("TextLabel") and desc.Visible then
+                    local t = desc.Text:lower()
+                    if t:find("man your cannon") or t:find("tap to fire") or t:find("stand on") or t:find("shoot at him") or t:find("stunned") then
+                        return true
                     end
                 end
             end
@@ -3072,13 +3046,11 @@ function HalloweenBossManager:IsCannonFreed(cannon)
     return false
 end
 
--- Calculates exact grounded position on the green circle pad by raycasting down to the floor.
 function HalloweenBossManager:GetCannonStandPosition(cannon)
     if not cannon then return nil end
 
     local targetX, targetZ = nil, nil
 
-    -- 1. Extract horizontal (X, Z) center from the stand pad or tutorial beam attachment
     local tutAtt = cannon:FindFirstChild("TutorialBeamTargetAttachment", true)
     if tutAtt and tutAtt:IsA("Attachment") then
         targetX = tutAtt.WorldPosition.X
@@ -3100,7 +3072,6 @@ function HalloweenBossManager:GetCannonStandPosition(cannon)
         targetZ = fallback.Position.Z
     end
 
-    -- 2. Cast ray straight down from above to find the EXACT top surface of the pad/floor
     local cannonY = cannon:GetPivot().Position.Y
     local rayOrigin = Vector3.new(targetX, cannonY + 12.0, targetZ)
     local rayDirection = Vector3.new(0, -30.0, 0)
@@ -3114,63 +3085,52 @@ function HalloweenBossManager:GetCannonStandPosition(cannon)
     local result = Services.Workspace:Raycast(rayOrigin, rayDirection, params)
     local padSurfaceY = result and result.Position.Y or (cannonY - 3.16)
 
-    -- 3. Calculate exact leg height offset so feet firmly press into the pad's TouchTransmitter
     local _, root, hum = getAliveRig()
     local legOffset = 2.8
     if hum and root then
         local hip = hum.HipHeight > 0 and hum.HipHeight or 2.0
-        -- Slight -0.15 offset ensures feet make solid physical contact with the pad
         legOffset = hip + (root.Size.Y / 2) - 0.15
     end
 
     return Vector3.new(targetX, padSurfaceY + legOffset, targetZ)
 end
 
--- Handles the complete cannon sequence: grounded pad placement, triple-shot execution, and reload cadence.
 function HalloweenBossManager:ProcessCannonFiring(myCannon, standPos)
     if not myCannon then return end
 
     local _, root = getAliveRig()
     if root and standPos then
-        -- Plant character directly at the calculated ground level (no extra Y offsets)
         root.CFrame = CFrame.new(standPos)
         root.AssemblyLinearVelocity = Vector3.zero
     end
 
-    -- Safe single-payload execution (prevents BAC-10518 remote argument type mismatch flag)
-    local cannonFire = self.Remotes.CannonFire
-    if cannonFire then
-        local cannonId = myCannon:GetAttribute("CannonId")
-        if cannonId ~= nil then
-            pcall(function() cannonFire:FireServer(cannonId) end)
-        elseif myCannon then
-            pcall(function() cannonFire:FireServer(myCannon) end)
-        else
-            pcall(function() cannonFire:FireServer() end)
-        end
+    if self.Remotes.CannonFire then
+        pcall(function() self.Remotes.CannonFire:FireServer() end)
+        pcall(function() self.Remotes.CannonFire:FireServer(myCannon) end)
+        pcall(function() self.Remotes.CannonFire:FireServer(myCannon:GetAttribute("CannonId")) end)
     end
 
     task.wait(self.Config.CannonReloadDelay)
 end
 
--- Checks if the boss fight is genuinely finished and the King has been defeated.
-function HalloweenBossManager:IsBossDefeated(arena)
+function HalloweenBossManager:IsEntireEventCompleted(arena)
     if not arena then return false end
-    local state = getgenv().BossFarmerState
+    local state = getgenv().BossAutomationState
 
-    -- 1. Check if King's health attribute explicitly dropped to 0
+    if not state.KingEncountered then
+        return false
+    end
+
     local bossHp = arena:GetAttribute("Health")
     if bossHp and bossHp <= 0 then
         return true
     end
 
-    -- 2. Check if arena phase explicitly marks victory or completion
     local phase = arena:GetAttribute("Phase")
     if phase == "Defeated" or phase == "Finished" or phase == "Victory" or phase == "Ended" then
         return true
     end
 
-    -- 3. Check if King humanoid exists and is dead
     local king = arena:FindFirstChild("King")
     if king then
         local hum = king:FindFirstChildOfClass("Humanoid")
@@ -3179,277 +3139,248 @@ function HalloweenBossManager:IsBossDefeated(arena)
         end
     end
 
-    -- 4. Check if King was encountered alive earlier and has now disappeared from the arena
-    if state.KingEncountered then
-        local activeBossModel, _ = self:FindActiveBoss()
-        if not activeBossModel then
-            -- Boss was alive earlier and now completely disappeared / despawned -> Defeated!
-            return true
-        end
-    end
-
-    -- 5. Stale arena guard: inside arena for > 15s without finding any King boss
-    if not state.KingEncountered and state.ArenaEntryTime > 0 and (os.clock() - state.ArenaEntryTime) > 15 then
-        local activeBossModel, _ = self:FindActiveBoss()
-        if not activeBossModel then
-            return true
-        end
-    end
-
     return false
 end
 
--- Locates and walks through the arena's exit portal after defeating the boss.
 function HalloweenBossManager:HandleArenaExit(arena)
-    if not arena then return false end
-    local exitPortal = arena:FindFirstChild("BossExitPortal", true)
-                    or arena:FindFirstChild("ExitPortal", true)
-                    or arena:FindFirstChild("Exit", true)
+    local exitPortal = arena and arena:FindFirstChild("BossExitPortal", true)
     if not exitPortal then return false end
 
-    local hitbox = exitPortal:FindFirstChild("Hitbox", true)
+    local hitbox = exitPortal:FindFirstChild("Hitbox", true) 
                 or (exitPortal:IsA("BasePart") and exitPortal)
                 or exitPortal:FindFirstChildWhichIsA("BasePart")
 
     if hitbox then
-        local _, root = getAliveRig()
-        if root then
-            self:GlideTo(hitbox.Position, 2.0)
-            pcall(function()
-                if UniversalCompat and UniversalCompat.FireTouch then
-                    UniversalCompat.FireTouch(hitbox, root, 0)
-                    task.wait(0.05)
-                    UniversalCompat.FireTouch(hitbox, root, 1)
-                end
-            end)
-            local prompt = exitPortal:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if prompt and prompt.Enabled and UniversalCompat then
-                UniversalCompat.FireProximityPrompt(prompt)
-            end
-        end
-
-        local exitTimeout = os.clock() + 3.0
-        while os.clock() < exitTimeout and self:IsPlayerInArena() do
-            Services.RunService.Heartbeat:Wait()
-        end
-        return not self:IsPlayerInArena()
+        self:GlideTo(hitbox.Position, 2.0)
+        task.wait(0.5)
+        return true
     end
     return false
 end
 
--- STAGE 1: Player is outside the arena -> (enter Halloween Dimension) -> BossPortal.
-function HalloweenBossManager:ProcessOutside()
-    local state = getgenv().BossFarmerState
-    state.KingEncountered = false
-
-    local known, open = self:GetPortalState()
-    if known and not open then
-        -- Portal sealed: previous boss event is completely over.
-        -- Reset completion latch so the script is armed for the next genuine boss event!
-        state.CurrentEventCompleted = false
-        state.WaitingForPortalClose = false
-        state.RunCompleted = false
-        self.ProbeCooldownUntil = os.clock() + self.Config.ProbeCooldown
-        return
-    end
-
-    -- If current event run was completed, ignore remaining portal open window!
-    -- The portal remains open for a few minutes after King dies, but event is finished.
-    if state.CurrentEventCompleted or state.WaitingForPortalClose then
-        return
-    end
-
-    -- Rule 6.5.1 (1): Halloween Event actions require the Halloween Dimension first.
-    if not isInHalloweenDimension() then
-        HalloweenPortalManager.EnterDimension(5.0)
-        return
-    end
-
-    if not known then
-        -- Inside the dimension but BossPortal still not found: back off the probe.
-        self.ProbeCooldownUntil = os.clock() + self.Config.ProbeCooldown
-        return
-    end
-
-    local entryPos = self:GetPortalTargetPos()
-    if self.Remotes.AskEnter then
-        pcall(function() self.Remotes.AskEnter:InvokeServer() end)
-    end
-
-    state.ArenaEntryTime = os.clock()
-    self:GlideTo(entryPos, 2.0)
-
-    local teleportWait = os.clock()
-    while (os.clock() - teleportWait) < 2.5 and not self:IsPlayerInArena() do
-        Services.RunService.Heartbeat:Wait()
-    end
-
-    if not self:IsPlayerInArena() then
-        setCollisions(true)
-    end
-end
-
--- STAGE 2: Player is inside the arena -> melee / cannon / exit.
-function HalloweenBossManager:ProcessArena()
-    local state = getgenv().BossFarmerState
-    local _, root = getAliveRig()
-    if not root then return end
-
-    local arena = Services.Workspace:FindFirstChild("PumpkinArena", true)
-
-    -- Check if King has been defeated or disappeared -> Immediately exit the arena!
-    if self:IsBossDefeated(arena) then
-        state.CurrentEventCompleted = true
-        state.WaitingForPortalClose = true
-        state.RunCompleted = true
-        state.KingEncountered = false
-
-        self:HandleArenaExit(arena)
-        task.wait(0.5)
-
-        if not self:IsPlayerInArena() then
-            setCollisions(true)
-        end
-        return
-    end
-
-    local shieldActive = self:IsKingShieldActive(arena)
-    local stunned = self:IsKingStunned(arena)
-
-    -- CANNON PRIORITY: ACTIVE SHIELD OR STUNNED
-    if shieldActive or stunned then
-        local myCannon = self:GetAssignedCannon(arena)
-        if not myCannon then
-            task.wait(0.3)
-            return
-        end
-
-        local freed = self:IsCannonFreed(myCannon)
-        local cannonBasePos = myCannon:GetPivot().Position
-        local standPos = self:GetCannonStandPosition(myCannon)
-
-        if not freed and shieldActive then
-            -- Step 1: Roots blocking cannon -> Destroy with bat
-            self:GlideTo(cannonBasePos + Vector3.new(0, 1.5, 3.0), 3.5)
-            local _, liveRoot = getAliveRig()
-            if liveRoot then
-                liveRoot.CFrame = CFrame.new(cannonBasePos + Vector3.new(0, 1.2, 3.0), cannonBasePos)
-                liveRoot.AssemblyLinearVelocity = Vector3.zero
-            end
-
-            local rootsObj = myCannon:FindFirstChild("Roots")
-                          or myCannon:FindFirstChild("Vines")
-                          or myCannon
-            self:PerformBatSwitchAttack(rootsObj)
-            task.wait(self.Config.SwitchInterval)
-        else
-            -- Step 2: Roots cleared -> Stand on green circle and fire
-            local targetPos = standPos or cannonBasePos
-            if (root.Position - targetPos).Magnitude > 3.0 then
-                self:GlideTo(targetPos, 2.0)
-            else
-                self:ProcessCannonFiring(myCannon, targetPos)
-            end
-        end
-        return
-    end
-
-    -- NORMAL MELEE: BOSS IS AWAKE AND UNSHIELDED
-    local bossModel, bossRoot = self:FindActiveBoss()
-    if not (bossModel and bossRoot) then
-        task.wait(0.4)
-        return
-    end
-
-    local arenaFloorY = (arena and arena:GetAttribute("FloorY")) or self.Config.ArenaFloorY
-    local offset = self.Config.CombatOffsetBehind
-    local behindVector = -bossRoot.CFrame.LookVector * offset
-    local safePos = Vector3.new(
-        bossRoot.Position.X + behindVector.X,
-        arenaFloorY + 3.0,
-        bossRoot.Position.Z + behindVector.Z
-    )
-
-    if (root.Position - safePos).Magnitude > (offset + 4.0) then
-        self:GlideTo(safePos, offset)
-    else
-        root.CFrame = CFrame.new(safePos, Vector3.new(bossRoot.Position.X, safePos.Y, bossRoot.Position.Z))
-        root.AssemblyLinearVelocity = Vector3.zero
-
-        self:PerformBatSwitchAttack(bossModel)
-        task.wait(self.Config.SwitchInterval)
-    end
-end
-
--- One iteration of the autonomous loop (driven by WorkerScheduler "HalloweenBoss").
 function HalloweenBossManager:Process()
     if not self:IsEnabled() then return end
     local char, root, hum = getAliveRig()
-    if not (char and root and hum) then return end
+    local state = getgenv().BossAutomationState
 
-    local state = getgenv().BossFarmerState
-    if state.IsBusy then return end
+    if not (char and root and hum) or state.IsBusy then return end
     state.IsBusy = true
     self.IsActive = true
+    self:ResolveRemotes()
+    self:ApplyStateProtection(char)
 
-    local ok, err = pcall(function()
-        self:ResolveRemotes()
-        if not self.LastProtectionTime or (os.clock() - self.LastProtectionTime) >= 3.0 then
-            self.LastProtectionTime = os.clock()
-            self:ApplyStateProtection(char)
-        end
-        if self:IsPlayerInArena() then
-            self:ProcessArena()
+    local inArena = self:IsPlayerInArena()
+
+    -- STATE 1: WAITING (In overworld, waiting for portal to unlock)
+    if state.CurrentState == "WAITING" then
+        if inArena then
+            self:SetState("INITIALIZING")
+        elseif self:IsBossPortalOpen() then
+            self:SetState("ENTERING")
         else
-            self:ProcessOutside()
+            task.wait(0.5)
         end
-    end)
+
+    -- STATE 2: ENTERING (Approaching entrance and invoking request)
+    elseif state.CurrentState == "ENTERING" then
+        if inArena then
+            self:SetState("INITIALIZING")
+        else
+            local entryPos = self:GetPortalTargetPos()
+            if self.Remotes.AskEnter then
+                pcall(function() self.Remotes.AskEnter:InvokeServer() end)
+            end
+            self:GlideTo(entryPos, 2.0)
+
+            local waitStart = os.clock()
+            while (os.clock() - waitStart) < 2.0 and not self:IsPlayerInArena() do
+                Services.RunService.Heartbeat:Wait()
+            end
+
+            if self:IsPlayerInArena() then
+                self:SetState("INITIALIZING")
+            end
+        end
+
+    -- STATE 3: INITIALIZING (In arena, waiting for server replication and spawn)
+    elseif state.CurrentState == "INITIALIZING" then
+        if not inArena then
+            self:SetState("WAITING")
+        else
+            local elapsed = os.clock() - state.StateEnteredAt
+            local arena = Services.Workspace:FindFirstChild("PumpkinArena", true)
+            local bossModel = arena and self:FindActiveBoss()
+
+            if elapsed >= self.Config.InitBufferTime and (bossModel or (arena and arena:GetAttribute("Phase"))) then
+                self:SetState("ACTIVE")
+            else
+                task.wait(0.5)
+            end
+        end
+
+    -- STATE 4: ACTIVE (Fighting Brute, clearing cannons, and engaging King)
+    elseif state.CurrentState == "ACTIVE" then
+        if not inArena then
+            self:SetState("COOLDOWN")
+        else
+            local arena = Services.Workspace:FindFirstChild("PumpkinArena", true)
+
+            if self:IsEntireEventCompleted(arena) then
+                self:SetState("EXITING")
+            else
+                local shieldActive = self:IsKingShieldActive(arena)
+                local stunned = self:IsKingStunned(arena)
+
+                -- Sub-Phase: Cannon firing (Shielded or Stunned King)
+                if shieldActive or stunned then
+                    local myCannon = self:GetAssignedCannon(arena)
+
+                    if myCannon then
+                        local freed = self:IsCannonFreed(myCannon)
+                        local cannonBasePos = myCannon:GetPivot().Position
+                        local standPos = self:GetCannonStandPosition(myCannon)
+
+                        if not freed and shieldActive then
+                            self:GlideTo(cannonBasePos + Vector3.new(0, 1.5, 3.0), 3.5)
+                            local _, liveRoot = getAliveRig()
+                            if liveRoot then
+                                liveRoot.CFrame = CFrame.new(cannonBasePos + Vector3.new(0, 1.2, 3.0), cannonBasePos)
+                                liveRoot.AssemblyLinearVelocity = Vector3.zero
+                            end
+
+                            local rootsObj = myCannon:FindFirstChild("Roots") 
+                                          or myCannon:FindFirstChild("Vines") 
+                                          or myCannon
+                            self:PerformBatSwitchAttack(rootsObj)
+                            task.wait(self.Config.SwitchInterval)
+                        else
+                            local targetPos = standPos or cannonBasePos
+                            local distToPad = (root.Position - targetPos).Magnitude
+
+                            if distToPad > 3.0 then
+                                self:GlideTo(targetPos, 2.0)
+                            else
+                                self:ProcessCannonFiring(myCannon, targetPos)
+                            end
+                        end
+                    else
+                        task.wait(0.3)
+                    end
+
+                -- Sub-Phase: Melee combat (Phase 1 Brute or unshielded King)
+                else
+                    local bossModel, bossRoot = self:FindActiveBoss()
+
+                    if bossModel and bossRoot then
+                        local arenaFloorY = (arena and arena:GetAttribute("FloorY")) or self.Config.ArenaFloorY
+                        local behindVector = -bossRoot.CFrame.LookVector * self.Config.CombatOffsetBehind
+                        local safePos = Vector3.new(
+                            bossRoot.Position.X + behindVector.X,
+                            arenaFloorY + 3.0,
+                            bossRoot.Position.Z + behindVector.Z
+                        )
+
+                        local distToFlank = (root.Position - safePos).Magnitude
+                        if distToFlank > (self.Config.CombatOffsetBehind + 4.0) then
+                            self:GlideTo(safePos, self.Config.CombatOffsetBehind)
+                        else
+                            root.CFrame = CFrame.new(safePos, Vector3.new(bossRoot.Position.X, safePos.Y, bossRoot.Position.Z))
+                            root.AssemblyLinearVelocity = Vector3.zero
+
+                            self:PerformBatSwitchAttack(bossModel)
+                            task.wait(self.Config.SwitchInterval)
+                        end
+                    else
+                        task.wait(0.4)
+                    end
+                end
+            end
+        end
+
+    -- STATE 5: EXITING (Defeat verified; stepping into exit portal)
+    elseif state.CurrentState == "EXITING" then
+        if not inArena then
+            self:SetState("COOLDOWN")
+        else
+            local arena = Services.Workspace:FindFirstChild("PumpkinArena", true)
+            self:HandleArenaExit(arena)
+            task.wait(1.0)
+        end
+
+    -- STATE 6: COOLDOWN (Resetting flags and waiting for portal to lock)
+    elseif state.CurrentState == "COOLDOWN" then
+        state.KingEncountered = false
+        state.CurrentBatIndex = 1
+
+        if inArena then
+            self:SetState("EXITING")
+        else
+            local elapsed = os.clock() - state.StateEnteredAt
+            if elapsed >= 10.0 and self:IsBossPortalLocked() then
+                self:SetState("WAITING")
+            else
+                task.wait(1.5)
+            end
+        end
+    end
 
     state.IsBusy = false
     self.IsActive = false
-    if not ok then
-        warn("[Auto Boss] " .. tostring(err))
-    end
 end
 
--- Priority hook: does Auto Boss currently need the character?
 function HalloweenBossManager:HasWork()
     if not self:IsEnabled() then return false end
-    if self.IsActive or self:IsPlayerInArena() then return true end
+    local state = getgenv().BossAutomationState
 
-    local state = getgenv().BossFarmerState
-    local known, open = self:GetPortalState()
-
-    if known and not open then
-        -- Sealed portal = previous boss event is completely over; reset latch so next opening is treated as new event.
-        state.CurrentEventCompleted = false
-        state.WaitingForPortalClose = false
-        state.RunCompleted = false
-        return false
+    if state.CurrentState == "COOLDOWN" then
+        if self:IsPlayerInArena() then
+            return true
+        end
+        local elapsed = os.clock() - state.StateEnteredAt
+        if elapsed >= 10.0 and self:IsBossPortalLocked() then
+            self:SetState("WAITING")
+        else
+            return false
+        end
     end
 
-    -- If current boss run was completed, ignore remaining open portal until it closes!
-    if state.CurrentEventCompleted or state.WaitingForPortalClose then
-        return false
-    end
-
-    if known and open then
-        -- Genuinely new boss event available!
+    if self:IsPlayerInArena() then
         return true
     end
 
-    -- Portal model not replicated (e.g. outside the dimension): probe, rate-limited.
-    return os.clock() >= self.ProbeCooldownUntil
+    if state.CurrentState == "ENTERING" or state.CurrentState == "INITIALIZING" 
+       or state.CurrentState == "ACTIVE" or state.CurrentState == "EXITING" then
+        return true
+    end
+
+    if state.CurrentState == "WAITING" then
+        if self:IsPlayerInArena() then
+            self:SetState("INITIALIZING")
+            return true
+        end
+        return self:IsBossPortalOpen()
+    end
+
+    return false
 end
 
--- Non-interference lock: while Auto Boss is mid-run nothing may take the character.
 function HalloweenBossManager:IsLocked()
-    return self:IsEnabled() and (self.IsActive or self:IsPlayerInArena())
+    if not self:IsEnabled() then return false end
+    local state = getgenv().BossAutomationState
+    if self:IsPlayerInArena() then return true end
+    if state.CurrentState == "ENTERING" or state.CurrentState == "INITIALIZING" 
+       or state.CurrentState == "ACTIVE" or state.CurrentState == "EXITING" then
+        return true
+    end
+    return false
 end
 
 function HalloweenBossManager:Abort()
     if PriorityManager then PriorityManager:Release("Boss") end
     self.IsActive = false
+    local state = getgenv().BossAutomationState
+    state.IsBusy = false
+    state.CurrentState = "WAITING"
     setCollisions(true)
     local _, root, hum = getAliveRig()
     if hum then hum.PlatformStand = false end
@@ -3458,7 +3389,6 @@ function HalloweenBossManager:Abort()
         root.AssemblyAngularVelocity = Vector3.zero
     end
 end
-
 
 -- ==============================================================================
 -- [ AUTO GHOST DOG QUEST MANAGER ]
@@ -3783,7 +3713,10 @@ function HalloweenFishingManager:HasRod()
     local function check(c)
         if not c then return nil end
         for _, item in ipairs(c:GetChildren()) do
-            if item:IsA("Tool") and (item:GetAttribute("FishingRod") ~= nil or item:GetAttribute("GhostDogRod") == true or item.Name:lower():find("rod")) then
+            if item:IsA("Tool") and (item:GetAttribute("GhostDogRod") == true 
+               or item:GetAttribute("FishingRod") ~= nil 
+               or item.Name:lower():find("rod") 
+               or item.Name:lower():find("fishing")) then
                 return item
             end
         end
@@ -3795,15 +3728,22 @@ end
 function HalloweenFishingManager:RaycastWater(pos)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = {LocalPlayer.Character}
-    local hit = Services.Workspace:Raycast(pos + Vector3.new(0, 40, 0), Vector3.new(0, -180, 0), params)
-    if hit then
+    local filter = {LocalPlayer.Character}
+    for attempt = 1, 6 do
+        params.FilterDescendantsInstances = filter
+        local hit = Services.Workspace:Raycast(pos + Vector3.new(0, 40, 0), Vector3.new(0, -180, 0), params)
+        if not hit then return nil end
         local inst = hit.Instance
         if hit.Material == Enum.Material.Water 
            or inst:GetAttribute("TerrainRole") == "Basin" 
-           or inst:GetAttribute("FishingWater") ~= nil
+           or inst:GetAttribute("FishingWater") ~= nil 
            or Services.CollectionService:HasTag(inst, "FishingWater") then
             return hit.Position
+        end
+        if inst:IsA("BasePart") and inst.Transparency >= 0.95 then
+            table.insert(filter, inst)
+        else
+            return nil
         end
     end
     return nil
@@ -3812,12 +3752,24 @@ end
 function HalloweenFishingManager:FindWaterTarget()
     local _, root = getAliveRig()
     if not root then return nil end
+
+    local fisherman = Services.Workspace:FindFirstChild("GhostFisherman")
+    local returnSpot = GhostDogManager and GhostDogManager:GetMarker("ReturnSpot")
     local castTarget = GhostDogManager and GhostDogManager:GetMarker("CastTarget")
-    local origin = root.Position
-    local angleStep = math.pi / 18
+
+    local lookVec = fisherman and fisherman:IsA("Model") and fisherman:GetPivot().LookVector
+                 or (returnSpot and returnSpot.CFrame.LookVector)
+                 or Vector3.new(0, 0, -1)
+    local baseAngle = math.atan2(lookVec.Z, lookVec.X)
+
+    local charge = 0.875
+    local luck = currentSettings.CastLuck or "x1.5 Perfect"
+    if luck == "x1.2 Good" then charge = 0.7 elseif luck == "x1.0 Normal" then charge = 0.5 end
+    local scanDist = 10 + 32 * charge
+
     for i = 0, 12 do
-        local angle = (i % 2 == 0 and 1 or -1) * math.ceil(i / 2) * angleStep
-        local scanPos = origin + Vector3.new(math.cos(angle), 0, math.sin(angle)) * 25
+        local angle = baseAngle + (i % 2 == 0 and 1 or -1) * math.ceil(i / 2) * (math.pi / 18)
+        local scanPos = root.Position + Vector3.new(math.cos(angle), 0, math.sin(angle)) * scanDist
         local waterPos = self:RaycastWater(scanPos)
         if waterPos then
             if not castTarget or (waterPos - castTarget.Position).Magnitude >= 12 then
@@ -3840,9 +3792,20 @@ function HalloweenFishingManager:Process()
     self.IsActive = true
     PriorityManager:Acquire("Fishing", 20.0)
 
+    -- Stage 3 check: if on stage 3 of Ghost Dog quest, ripple cast is required first
+    local stage = GhostDogManager and GhostDogManager:GetStage()
+    if stage == 3 then
+        if GhostDogManager and GhostDogManager.Process then
+            GhostDogManager:Process()
+        end
+        self.IsActive = false
+        PriorityManager:Release("Fishing")
+        return
+    end
+
     local returnSpot = GhostDogManager and GhostDogManager:GetMarker("ReturnSpot")
     local _, root = getAliveRig()
-    if returnSpot and root and (root.Position - returnSpot.Position).Magnitude > 8 then
+    if returnSpot and root and ((root.Position - returnSpot.Position).Magnitude > 8 or returnSpot.Position.Y + 1 > root.Position.Y) then
         if GhostDogManager and GhostDogManager.MoveTo then
             GhostDogManager:MoveTo(returnSpot.Position + Vector3.new(0, 3, 0), 6.0)
         end
@@ -3861,6 +3824,13 @@ function HalloweenFishingManager:Process()
     if hum and rod then hum:EquipTool(rod) end
     task.wait(0.3)
 
+    -- Pin character and face water
+    local _, liveRoot = getAliveRig()
+    if liveRoot then
+        liveRoot.CFrame = CFrame.lookAt(liveRoot.Position, Vector3.new(waterTarget.X, liveRoot.Position.Y, waterTarget.Z))
+        liveRoot.AssemblyLinearVelocity = Vector3.zero
+    end
+
     local charge = 0.875
     local luck = currentSettings.CastLuck or "x1.5 Perfect"
     if luck == "x1.2 Good" then charge = 0.7 elseif luck == "x1.0 Normal" then charge = 0.5 end
@@ -3878,7 +3848,16 @@ function HalloweenFishingManager:Process()
     end
 
     local waitTime = tonumber(biteData.Wait) or 3.0
-    task.wait(waitTime)
+    local waitStart = os.clock()
+    while (os.clock() - waitStart) < waitTime do
+        if not self.IsActive then break end
+        local _, cRoot = getAliveRig()
+        if cRoot then
+            cRoot.CFrame = CFrame.lookAt(cRoot.Position, Vector3.new(waterTarget.X, cRoot.Position.Y, waterTarget.Z))
+            cRoot.AssemblyLinearVelocity = Vector3.zero
+        end
+        Services.RunService.Heartbeat:Wait()
+    end
 
     if not self.IsActive then
         fireRemote("RE/Fishing/Cancel", biteData.Id)
@@ -3895,8 +3874,23 @@ function HalloweenFishingManager:Process()
     elseif biteData.Mode == "Nothing" or biteData.Mode == "Hint" or biteData.Mode == "Quest" then
         fireRemote("RE/Fishing/Cancel", biteData.Id)
     else
-        task.wait(0.8)
-        local reelOk, reelSuccess = invokeRemote("RF/Fishing/Reel", biteData.Id, "Caught", 16)
+        -- Simulate reel minigame
+        local reelStart = os.clock()
+        while (os.clock() - reelStart) < 1.2 and self.IsActive do
+            pcall(function()
+                local fc = Services.ReplicatedStorage:FindFirstChild("Controllers")
+                local gfc = fc and fc:FindFirstChild("Game")
+                local fishCtrl = gfc and gfc:FindFirstChild("FishingController")
+                local uiMod = fishCtrl and fishCtrl:FindFirstChild("Ui")
+                if uiMod then
+                    local req = require(uiMod)
+                    if req and req.PunchReel then req.PunchReel() end
+                end
+            end)
+            task.wait(0.1)
+        end
+
+        local reelOk, reelSuccess, reward = invokeRemote("RF/Fishing/Reel", biteData.Id, "Caught", 16)
         if reelOk and reelSuccess then
             self.FishCaught = self.FishCaught + 1
         else
@@ -6134,9 +6128,13 @@ halloweenCategory:CreateToggle("Auto Boss", "Auto enter BossPortal, fight the Pu
     currentSettings.AutoBossEvent = state
     saveStuff()
     if state then
-        getgenv().BossFarmerState.CurrentEventCompleted = false
-        getgenv().BossFarmerState.WaitingForPortalClose = false
-        getgenv().BossFarmerState.RunCompleted = false
+        if HalloweenBossManager and HalloweenBossManager.SetState then
+            HalloweenBossManager:SetState("WAITING")
+        end
+        if getgenv().BossAutomationState then
+            getgenv().BossAutomationState.KingEncountered = false
+            getgenv().BossAutomationState.IsBusy = false
+        end
     elseif HalloweenBossManager and HalloweenBossManager.Abort then
         HalloweenBossManager:Abort()
     end

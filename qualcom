@@ -138,6 +138,7 @@ local currentSettings = {
     GhostTarget = "Rarest First",
     AutoTradeSouls = false,
     AutoBuyHalloweenEgg = false,
+    AutoHalloweenSteal = false,
     TaskPriorities = {
         "Auto Boss",
         "Auto Steal",
@@ -201,6 +202,8 @@ getgenv().config.autoWispQuest = currentSettings.AutoWispQuest
 getgenv().config.autoTradeUp = currentSettings.AutoTradeUp
 getgenv().config.autoCraftEssence = currentSettings.AutoCraftEssence
 getgenv().config.butterflySpeed = currentSettings.ButterflySpeed
+getgenv().config.autoHalloweenSteal = currentSettings.AutoHalloweenSteal == true
+getgenv().InstantStealHalloween = currentSettings.AutoHalloweenSteal == true
 getgenv().config.autoCandyCane = currentSettings.AutoCandyCane
 getgenv().config.autoPumpkin = currentSettings.AutoPumpkin
 getgenv().AutoCatchPumpkins = currentSettings.AutoPumpkin
@@ -215,7 +218,7 @@ getgenv().config.ghostTarget = currentSettings.GhostTarget or "Rarest First"
 getgenv().config.autoTradeSouls = currentSettings.AutoTradeSouls == true
 getgenv().config.autoBuyHalloweenEgg = currentSettings.AutoBuyHalloweenEgg == true
 
-local HalloweenPortalManager, HalloweenAreaManager, HalloweenCombatManager, HalloweenPumpkinManager, HalloweenBossManager, GhostDogManager, HalloweenFishingManager, PhantomExpressManager, GhoulerBossManager, SoulTradeManager, PriorityManager, getBestEgg, DynamicRarityResolver, activeTheme, Window
+local HalloweenPortalManager, HalloweenAreaManager, HalloweenCombatManager, HalloweenPumpkinManager, HalloweenStealManager, HalloweenBossManager, GhostDogManager, HalloweenFishingManager, PhantomExpressManager, GhoulerBossManager, SoulTradeManager, PriorityManager, getBestEgg, DynamicRarityResolver, activeTheme, Window
 
 local State = {
     currentStealSession = 0,
@@ -2355,6 +2358,628 @@ end
 
 getgenv().DynamicRarityResolver = DynamicRarityResolver
 
+-- ==============================================================================
+-- [ HALLOWEEN DIMENSION: HEADLESS INSTANT STEAL SERVICE ]
+-- ==============================================================================
+HalloweenStealManager = {}
+
+do
+    local Services = {
+        Players = game:GetService("Players"),
+        Workspace = game:GetService("Workspace"),
+        RunService = game:GetService("RunService"),
+        ReplicatedStorage = game:GetService("ReplicatedStorage")
+    }
+
+    local LocalPlayer = Services.Players.LocalPlayer or Services.Players.PlayerAdded:Wait()
+
+    -- ------------------------------------------------------------------------------
+    -- [ CONFIGURATION & TUNING ]
+    -- ------------------------------------------------------------------------------
+    local CONFIG = {
+        -- Stepped transit distance across the map (studs per step)
+        StepDistance = 40,
+        StepDelay = 0.025,
+        
+        -- Speed when walking from the gate into the SafeZone (natural run speed)
+        NaturalWalkSpeed = 26,
+        
+        -- Radius to locate the dropped egg near the gate (expanded for physics rolls)
+        GateSearchRadius = 130.0,
+        
+        -- Settle delay after regrabbing distant eggs (Manor/Swamp)
+        OriginSettleTime = 0.4,
+
+        -- Pacing delay for Graveyard eggs before crossing the delivery line
+        GraveyardDeliverDelay = 1.5,
+
+        -- Zone boundary parameters
+        GraveyardMaxDistance = 550.0,
+        ManorMinDistance = 1200.0,
+        TargetZoneNumber = 3,
+        TargetAreaKeyword = "manor"
+    }
+
+    local State = {
+        isBusy = false,
+        currentSession = 0,
+        cachedCarryRemote = nil,
+        cachedDropRemote = nil
+    }
+
+    -- ------------------------------------------------------------------------------
+    -- [ SECTION 1: CHARACTER RIG & PROTECTION ]
+    -- ------------------------------------------------------------------------------
+
+    -- Validates that the character exists, is alive, and has a valid root part
+    local function getAliveRig()
+        local char = LocalPlayer.Character
+        if not char then return nil, nil, nil end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if root and hum and hum.Health > 0 then
+            return char, root, hum
+        end
+        return nil, nil, nil
+    end
+
+    -- Strips ragdoll constraints and disables physics fall states
+    local function applyRigProtection(character)
+        if not character then return end
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if not humanoid then return end
+
+        local blockedStates = {
+            Enum.HumanoidStateType.FallingDown,
+            Enum.HumanoidStateType.Ragdoll,
+            Enum.HumanoidStateType.Physics
+        }
+        for _, state in ipairs(blockedStates) do
+            pcall(function() humanoid:SetStateEnabled(state, false) end)
+        end
+        pcall(function() humanoid.BreakJointsOnDeath = false end)
+
+        for _, desc in ipairs(character:GetDescendants()) do
+            if desc:IsA("BasePart") then
+                desc.CanCollide = false
+            elseif desc:IsA("BallSocketConstraint") or desc:IsA("HingeConstraint") or 
+              (desc:IsA("NoCollisionConstraint") and string.find(desc.Name, "Ragdoll", 1, true)) then
+                pcall(function() desc:Destroy() end)
+            elseif desc:IsA("Motor6D") and not desc.Enabled then
+                desc.Enabled = true
+            end
+        end
+    end
+
+    -- ------------------------------------------------------------------------------
+    -- [ SECTION 2: NETWORK REMOTES & POSSESSION CHECKS ]
+    -- ------------------------------------------------------------------------------
+
+    -- Resolves the server RemoteFunction for picking up an egg
+    local function getCarryRemote()
+        if State.cachedCarryRemote and State.cachedCarryRemote.Parent then
+            return State.cachedCarryRemote
+        end
+        local networking = Services.ReplicatedStorage:FindFirstChild("Packages") and Services.ReplicatedStorage.Packages:FindFirstChild("Networking")
+        local remote = networking and networking:FindFirstChild("RF/HalloweenDimension/AskCarryEgg")
+        if not remote then
+            for _, desc in ipairs(Services.ReplicatedStorage:GetDescendants()) do
+                if desc:IsA("RemoteFunction") and desc.Name == "RF/HalloweenDimension/AskCarryEgg" then
+                    remote = desc
+                    break
+                end
+            end
+        end
+        State.cachedCarryRemote = remote
+        return remote
+    end
+
+    -- Resolves the server RemoteFunction for dropping an egg
+    local function getDropRemote()
+        if State.cachedDropRemote and State.cachedDropRemote.Parent then
+            return State.cachedDropRemote
+        end
+        local networking = Services.ReplicatedStorage:FindFirstChild("Packages") and Services.ReplicatedStorage.Packages:FindFirstChild("Networking")
+        local remote = networking and networking:FindFirstChild("RF/HalloweenDimension/AskDropEgg")
+        if not remote then
+            for _, desc in ipairs(Services.ReplicatedStorage:GetDescendants()) do
+                if desc:IsA("RemoteFunction") and desc.Name == "RF/HalloweenDimension/AskDropEgg" then
+                    remote = desc
+                    break
+                end
+            end
+        end
+        State.cachedDropRemote = remote
+        return remote
+    end
+
+    -- Checks if the local player is currently holding an egg (attribute or GUI indicator)
+    local function isCarryingEgg()
+        if LocalPlayer:GetAttribute("HalloweenCarrying") == true then
+            return true
+        end
+
+        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+        if playerGui then
+            local dropGui = playerGui:FindFirstChild("DropHeldEgg")
+            if dropGui and dropGui:IsA("ScreenGui") and dropGui.Enabled then
+                return true
+            end
+
+            local runGui = playerGui:FindFirstChild("RunBackEffects")
+            if runGui and runGui:IsA("ScreenGui") and runGui.Enabled then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    -- Instantly triggers an object's ProximityPrompt bypass-style
+    local function interactPrompt(target)
+        if not target then return false end
+        local prompt = target:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if prompt and prompt.Enabled then
+            prompt.RequiresLineOfSight = false
+            prompt.MaxActivationDistance = 45
+            prompt.HoldDuration = 0
+            if typeof(fireproximityprompt) == "function" then
+                fireproximityprompt(prompt, 0)
+            else
+                prompt:InputHoldBegin()
+                prompt:InputHoldEnd()
+            end
+            return true
+        end
+        return false
+    end
+
+    -- ------------------------------------------------------------------------------
+    -- [ SECTION 3: SPATIAL ZONE & GEOMETRY CALCULATIONS ]
+    -- ------------------------------------------------------------------------------
+
+    -- Locates the physical SafeZone bounding volume part in Workspace
+    local function getSafeZonePart()
+        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+        local zones = dim and dim:FindFirstChild("Zones")
+        local safeZone = zones and zones:FindFirstChild("SafeZone")
+        if safeZone and safeZone:IsA("BasePart") then
+            return safeZone
+        end
+        return nil
+    end
+
+    -- Calculates the closest exterior boundary point (+10 studs outside the SafeZone)
+    local function getSafeZoneEdgePosition(charPos)
+        local safeZone = getSafeZonePart()
+        if not safeZone then
+            return Vector3.new(-5848.0, charPos.Y, -7228.0)
+        end
+
+        local localPos = safeZone.CFrame:PointToObjectSpace(charPos)
+        local halfX = safeZone.Size.X / 2 + 10.0
+        local halfZ = safeZone.Size.Z / 2 + 10.0
+
+        local clampedLocal = Vector3.new(
+            math.clamp(localPos.X, -halfX, halfX),
+            0,
+            math.clamp(localPos.Z, -halfZ, halfZ)
+        )
+        local worldPos = safeZone.CFrame:PointToWorldSpace(clampedLocal)
+        return Vector3.new(worldPos.X, charPos.Y, worldPos.Z)
+    end
+
+    -- Calculates a coordinate securely inside the scoring volume (-10 studs inside SafeZone)
+    local function getSafeZoneInsidePosition(charPos)
+        local safeZone = getSafeZonePart()
+        if not safeZone then
+            return Vector3.new(-5848.0, charPos.Y, -7244.0)
+        end
+
+        local localPos = safeZone.CFrame:PointToObjectSpace(charPos)
+        local innerHalfX = math.max(safeZone.Size.X / 2 - 10.0, 0)
+        local innerHalfZ = math.max(safeZone.Size.Z / 2 - 10.0, 0)
+
+        local clampedLocal = Vector3.new(
+            math.clamp(localPos.X, -innerHalfX, innerHalfX),
+            0,
+            math.clamp(localPos.Z, -innerHalfZ, innerHalfZ)
+        )
+        local worldPos = safeZone.CFrame:PointToWorldSpace(clampedLocal)
+        return Vector3.new(worldPos.X, charPos.Y, worldPos.Z)
+    end
+
+    -- Detects whether an egg belongs to Zone 1 (Graveyard)
+    local function isGraveyardEgg(egg)
+        if not egg or not egg.Parent then return false end
+
+        local zoneAttr = egg:GetAttribute("Zone")
+        if zoneAttr == 1 or zoneAttr == "1" or zoneAttr == "Zone1" then
+            return true
+        end
+
+        local areaAttr = tostring(egg:GetAttribute("Area") or egg:GetAttribute("AreaId") or egg:GetAttribute("Location") or ""):lower()
+        if areaAttr:find("graveyard") or areaAttr:find("cemetery") then
+            return true
+        end
+
+        local eggName = tostring(egg:GetAttribute("PreparedSourceName") or egg.Name):lower()
+        if eggName:find("graveyard") or eggName:find("cemetery") then
+            return true
+        end
+
+        local safeZone = getSafeZonePart()
+        if safeZone then
+            local eggPos = egg:GetPivot().Position
+            local distFromGate = (Vector3.new(eggPos.X, 0, eggPos.Z) - Vector3.new(safeZone.Position.X, 0, safeZone.Position.Z)).Magnitude
+            if distFromGate <= CONFIG.GraveyardMaxDistance then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    -- ------------------------------------------------------------------------------
+    -- [ SECTION 4: MOVEMENT ENGINES ]
+    -- ------------------------------------------------------------------------------
+
+    -- Moves character in discrete 40-stud intervals while preserving terrain Y elevation
+    local function stepMove(targetPos, session)
+        local char, root = getAliveRig()
+        if not root then return false end
+
+        local currentPos = root.Position
+        local flatDiff = Vector3.new(targetPos.X - currentPos.X, 0, targetPos.Z - currentPos.Z)
+        local totalDist = flatDiff.Magnitude
+        if totalDist <= 3.0 then
+            root.CFrame = CFrame.new(targetPos.X, targetPos.Y or root.Position.Y, targetPos.Z)
+            root.AssemblyLinearVelocity = Vector3.zero
+            return true
+        end
+
+        local moveDir = flatDiff.Unit
+        local distanceCovered = 0
+        local startY = currentPos.Y
+        local endY = targetPos.Y or currentPos.Y
+
+        while distanceCovered < totalDist do
+            if not getgenv().InstantStealHalloween or session ~= State.currentSession then
+                return false
+            end
+
+            local step = math.min(CONFIG.StepDistance, totalDist - distanceCovered)
+            distanceCovered = distanceCovered + step
+            local progress = distanceCovered / totalDist
+
+            local curY = startY + (endY - startY) * progress
+            local nextPos = currentPos + (moveDir * distanceCovered)
+
+            root.CFrame = CFrame.new(nextPos.X, curY, nextPos.Z) * CFrame.lookAt(Vector3.zero, moveDir)
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+
+            task.wait(CONFIG.StepDelay)
+        end
+
+        root.CFrame = CFrame.new(targetPos.X, endY, targetPos.Z) * CFrame.lookAt(Vector3.zero, moveDir)
+        root.AssemblyLinearVelocity = Vector3.zero
+        return true
+    end
+
+    -- Frame-by-frame natural walk movement used to step into the SafeZone volume
+    local function naturalWalkTo(targetPos, session)
+        local char, root, hum = getAliveRig()
+        if not root or not hum then return false end
+
+        local speed = hum.WalkSpeed > 0 and hum.WalkSpeed or CONFIG.NaturalWalkSpeed
+        local currentPos = root.Position
+        local diff = Vector3.new(targetPos.X - currentPos.X, 0, targetPos.Z - currentPos.Z)
+        local totalDist = diff.Magnitude
+        if totalDist <= 2.0 then return true end
+
+        local dir = diff.Unit
+        local duration = totalDist / speed
+        local startTime = os.clock()
+
+        while (os.clock() - startTime) < duration do
+            if not getgenv().InstantStealHalloween or session ~= State.currentSession or not isCarryingEgg() then
+                break
+            end
+
+            local dt = Services.RunService.Heartbeat:Wait()
+            local _, liveRoot = getAliveRig()
+            if not liveRoot then break end
+
+            local step = math.min(speed * dt, (targetPos - liveRoot.Position).Magnitude)
+            liveRoot.CFrame = CFrame.new(liveRoot.Position + (dir * step), liveRoot.Position + (dir * 10))
+            liveRoot.AssemblyLinearVelocity = dir * speed
+        end
+
+        local _, endRoot = getAliveRig()
+        if endRoot then
+            endRoot.AssemblyLinearVelocity = Vector3.zero
+        end
+        return true
+    end
+
+    -- ------------------------------------------------------------------------------
+    -- [ SECTION 5: EGG SCANNING & RETRIEVAL ]
+    -- ------------------------------------------------------------------------------
+
+    -- Scans WorldEggs for closest valid candidate (ignores prompt distance streaming)
+    local function selectTargetEgg()
+        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+        local folder = dim and dim:FindFirstChild("WorldEggs")
+        if not folder then return nil end
+
+        local _, root = getAliveRig()
+        if not root then return nil end
+
+        local bestEgg = nil
+        local shortestDist = math.huge
+
+        for _, egg in ipairs(folder:GetChildren()) do
+            if egg:IsA("Model") or egg:IsA("BasePart") then
+                local pivot = egg:GetPivot().Position
+                local dist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(pivot.X, 0, pivot.Z)).Magnitude
+                if dist < shortestDist then
+                    shortestDist = dist
+                    bestEgg = egg
+                end
+            end
+        end
+
+        return bestEgg
+    end
+
+    -- Scans a 130-stud radius around the player at the gate to find the dropped egg
+    local function findDroppedEggAtGate()
+        local _, root = getAliveRig()
+        if not root then return nil end
+
+        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+        if not dim then return nil end
+
+        local closestEgg = nil
+        local closestDist = CONFIG.GateSearchRadius
+
+        local worldEggs = dim:FindFirstChild("WorldEggs")
+        if worldEggs then
+            for _, egg in ipairs(worldEggs:GetChildren()) do
+                if egg:IsA("PVInstance") then
+                    local p = egg:GetPivot().Position
+                    local dist = (p - root.Position).Magnitude
+                    if dist < closestDist then
+                        closestDist = dist
+                        closestEgg = egg
+                    end
+                end
+            end
+        end
+
+        if not closestEgg then
+            for _, desc in ipairs(dim:GetDescendants()) do
+                if desc:IsA("ProximityPrompt") and desc.Enabled then
+                    local parentModel = desc:FindFirstAncestorOfClass("Model") or desc.Parent
+                    if parentModel and parentModel:IsA("PVInstance") then
+                        local p = parentModel:GetPivot().Position
+                        local dist = (p - root.Position).Magnitude
+                        if dist < closestDist then
+                            closestDist = dist
+                            closestEgg = parentModel
+                        end
+                    end
+                end
+            end
+        end
+
+        return closestEgg
+    end
+
+    -- ------------------------------------------------------------------------------
+    -- [ SECTION 6: MASTER EXECUTION PIPELINE ]
+    -- ------------------------------------------------------------------------------
+
+    -- Executes the complete steal, transit, reset, and delivery lifecycle
+    local function runCompleteStealCycle(targetEgg, session)
+        local char, root = getAliveRig()
+        if not root then return false end
+
+        local carryRemote = getCarryRemote()
+        local dropRemote = getDropRemote()
+        local fromGraveyard = false
+
+        -- STAGE 1: ACQUISITION AT NEST (If hands are empty)
+        if not isCarryingEgg() then
+            if not targetEgg or not targetEgg.Parent then return false end
+
+            fromGraveyard = isGraveyardEgg(targetEgg)
+            local eggPos = targetEgg:GetPivot().Position
+            local eggUid = tostring(targetEgg:GetAttribute("HalloweenEggUid") or targetEgg:GetAttribute("Uid") or "")
+
+            local reachedNest = stepMove(Vector3.new(eggPos.X, eggPos.Y + 2.0, eggPos.Z), session)
+            if not reachedNest then return false end
+
+            task.wait(0.2)
+
+            local grabStart = os.clock()
+            while (os.clock() - grabStart) < 2.5 and not isCarryingEgg() do
+                interactPrompt(targetEgg)
+                if carryRemote and eggUid ~= "" then
+                    pcall(function() carryRemote:InvokeServer(eggUid) end)
+                end
+                Services.RunService.Heartbeat:Wait()
+            end
+
+            if not isCarryingEgg() then return false end
+        else
+            local safeZone = getSafeZonePart()
+            if safeZone and (root.Position - safeZone.Position).Magnitude <= CONFIG.GraveyardMaxDistance then
+                fromGraveyard = true
+            end
+        end
+
+        -- STAGE 2: TRANSIT TO SAFEZONE BOUNDARY
+        local edgePos = getSafeZoneEdgePosition(root.Position)
+        local reachedEdge = stepMove(edgePos, session)
+        if not reachedEdge or not isCarryingEgg() then return false end
+
+        -- Anti-Rollback recovery
+        for _ = 1, 3 do
+            local _, curRoot = getAliveRig()
+            if curRoot and (Vector3.new(curRoot.Position.X, 0, curRoot.Position.Z) - Vector3.new(edgePos.X, 0, edgePos.Z)).Magnitude >= 80.0 then
+                stepMove(edgePos, session)
+                task.wait(0.1)
+            else
+                break
+            end
+        end
+
+        -- STAGE 3: ORIGIN RESET (OR GRAVEYARD SETTLE)
+        if fromGraveyard then
+            local _, curRoot = getAliveRig()
+            if curRoot then
+                curRoot.AssemblyLinearVelocity = Vector3.zero
+                curRoot.AssemblyAngularVelocity = Vector3.zero
+            end
+            task.wait(CONFIG.GraveyardDeliverDelay)
+        else
+            -- Distant egg origin reset
+            if dropRemote then
+                pcall(function() dropRemote:InvokeServer() end)
+            end
+
+            local dropStart = os.clock()
+            while (os.clock() - dropStart) < 1.0 and isCarryingEgg() do
+                Services.RunService.Heartbeat:Wait()
+            end
+
+            task.wait(0.2)
+
+            -- Search for dropped egg in 130-stud radius
+            local droppedEgg = nil
+            local searchStart = os.clock()
+            while (os.clock() - searchStart) < 3.0 do
+                droppedEgg = findDroppedEggAtGate()
+                if droppedEgg then break end
+                Services.RunService.Heartbeat:Wait()
+            end
+
+            if not droppedEgg then return false end
+
+            -- Physically step onto the dropped egg coordinates
+            local droppedPos = droppedEgg:GetPivot().Position
+            stepMove(Vector3.new(droppedPos.X, droppedPos.Y + 1.0, droppedPos.Z), session)
+
+            -- Regrab the dropped egg
+            local regrabStart = os.clock()
+            while (os.clock() - regrabStart) < 3.0 and not isCarryingEgg() do
+                local _, curRoot = getAliveRig()
+                if curRoot then
+                    curRoot.CFrame = CFrame.new(droppedPos.X, droppedPos.Y + 1.0, droppedPos.Z)
+                end
+
+                interactPrompt(droppedEgg)
+                local dropUid = tostring(droppedEgg:GetAttribute("HalloweenEggUid") or droppedEgg:GetAttribute("Uid") or "")
+                if carryRemote and dropUid ~= "" then
+                    pcall(function() carryRemote:InvokeServer(dropUid) end)
+                end
+                Services.RunService.Heartbeat:Wait()
+            end
+
+            if not isCarryingEgg() then return false end
+
+            task.wait(CONFIG.OriginSettleTime)
+        end
+
+        -- STAGE 4: NATURAL WALK-IN DELIVERY
+        local insidePos = getSafeZoneInsidePosition(root.Position)
+        local prevDelivered = LocalPlayer:GetAttribute("HalloweenDelivered") or 0
+        naturalWalkTo(insidePos, session)
+
+        local finishWait = os.clock() + 2.5
+        while (os.clock() - finishWait) < 0 and isCarryingEgg() do
+            local curDelivered = LocalPlayer:GetAttribute("HalloweenDelivered") or 0
+            if curDelivered > prevDelivered then
+                break
+            end
+            Services.RunService.Heartbeat:Wait()
+        end
+
+        return not isCarryingEgg()
+    end
+
+    -- External interface for toggle and PriorityManager
+    HalloweenStealManager.State = State
+    HalloweenStealManager.Abort = function()
+        State.currentSession = State.currentSession + 1
+        State.isBusy = false
+        local _, root, hum = getAliveRig()
+        if hum then hum.PlatformStand = false end
+        if root then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end
+    end
+
+    -- ------------------------------------------------------------------------------
+    -- [ SECTION 7: AUTONOMOUS BACKGROUND SCHEDULER ]
+    -- ------------------------------------------------------------------------------
+    task.spawn(function()
+        while true do
+            if getgenv().InstantStealHalloween then
+                local inDimension = (typeof(isInHalloweenDimension) == "function" and isInHalloweenDimension()) or (LocalPlayer:GetAttribute("InHalloweenDimension") == true)
+                if inDimension then
+                    local char, root, hum = getAliveRig()
+
+                    if char and root and hum and not State.isBusy then
+                        applyRigProtection(char)
+
+                        if isCarryingEgg() then
+                            State.isBusy = true
+                            State.currentSession = State.currentSession + 1
+
+                            runCompleteStealCycle(nil, State.currentSession)
+
+                            State.isBusy = false
+                            task.wait(0.2)
+                        else
+                            local targetEgg = selectTargetEgg()
+
+                            if targetEgg and targetEgg.Parent then
+                                State.isBusy = true
+                                State.currentSession = State.currentSession + 1
+                                local session = State.currentSession
+
+                                runCompleteStealCycle(targetEgg, session)
+
+                                State.isBusy = false
+                                task.wait(0.1)
+                            else
+                                task.wait(1.0)
+                            end
+                        end
+                    end
+                else
+                    -- Normal dimension handling: if enabled and map is open, enter the portal first!
+                    if not (typeof(isHalloweenMapClosed) == "function" and isHalloweenMapClosed()) then
+                        if HalloweenPortalManager and HalloweenPortalManager.EnterDimension then
+                            HalloweenPortalManager.EnterDimension(5.0)
+                        else
+                            task.wait(1.5)
+                        end
+                    else
+                        task.wait(1.5)
+                    end
+                end
+            end
+
+            Services.RunService.Heartbeat:Wait()
+        end
+    end)
+end
+
 -- [ HALLOWEEN BOSS: AUTONOMOUS RECURRING EVENT STATE MACHINE ]
 -- Halloween Event 2026 feature (KNOWLEDGE.md section 6.5.1).
 -- Auto Boss OWNS its navigation: Halloween Dimension -> BossPortal -> PumpkinArena
@@ -4391,6 +5016,8 @@ PriorityManager = {
     TaskAliases = {
         ["Steal"] = "Auto Steal",
         ["Auto Steal"] = "Auto Steal",
+        ["HalloweenSteal"] = "Halloween Steal",
+        ["Halloween Steal"] = "Halloween Steal",
         ["Boss"] = "Auto Boss",
         ["AutoBoss"] = "Auto Boss",
         ["Auto Boss"] = "Auto Boss",
@@ -4527,7 +5154,7 @@ end
 
 function PriorityManager:GetTaskDimension(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
-    if resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin"
+    if resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Halloween Steal"
        or resolved == "Auto Ghost Dog" or resolved == "Auto Train" or resolved == "Auto Vacuum" 
        or resolved == "Auto Fishing" or resolved == "Auto Buy Halloween Egg" or resolved == "Auto Soul Trade In" then
         return "Halloween"
@@ -4552,8 +5179,13 @@ function PriorityManager:IsTaskEnabled(taskName)
         return getgenv().config.autoVacuum == true and not isHalloweenMapClosed()
     elseif resolved == "Auto Soul Trade In" then
         return getgenv().config.autoTradeSouls == true and not isHalloweenMapClosed()
+    elseif resolved == "Halloween Steal" then
+        return getgenv().InstantStealHalloween == true and not isHalloweenMapClosed()
     elseif resolved == "Auto Steal" then
         return isStealEnabled() and not isMapClosed()
+    elseif resolved == "Halloween Steal" then
+        if isHalloweenMapClosed() or getgenv().InstantStealHalloween ~= true then return false end
+        return true
     elseif resolved == "Candy Cane Farm" then
         return getgenv().config.autoCandyCane == true and not isHalloweenMapClosed()
     elseif resolved == "Auto Pumpkin" then
@@ -4684,6 +5316,9 @@ function PriorityManager:GetTopWantedTask()
         return "Auto Steal"
     end
 
+    if getgenv().InstantStealHalloween and HalloweenStealManager and HalloweenStealManager.State and HalloweenStealManager.State.isBusy then
+        return "Halloween Steal"
+    end
     if isHoldingEgg() or State.isStealingActive then
         return "Auto Steal"
     end
@@ -6195,6 +6830,16 @@ end)
 
 -- Halloween Event Category
 local halloweenCategory = FarmTab:CreateCategory("Halloween Event 2026", false, 2)
+
+halloweenCategory:CreateToggle("Auto Steal Halloween Eggs", "Steal seasonal eggs in Halloween Dimension", currentSettings.AutoHalloweenSteal, function(state)
+    getgenv().InstantStealHalloween = state
+    getgenv().config.autoHalloweenSteal = state
+    currentSettings.AutoHalloweenSteal = state
+    saveStuff()
+    if not state and HalloweenStealManager and HalloweenStealManager.Abort then
+        HalloweenStealManager.Abort()
+    end
+end)
 
 halloweenCategory:CreateToggle("Candy Cane Monster Farm", "Auto weapon swap combat in dimension", currentSettings.AutoCandyCane, function(state)
     getgenv().config.autoCandyCane = state

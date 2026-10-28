@@ -443,6 +443,26 @@ sequenceDiagram
     5. **`EXITING`:** Protected defeat detection (`isEntireEventCompleted`) requires `state.KingEncountered == true` (preventing Phase 1 Brute death from triggering early exit) alongside `Health <= 0`, phase in `{Defeated, Finished, Victory, Ended}`, or dead King humanoid. Immediately glides to `BossExitPortal.Hitbox` and steps outside $\rightarrow$ transitions to `COOLDOWN`.
     6. **`COOLDOWN`:** While outside the arena, ignores the lingering open portal. Yields character ownership (`HasWork() == false`) so other tasks can execute. Confirms `elapsed >= 10.0s` and verifies all seal parts have locked (`desc.Transparency < 0.5`) via `isBossPortalLocked()` $\rightarrow$ transitions to `WAITING` to rearm for the next event.
 
+- **Universal Map Closed Rule & Auto Buy Exception:**
+  - All Halloween event features (`Halloween Steal`, `Candy Cane Farm`, `Auto Pumpkin`, `Halloween Boss`, `Ghost Dog`, `Halloween Fishing`, `Phantom Express`, `Auto Vacuum`, `Auto Soul Trade In`) observe the universal map gate `isHalloweenMapClosed()`. When closed, they pause and wait; once open, they proceed with actions.
+  - **Exception:** `Auto Buy Halloween Egg` is explicitly exempt from `isHalloweenMapClosed()` and operates continuously.
+- **Auto Halloween Steal Eggs (Dual-Workflow Architecture):**
+  - *Graveyard Eggs:* `StepMove` to nest $\rightarrow$ Grab via prompt + `AskCarryEgg` $\rightarrow$ `StepMove` to SafeZone edge (+10 studs) $ightarrow$ zero velocities & wait 1.5s (`GraveyardDeliverDelay`) $\rightarrow$ `NaturalWalkTo` into SafeZone (-10 studs). Zero dropping, zero scanning, zero regrabbing.
+  - *Haunted Swamps & Abandoned Manor Eggs:* `StepMove` to nest $\rightarrow$ Grab $\rightarrow$ `StepMove` to SafeZone edge $\rightarrow$ Drop egg via `AskDropEgg` $\rightarrow$ Scan 130-stud radius around gate with `findDroppedEggAtGate()` for physics-rolled egg $\rightarrow$ `StepMove` onto dropped egg $\rightarrow$ Regrab with prompt + remote $\rightarrow$ Settle 0.4s (`OriginSettleTime`) $\rightarrow$ `NaturalWalkTo` into SafeZone.
+- **Auto Phantom Express Boarding Modernization:**
+  - Station Summon: client invokes `RF/TrainEvent/Action("Station")` and waits 3.0s if train is not docked.
+  - Rail Projection: calculates exact boarding coordinates via vector projection onto the prompt's `BoardRailStart` and `BoardRailEnd` segment attributes.
+  - Ticket Auto-Equip: equips `ConductorTicket` tool before approaching prompt if permanent access is unowned.
+  - Boarding Prompt & Remote: sets `HoldDuration = 0`, fires `TrainBoard` prompt, invokes `"Board"`, and waits up to 25s for town arrival.
+- **Auto Vacuum Ghouler (Equipment Gating & Capture):**
+  - Strict Vacuum Ownership Gate: if `GetGhostVacuum(false)` is nil, paths to `PickupVacuum` prompt, triggers prompt, and waits up to 3.0s for tool to appear in inventory. If unowned, immediately returns/halts without running orbit or suction logic.
+  - Held Verification: verifies `vac.Parent == LocalPlayer.Character` before running 16-point orbit or 42-stud boss standoff.
+  - Zero Soul Trading: soul trading is completely decoupled and removed from this feature.
+- **Standalone Auto Soul Trade In (`SoulTradeManager`):**
+  - Dedicated UI toggle `"Auto Soul Trade In"` (`currentSettings.AutoTradeSouls` / `getgenv().config.autoTradeSouls`).
+  - Independent worker in `WorkerScheduler` operating inside Forgotten Town before train departure ($t \le 12\text{s}$) or upon invasion conclusion.
+  - Glides to `OpenSoulShop` prompt, triggers prompt, opens shop, and batch trades souls in a remote loop while `CanTrade == true` and `Souls >= Cost`.
+
 ### 6.5.1 Architectural Rules: Halloween Event 2026 = Halloween Dimension
 
 > [!IMPORTANT]
@@ -548,20 +568,21 @@ To resolve concurrent task execution conflicts (where two active features fight 
 4. **Independent Task Decoupling:**
    - Tasks that do not control character movement (such as `Auto Upgrades`) run independently in the background without contending for or locking the character.
 
-### 7.2 Canonical 12-Task Supervisor Hierarchy in `qualcom`
+### 7.2 Canonical 13-Task Supervisor Hierarchy in `qualcom`
 Tasks are evaluated strictly in canonical order (default order, user-reorderable in the Priority UI tab):
 1. **`Auto Boss`** (Dimension: `Self` — autonomous portal/arena navigation)
 2. **`Auto Ghost Dog`** (Dimension: `Halloween`)
 3. **`Auto Train`** (Phantom Express & Train Event, Dimension: `Halloween`)
-4. **`Auto Vacuum`** (Auto Vacuum Ghouler Boss & Soul Trading, Dimension: `Halloween`)
-5. **`Auto Steal`** (Dimension: `Normal`)
-6. **`Candy Cane Farm`** (Dimension: `Halloween`)
-7. **`Auto Pumpkin`** (Dimension: `Halloween`)
-8. **`Auto Fishing`** (Dimension: `Halloween`)
-9. **`Auto Buy Halloween Egg`** (Dimension: `Halloween`)
-10. **`Enchanted / Bloom Event`** (Dimension: `Normal`)
-11. **`Auto Upgrades`** (Dimension: `Any` — independent background upgrades)
-12. **`Auto Treadmill`** (Dimension: `Normal` — idle training fallback)
+4. **`Auto Vacuum`** (Auto Vacuum Ghouler Boss, Dimension: `Halloween`)
+5. **`Auto Soul Trade In`** (Standalone Soul Shop batch trading, Dimension: `Halloween`)
+6. **`Auto Steal`** (Dimension: `Normal`)
+7. **`Candy Cane Farm`** (Dimension: `Halloween`)
+8. **`Auto Pumpkin`** (Dimension: `Halloween`)
+9. **`Auto Fishing`** (Dimension: `Halloween`)
+10. **`Auto Buy Halloween Egg`** (Dimension: `Halloween` — exempt from map-closed gating)
+11. **`Enchanted / Bloom Event`** (Dimension: `Normal`)
+12. **`Auto Upgrades`** (Dimension: `Any` — independent background upgrades)
+13. **`Auto Treadmill`** (Dimension: `Normal` — idle training fallback)
 
 > [!NOTE]
 > `PriorityManager:Initialize()` inserts tasks missing from a saved `TaskPriorities` list at their **canonical index** (rather than dropping to the bottom), ensuring that new seasonal features naturally slot into their designated ranks upon script startup.

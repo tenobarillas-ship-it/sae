@@ -336,6 +336,51 @@ local function isInHalloweenDimension()
 end
 
 -- ==============================================================================
+-- [ CENTRALIZED CACHED WORKSPACE RESOLVERS (O(1) OPTIMIZED) ]
+-- ==============================================================================
+local _cachedHalloweenDim = nil
+local function getHalloweenDimension()
+    if _cachedHalloweenDim and _cachedHalloweenDim.Parent then
+        return _cachedHalloweenDim
+    end
+    _cachedHalloweenDim = Services.Workspace:FindFirstChild("HalloweenDimension")
+    if not _cachedHalloweenDim then
+        _cachedHalloweenDim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    end
+    return _cachedHalloweenDim
+end
+
+local _cachedHalloweenWorldEggs = nil
+local function getHalloweenWorldEggs()
+    if _cachedHalloweenWorldEggs and _cachedHalloweenWorldEggs.Parent then
+        return _cachedHalloweenWorldEggs
+    end
+    local dim = getHalloweenDimension()
+    _cachedHalloweenWorldEggs = dim and dim:FindFirstChild("WorldEggs")
+    return _cachedHalloweenWorldEggs
+end
+
+local _cachedRunawayPumpkins = nil
+local function getRunawayPumpkinsFolder()
+    if _cachedRunawayPumpkins and _cachedRunawayPumpkins.Parent then
+        return _cachedRunawayPumpkins
+    end
+    local dim = getHalloweenDimension()
+    _cachedRunawayPumpkins = dim and dim:FindFirstChild("RunawayPumpkins")
+    return _cachedRunawayPumpkins
+end
+
+local _cachedHalloweenMonstersFolder = nil
+local function getHalloweenMonstersFolder()
+    if _cachedHalloweenMonstersFolder and _cachedHalloweenMonstersFolder.Parent then
+        return _cachedHalloweenMonstersFolder
+    end
+    local dim = getHalloweenDimension()
+    _cachedHalloweenMonstersFolder = dim and dim:FindFirstChild("Monsters")
+    return _cachedHalloweenMonstersFolder
+end
+
+-- ==============================================================================
 -- [ HELPER FUNCTIONS & NETWORK DISPATCHERS ]
 -- ==============================================================================
 local function formatMoneyPerSec(val)
@@ -1772,8 +1817,7 @@ function HalloweenAreaManager:GetEggsByArea()
         [self.CanonicalNames.Zone3] = {}
     }
 
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    local worldEggs = dim and dim:FindFirstChild("WorldEggs")
+    local worldEggs = getHalloweenWorldEggs()
     if not worldEggs then return areaMap end
 
     for _, egg in ipairs(worldEggs:GetChildren()) do
@@ -1848,8 +1892,7 @@ function HalloweenCombatManager:GetWeaponList()
 end
 
 function HalloweenCombatManager:GetClosestMonster()
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    local monstersFolder = dim and dim:FindFirstChild("Monsters") or Services.Workspace:FindFirstChild("Monsters", true)
+    local monstersFolder = getHalloweenMonstersFolder() or Services.Workspace:FindFirstChild("Monsters")
     if not monstersFolder then return nil end
 
     local _, root = getAliveRig()
@@ -2018,10 +2061,7 @@ function HalloweenPumpkinManager:GetTarget()
         self.CurrentTarget = nil
     end
 
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    if not dim then return nil, nil, nil end
-
-    local folder = dim:FindFirstChild("RunawayPumpkins")
+    local folder = getRunawayPumpkinsFolder()
     local searchList = folder and folder:GetChildren() or {}
 
     local closestModel = nil
@@ -2810,8 +2850,7 @@ do
 
     -- Scans WorldEggs for best valid candidate matching Target Areas and Min Rarity
     local function selectTargetEgg()
-        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-        local folder = dim and dim:FindFirstChild("WorldEggs")
+        local folder = getHalloweenWorldEggs()
         if not folder then return nil end
 
         local _, root = getAliveRig()
@@ -2866,13 +2905,10 @@ do
         local _, root = getAliveRig()
         if not root then return nil end
 
-        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-        if not dim then return nil end
-
         local closestEgg = nil
         local closestDist = CONFIG.GateSearchRadius
 
-        local worldEggs = dim:FindFirstChild("WorldEggs")
+        local worldEggs = getHalloweenWorldEggs()
         if worldEggs then
             for _, egg in ipairs(worldEggs:GetChildren()) do
                 if egg:IsA("PVInstance") then
@@ -3130,9 +3166,10 @@ do
                         task.wait(1.0)
                     end
                 end
+                task.wait(0.08)
+            else
+                task.wait(0.5)
             end
-
-            Services.RunService.Heartbeat:Wait()
         end
     end)
 end
@@ -4163,8 +4200,10 @@ HalloweenFishingManager = {
     IsActive = false,
     CooldownUntil = 0,
     FishCaught = 0,
-    CurrentFishingSpot = nil
+    CurrentFishingSpot = nil,
+    _RayParams = RaycastParams.new()
 }
+HalloweenFishingManager._RayParams.FilterType = Enum.RaycastFilterType.Exclude
 
 function HalloweenFishingManager:HasRod()
     local char = LocalPlayer.Character
@@ -4185,8 +4224,7 @@ function HalloweenFishingManager:HasRod()
 end
 
 function HalloweenFishingManager:RaycastWater(pos)
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
+    local params = self._RayParams
     local filter = {LocalPlayer.Character}
     for attempt = 1, 6 do
         params.FilterDescendantsInstances = filter
@@ -4516,16 +4554,16 @@ do
         return instance.Parent and resolveWorldPosition(instance.Parent)
     end
 
+    local _vacuumRayParams = RaycastParams.new()
+    _vacuumRayParams.FilterType = Enum.RaycastFilterType.Exclude
+
     local function getGroundElevation(x, z, fallbackY)
         local char = LocalPlayer.Character
         local ghostFolder = Services.Workspace:FindFirstChild("TrainGhostVisuals")
-        
-        local rayParams = RaycastParams.new()
-        rayParams.FilterType = Enum.RaycastFilterType.Exclude
-        rayParams.FilterDescendantsInstances = { char, ghostFolder }
+        _vacuumRayParams.FilterDescendantsInstances = { char, ghostFolder }
 
         local origin = Vector3.new(x, fallbackY + 15, z)
-        local result = Services.Workspace:Raycast(origin, Vector3.new(0, -60, 0), rayParams)
+        local result = Services.Workspace:Raycast(origin, Vector3.new(0, -60, 0), _vacuumRayParams)
         if result then
             return result.Position.Y
         end
@@ -4981,13 +5019,19 @@ do
         return bestGhost
     end
 
+    local _lastStandoffCalc = 0
+    local _lastStandoffGhostPos = nil
+    local _cachedStandoffPos = nil
+
     local function findClearVacuumStandoff(ghostPos, radius, playerPos)
+        local now = os.clock()
+        if _cachedStandoffPos and (now - _lastStandoffCalc < 0.25) and _lastStandoffGhostPos and (ghostPos - _lastStandoffGhostPos).Magnitude < 3.0 then
+            return _cachedStandoffPos
+        end
+
         local char = LocalPlayer.Character
         local ghostFolder = Services.Workspace:FindFirstChild("TrainGhostVisuals")
-
-        local rayParams = RaycastParams.new()
-        rayParams.FilterType = Enum.RaycastFilterType.Exclude
-        rayParams.FilterDescendantsInstances = { char, ghostFolder }
+        _vacuumRayParams.FilterDescendantsInstances = { char, ghostFolder }
 
         local bestPos = nil
         local bestScore = -math.huge
@@ -4996,7 +5040,7 @@ do
             local angle = i * (math.pi / 8)
             local testPos = ghostPos + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
 
-            local ray = Services.Workspace:Raycast(ghostPos, testPos - ghostPos, rayParams)
+            local ray = Services.Workspace:Raycast(ghostPos, testPos - ghostPos, _vacuumRayParams)
             local isClear = (ray == nil)
 
             local distFromPlayer = (testPos - playerPos).Magnitude
@@ -5008,7 +5052,10 @@ do
             end
         end
 
-        return bestPos or (ghostPos + Vector3.new(0, 0, radius))
+        _lastStandoffCalc = now
+        _lastStandoffGhostPos = ghostPos
+        _cachedStandoffPos = bestPos or (ghostPos + Vector3.new(0, 0, radius))
+        return _cachedStandoffPos
     end
 
     local function executeGhostCapture(ghost)
@@ -5453,6 +5500,7 @@ function PriorityManager:Acquire(taskName, maxDuration)
     if not self:IsLocked() then
         self.ActiveTask = resolved
         self.ActiveTaskExpiresAt = os.clock() + maxDuration
+        self:InvalidateCache()
         return true
     elseif self.ActiveTask == resolved then
         self.ActiveTaskExpiresAt = math.max(self.ActiveTaskExpiresAt, os.clock() + maxDuration)
@@ -5470,6 +5518,7 @@ function PriorityManager:Release(taskName)
     if self.ActiveTask == resolved or self.ActiveTask == taskName then
         self.ActiveTask = nil
         self.ActiveTaskExpiresAt = 0
+        self:InvalidateCache()
     end
 end
 
@@ -5610,46 +5659,56 @@ function PriorityManager:HasWork(taskName)
     return false
 end
 
+PriorityManager._lastTopTask = nil
+PriorityManager._lastTopTaskTime = 0
+
+function PriorityManager:InvalidateCache()
+    self._lastTopTask = nil
+    self._lastTopTaskTime = 0
+end
+
 function PriorityManager:GetTopWantedTask()
     -- ActiveTask mutex lock ownership
     if self:IsLocked() and self.ActiveTask then
         return self.ActiveTask
     end
 
+    local now = os.clock()
+    if self._lastTopTaskTime > 0 and (now - self._lastTopTaskTime) < 0.15 then
+        return self._lastTopTask
+    end
+
+    local topTask = nil
+
     -- Auto Boss mid-run (portal entry / arena / exit) can never be preempted
     if HalloweenBossManager and HalloweenBossManager:IsLocked() then
-        return "Auto Boss"
-    end
-    if PhantomExpressManager and PhantomExpressManager:IsLocked() then
-        return "Auto Phantom Express"
-    end
-    if isNormalStealPanelTarget() then
-        return "Auto Steal"
-    end
-
-    if getgenv().InstantStealHalloween and HalloweenStealManager and HalloweenStealManager.State and HalloweenStealManager.State.isBusy then
-        return "Auto Steal Halloween Eggs"
-    end
-    if isHoldingEgg() or State.isStealingActive then
-        return "Auto Steal"
-    end
-    if HalloweenPumpkinManager and (HalloweenPumpkinManager.IsBusy or HalloweenPumpkinManager:IsCarrying()) then
-        return "Auto Pumpkin"
-    end
-    if GhostDogManager and GhostDogManager.IsActive then
-        return "Auto Ghost Dog"
-    end
-    if HalloweenFishingManager and HalloweenFishingManager.IsActive then
-        return "Auto Fishing"
-    end
-
-    for _, taskName in ipairs(self.List) do
-        if self:IsTaskEnabled(taskName) and self:HasWork(taskName) then
-            return taskName
+        topTask = "Auto Boss"
+    elseif PhantomExpressManager and PhantomExpressManager:IsLocked() then
+        topTask = "Auto Phantom Express"
+    elseif isNormalStealPanelTarget() then
+        topTask = "Auto Steal"
+    elseif getgenv().InstantStealHalloween and HalloweenStealManager and HalloweenStealManager.State and HalloweenStealManager.State.isBusy then
+        topTask = "Auto Steal Halloween Eggs"
+    elseif isHoldingEgg() or State.isStealingActive then
+        topTask = "Auto Steal"
+    elseif HalloweenPumpkinManager and (HalloweenPumpkinManager.IsBusy or HalloweenPumpkinManager:IsCarrying()) then
+        topTask = "Auto Pumpkin"
+    elseif GhostDogManager and GhostDogManager.IsActive then
+        topTask = "Auto Ghost Dog"
+    elseif HalloweenFishingManager and HalloweenFishingManager.IsActive then
+        topTask = "Auto Fishing"
+    else
+        for _, taskName in ipairs(self.List) do
+            if self:IsTaskEnabled(taskName) and self:HasWork(taskName) then
+                topTask = taskName
+                break
+            end
         end
     end
 
-    return nil
+    self._lastTopTask = topTask
+    self._lastTopTaskTime = now
+    return topTask
 end
 
 function PriorityManager:CanRun(taskName)
@@ -5711,25 +5770,44 @@ function WorkerScheduler:Register(name, interval, runFn)
 end
 
 function WorkerScheduler:Start()
-    if self.Connection then return end
-    self.Connection = Services.RunService.Heartbeat:Connect(function(dt)
-        if not self.IsActive then return end
-        for _, t in ipairs(self.Tasks) do
-            t.Gap = t.Gap + dt
-            if t.Hold > 0 then
-                t.Hold = t.Hold - dt
-            elseif not t.Running and t.Gap >= t.Interval then
-                t.Gap = 0
-                t.Running = true
-                task.spawn(function()
-                    local ok, err = pcall(t.Run)
-                    t.Running = false
-                    if not ok and err then
-                        t.Hold = 3
+    if self.IsRunningLoop then return end
+    self.IsRunningLoop = true
+    task.spawn(function()
+        local lastPrune = 0
+        while self.IsActive do
+            local dt = task.wait(0.05)
+            local now = os.clock()
+
+            -- Periodic Blacklist Memory Pruning (every 30s)
+            if now - lastPrune >= 30.0 then
+                lastPrune = now
+                if State and State.blacklistedEggs then
+                    for uid, exp in pairs(State.blacklistedEggs) do
+                        if now > exp then
+                            State.blacklistedEggs[uid] = nil
+                        end
                     end
-                end)
+                end
+            end
+
+            for _, t in ipairs(self.Tasks) do
+                t.Gap = t.Gap + dt
+                if t.Hold > 0 then
+                    t.Hold = t.Hold - dt
+                elseif not t.Running and t.Gap >= t.Interval then
+                    t.Gap = 0
+                    t.Running = true
+                    task.spawn(function()
+                        local ok, err = pcall(t.Run)
+                        t.Running = false
+                        if not ok and err then
+                            t.Hold = 3
+                        end
+                    end)
+                end
             end
         end
+        self.IsRunningLoop = false
     end)
 end
 
@@ -6683,7 +6761,7 @@ end
 -- [ WORKER SCHEDULER TASK REGISTRATIONS & DIMENSION SUPERVISOR ]
 -- ==============================================================================
 
-WorkerScheduler:Register("CandyCaneFarm", 0.05, function()
+WorkerScheduler:Register("CandyCaneFarm", 0.15, function()
     if not getgenv().config.autoCandyCane or isHalloweenMapClosed() then
         PriorityManager:Release("CandyCane")
         return
@@ -6710,7 +6788,7 @@ WorkerScheduler:Register("CandyCaneFarm", 0.05, function()
     end
 end)
 
-WorkerScheduler:Register("HalloweenPumpkin", 0.05, function()
+WorkerScheduler:Register("HalloweenPumpkin", 0.15, function()
     if not getgenv().config.autoPumpkin or isHalloweenMapClosed() then
         PriorityManager:Release("Pumpkin")
         return
@@ -6737,7 +6815,7 @@ WorkerScheduler:Register("HalloweenPumpkin", 0.05, function()
     end
 end)
 
-WorkerScheduler:Register("HalloweenBoss", 0.05, function()
+WorkerScheduler:Register("HalloweenBoss", 0.15, function()
     if not getgenv().config.autoBossEvent then
         PriorityManager:Release("Boss")
         return
@@ -6758,7 +6836,7 @@ WorkerScheduler:Register("HalloweenBoss", 0.05, function()
     end
 end)
 
-WorkerScheduler:Register("GhostDog", 0.1, function()
+WorkerScheduler:Register("GhostDog", 0.2, function()
     if not getgenv().config.autoGhostDog or isHalloweenMapClosed() then return end
     if not PriorityManager:CanRun("GhostDog") then return end
     if not GhostDogManager:HasWork() then return end
@@ -6774,7 +6852,7 @@ WorkerScheduler:Register("GhostDog", 0.1, function()
     pcall(function() GhostDogManager:Process() end)
 end)
 
-WorkerScheduler:Register("HalloweenFishing", 0.1, function()
+WorkerScheduler:Register("HalloweenFishing", 0.2, function()
     if not getgenv().config.autoFishing or isHalloweenMapClosed() then return end
     if not PriorityManager:CanRun("Fishing") then return end
     if not HalloweenFishingManager:HasWork() then return end
@@ -6790,7 +6868,7 @@ WorkerScheduler:Register("HalloweenFishing", 0.1, function()
     pcall(function() HalloweenFishingManager:Process() end)
 end)
 
-WorkerScheduler:Register("PhantomExpress", 0.1, function()
+WorkerScheduler:Register("PhantomExpress", 0.2, function()
     if not getgenv().config.autoPhantomExpress then return end
     if not PriorityManager:CanRun("Auto Phantom Express") then return end
     if not PhantomExpressManager:HasWork() then return end

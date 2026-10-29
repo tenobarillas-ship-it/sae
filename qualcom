@@ -287,7 +287,40 @@ local CONFIG = {
 local HALLOWEEN_DIM_CENTER = Vector3.new(-5808, -200, -7376)
 local HALLOWEEN_RADIUS = 2500
 
+local function isInForgottenTown()
+    local attr = LocalPlayer:GetAttribute("TrainEventPhase")
+    if attr == "Town" then
+        return true
+    end
+    local char = LocalPlayer.Character
+    if char and char:GetAttribute("TrainEventInForgottenTown") == true then
+        return true
+    end
+    if PhantomExpressManager and PhantomExpressManager.IsInTown and PhantomExpressManager:IsInTown() then
+        return true
+    end
+    return false
+end
+
+local function isAboardPhantomExpress()
+    local phase = LocalPlayer:GetAttribute("TrainEventPhase")
+    if phase == "Boarded" or phase == "Departing" or phase == "Returning" or phase == "Respawning" then
+        return true
+    end
+    if PhantomExpressManager and PhantomExpressManager.IsAboard and PhantomExpressManager:IsAboard() then
+        return true
+    end
+    return false
+end
+
+local function isInTrainEvent()
+    return isInForgottenTown() or isAboardPhantomExpress()
+end
+
 local function isInHalloweenDimension()
+    if isInTrainEvent() then
+        return false
+    end
     if LocalPlayer:GetAttribute("InHalloweenDimension") == true then
         return true
     end
@@ -1373,9 +1406,26 @@ function HalloweenPortalManager.IsInHalloweenDimension()
     return isInHalloweenDimension()
 end
 
+function HalloweenPortalManager.IsInTown()
+    return isInForgottenTown()
+end
+
+function HalloweenPortalManager.IsAboardTrain()
+    return isAboardPhantomExpress()
+end
+
+function HalloweenPortalManager.IsInTrainArea()
+    return isInTrainEvent()
+end
+
 HalloweenPortalManager.IsEntering = false
 
 function HalloweenPortalManager.EnterDimension(timeout)
+    -- Train & Town Dimension Independence:
+    -- Never attempt portal entry while aboard Phantom Express or inside Forgotten Town
+    if isInTrainEvent() then
+        return false
+    end
     timeout = timeout or 8.0
     if HalloweenPortalManager.IsInHalloweenDimension() then
         return true
@@ -1904,6 +1954,7 @@ HalloweenPumpkinManager = {
     PumpkinsDeposited = 0,
     CurrentTarget = nil,
     Config = {
+        ScanRadius = 1000.0,
         AltarDepositPos = Vector3.new(-5521.6, -195.0, -6623.0),
         Bounds = {
             MinX = -7000.0,
@@ -1951,6 +2002,8 @@ function HalloweenPumpkinManager:GetTarget()
     local _, root = getAliveRig()
     if not root then return nil, nil, nil end
 
+    local scanRadius = self.Config.ScanRadius or 1000.0
+
     -- Sticky Target Lock: re-evaluate only when the current target is no longer available or valid
     if self.CurrentTarget then
         local tModel = self.CurrentTarget.Model
@@ -1958,7 +2011,7 @@ function HalloweenPumpkinManager:GetTarget()
         local tPart = self.CurrentTarget.Part
         if tModel and tModel.Parent and tPrompt and tPrompt.Parent and tPrompt.Enabled and tPart and tPart.Parent then
             local distToAltar = (tPart.Position - self.Config.AltarDepositPos).Magnitude
-            if distToAltar <= 300 then
+            if distToAltar <= scanRadius + 150 then
                 return tModel, tPrompt, tPart
             end
         end
@@ -1974,7 +2027,7 @@ function HalloweenPumpkinManager:GetTarget()
     local closestModel = nil
     local closestPrompt = nil
     local closestPart = nil
-    local minDistance = math.huge
+    local minAltarDist = math.huge
 
     for _, model in ipairs(searchList) do
         if model:IsA("Model") and model.Parent then
@@ -1984,10 +2037,12 @@ function HalloweenPumpkinManager:GetTarget()
             if prompt and prompt.Enabled and part then
                 local p = part.Position
                 local distToAltar = (p - self.Config.AltarDepositPos).Magnitude
-                if distToAltar <= 280 then
-                    local distToPlayer = (root.Position - p).Magnitude
-                    if distToPlayer < minDistance then
-                        minDistance = distToPlayer
+                local distToPlayer = (root.Position - p).Magnitude
+                -- Scans across the entire area (up to 1,000 studs from Altar or Player)
+                if distToAltar <= scanRadius or distToPlayer <= scanRadius then
+                    -- Strictly prioritize the nearest runaway pumpkin to the altar/shrine
+                    if distToAltar < minAltarDist then
+                        minAltarDist = distToAltar
                         closestModel = model
                         closestPrompt = prompt
                         closestPart = part
@@ -4562,165 +4617,14 @@ do
     end
 
     -- --------------------------------------------------------------------------
-    -- [ TOUCH-DRAGGABLE STATUS HUD WITH DUAL BUTTONS ]
+    -- [ IN-MEMORY STATUS TRACKING (NO HUD GUI) ]
     -- --------------------------------------------------------------------------
-    local targetGuiParent = nil
-    if gethui then pcall(function() targetGuiParent = gethui() end) end
-    if not targetGuiParent then targetGuiParent = PlayerGui end
-
-    if targetGuiParent:FindFirstChild("PhantomExpressHUD") then
-        targetGuiParent.PhantomExpressHUD:Destroy()
-    end
-
-    local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "PhantomExpressHUD"
-    screenGui.ResetOnSpawn = false
-    screenGui.DisplayOrder = 999999
-    screenGui.Enabled = false
-    screenGui.Parent = targetGuiParent
-
-    local card = Instance.new("Frame", screenGui)
-    card.Size = UDim2.new(0, 310, 0, 100)
-    card.Position = UDim2.new(0.5, -155, 0.08, 0)
-    card.BackgroundColor3 = Color3.fromRGB(18, 20, 30)
-    card.BorderSizePixel = 0
-    card.ClipsDescendants = true
-
-    local cardCorner = Instance.new("UICorner", card); cardCorner.CornerRadius = UDim.new(0, 10)
-    local cardStroke = Instance.new("UIStroke", card); cardStroke.Color = Color3.fromRGB(180, 130, 255); cardStroke.Thickness = 1.6
-
-    local dragBar = Instance.new("Frame", card)
-    dragBar.Size = UDim2.new(1, 0, 0, 30)
-    dragBar.BackgroundColor3 = Color3.fromRGB(26, 28, 44)
-    dragBar.BorderSizePixel = 0
-    local dragCorner = Instance.new("UICorner", dragBar); dragCorner.CornerRadius = UDim.new(0, 10)
-
-    local titleLbl = Instance.new("TextLabel", dragBar)
-    titleLbl.Size = UDim2.new(1, -145, 1, 0)
-    titleLbl.Position = UDim2.new(0, 10, 0, 0)
-    titleLbl.BackgroundTransparency = 1
-    titleLbl.Text = "Phantom Hub (Drag)"
-    titleLbl.TextColor3 = Color3.fromRGB(210, 170, 255)
-    titleLbl.Font = Enum.Font.GothamBold
-    titleLbl.TextSize = 11.5
-    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
-
-    local trainToggleBtn = Instance.new("TextButton", dragBar)
-    trainToggleBtn.Size = UDim2.new(0, 52, 0, 20)
-    trainToggleBtn.Position = UDim2.new(1, -135, 0, 5)
-    trainToggleBtn.BackgroundColor3 = getgenv().AutoPhantomExpress and Color3.fromRGB(0, 180, 80) or Color3.fromRGB(180, 50, 50)
-    trainToggleBtn.Text = getgenv().AutoPhantomExpress and "TRAIN: ON" or "TRAIN: OFF"
-    trainToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    trainToggleBtn.Font = Enum.Font.GothamBold
-    trainToggleBtn.TextSize = 8.5
-    local trainBtnCorner = Instance.new("UICorner", trainToggleBtn); trainBtnCorner.CornerRadius = UDim.new(0, 4)
-
-    local soulToggleBtn = Instance.new("TextButton", dragBar)
-    soulToggleBtn.Size = UDim2.new(0, 52, 0, 20)
-    soulToggleBtn.Position = UDim2.new(1, -78, 0, 5)
-    soulToggleBtn.BackgroundColor3 = getgenv().AutoSoulTrade and Color3.fromRGB(150, 70, 230) or Color3.fromRGB(80, 80, 95)
-    soulToggleBtn.Text = getgenv().AutoSoulTrade and "SOUL: ON" or "SOUL: OFF"
-    soulToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    soulToggleBtn.Font = Enum.Font.GothamBold
-    soulToggleBtn.TextSize = 8.5
-    local soulBtnCorner = Instance.new("UICorner", soulToggleBtn); soulBtnCorner.CornerRadius = UDim.new(0, 4)
-
-    local closeBtn = Instance.new("TextButton", dragBar)
-    closeBtn.Size = UDim2.new(0, 20, 0, 20)
-    closeBtn.Position = UDim2.new(1, -24, 0, 5)
-    closeBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
-    closeBtn.Text = "X"
-    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    closeBtn.Font = Enum.Font.GothamBold
-    closeBtn.TextSize = 10
-    local closeCorner = Instance.new("UICorner", closeBtn); closeCorner.CornerRadius = UDim.new(0, 4)
-
-    local statusLbl = Instance.new("TextLabel", card)
-    statusLbl.Size = UDim2.new(1, -16, 0, 18)
-    statusLbl.Position = UDim2.new(0, 10, 0, 35)
-    statusLbl.BackgroundTransparency = 1
-    statusLbl.Text = "Status: Initializing..."
-    statusLbl.TextColor3 = Color3.fromRGB(235, 240, 250)
-    statusLbl.Font = Enum.Font.GothamMedium
-    statusLbl.TextSize = 11
-    statusLbl.TextXAlignment = Enum.TextXAlignment.Left
-
-    local infoLbl = Instance.new("TextLabel", card)
-    infoLbl.Size = UDim2.new(1, -16, 0, 18)
-    infoLbl.Position = UDim2.new(0, 10, 0, 55)
-    infoLbl.BackgroundTransparency = 1
-    infoLbl.Text = "Rides: 0 | Purchases: 0"
-    infoLbl.TextColor3 = Color3.fromRGB(180, 185, 210)
-    infoLbl.Font = Enum.Font.Gotham
-    infoLbl.TextSize = 10
-    infoLbl.TextXAlignment = Enum.TextXAlignment.Left
-
-    local detailLbl = Instance.new("TextLabel", card)
-    detailLbl.Size = UDim2.new(1, -16, 0, 18)
-    detailLbl.Position = UDim2.new(0, 10, 0, 75)
-    detailLbl.BackgroundTransparency = 1
-    detailLbl.Text = "Exit: Smart Trade Sync"
-    detailLbl.TextColor3 = Color3.fromRGB(210, 170, 255)
-    detailLbl.Font = Enum.Font.Code
-    detailLbl.TextSize = 9
-    detailLbl.TextXAlignment = Enum.TextXAlignment.Left
-
     local function updateHUD(status, info, detailText)
         State.CurrentStatus = status or State.CurrentStatus
-        if statusLbl then statusLbl.Text = "Status: " .. tostring(State.CurrentStatus) end
-        if infoLbl then infoLbl.Text = tostring(info or string.format("Rides: %d | Purchases: %d", State.RidesCompleted, State.SoulsTraded)) end
-        if detailText and detailLbl then detailLbl.Text = tostring(detailText) end
+        if info then State.CurrentInfo = info end
+        if detailText then State.CurrentDetail = detailText end
     end
-
-    local function makeDraggable(frame, handle)
-        local dragging, dragInput, dragStart, startPos
-        handle.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-                dragging = true
-                dragStart = input.Position
-                startPos = frame.Position
-                input.Changed:Connect(function()
-                    if input.UserInputState == Enum.UserInputState.End then dragging = false end
-                end)
-            end
-        end)
-        handle.InputChanged:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-                dragInput = input
-            end
-        end)
-        Services.UserInputService.InputChanged:Connect(function(input)
-            if input == dragInput and dragging then
-                local delta = input.Position - dragStart
-                frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-            end
-        end)
-    end
-    makeDraggable(card, dragBar)
-
-    trainToggleBtn.MouseButton1Click:Connect(function()
-        getgenv().config.autoPhantomExpress = not getgenv().config.autoPhantomExpress
-        getgenv().AutoPhantomExpress = getgenv().config.autoPhantomExpress
-        currentSettings.AutoPhantomExpress = getgenv().config.autoPhantomExpress
-        saveStuff()
-        trainToggleBtn.Text = getgenv().AutoPhantomExpress and "TRAIN: ON" or "TRAIN: OFF"
-        trainToggleBtn.BackgroundColor3 = getgenv().AutoPhantomExpress and Color3.fromRGB(0, 180, 80) or Color3.fromRGB(180, 50, 50)
-        updateHUD(getgenv().AutoPhantomExpress and "Train Resumed" or "Train Paused")
-    end)
-
-    soulToggleBtn.MouseButton1Click:Connect(function()
-        getgenv().config.autoSoulTrade = not getgenv().config.autoSoulTrade
-        getgenv().AutoSoulTrade = getgenv().config.autoSoulTrade
-        currentSettings.AutoSoulTrade = getgenv().config.autoSoulTrade
-        saveStuff()
-        soulToggleBtn.Text = getgenv().AutoSoulTrade and "SOUL: ON" or "SOUL: OFF"
-        soulToggleBtn.BackgroundColor3 = getgenv().AutoSoulTrade and Color3.fromRGB(150, 70, 230) or Color3.fromRGB(80, 80, 95)
-        updateHUD(nil, nil, getgenv().AutoSoulTrade and "Exit: Trade if Souls >= Cost" or "Exit: Direct Return Rail")
-    end)
-
-    closeBtn.MouseButton1Click:Connect(function()
-        screenGui.Enabled = false
-    end)
+    local updateStatus = updateHUD
 
     -- --------------------------------------------------------------------------
     -- [ TRAIN NETWORKING & ATTRIBUTE READERS ]
@@ -5258,8 +5162,14 @@ do
     -- --------------------------------------------------------------------------
     PhantomExpressManager = {
         State = State,
-        HUD = screenGui,
-        UpdateHUD = updateHUD,
+        IsInTown = isInForgottenTown,
+        IsAboard = isPlayerOnTrain,
+        IsInTrainEvent = function(self)
+            return isInForgottenTown() or isPlayerOnTrain()
+        end,
+        GetStatus = function(self)
+            return State.CurrentStatus, State.CurrentDetail, State.CurrentInfo
+        end,
         IsLocked = function(self)
             return State.IsBusy or isInForgottenTown() or isPlayerOnTrain()
         end,
@@ -5507,8 +5417,13 @@ end
 
 function PriorityManager:GetTaskDimension(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
-    if resolved == "Auto Boss" or resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Auto Steal Halloween Eggs" 
-       or resolved == "Auto Ghost Dog" or resolved == "Auto Fishing" or resolved == "Auto Phantom Express" or resolved == "Auto Soul Trade" then
+    if resolved == "Auto Phantom Express" or resolved == "Auto Soul Trade" then
+        if isInTrainEvent() then
+            return "Town"
+        end
+        return "Halloween"
+    elseif resolved == "Auto Boss" or resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Auto Steal Halloween Eggs" 
+       or resolved == "Auto Ghost Dog" or resolved == "Auto Fishing" then
         return "Halloween"
     elseif resolved == "Auto Steal" or resolved == "Enchanted / Bloom Event" or resolved == "Auto Treadmill" then
         return "Normal"
@@ -6822,6 +6737,16 @@ WorkerScheduler:Register("PhantomExpress", 0.1, function()
     if not PriorityManager:CanRun("Auto Phantom Express") then return end
     if not PhantomExpressManager:HasWork() then return end
 
+    -- Train & Town Dimension Independence:
+    -- If player is already aboard train or in Forgotten Town, run task directly without portal checks!
+    if isInTrainEvent() then
+        if PriorityManager:Acquire("Auto Phantom Express", 25.0) then
+            pcall(function() PhantomExpressManager:Process() end)
+            PriorityManager:Release("Auto Phantom Express")
+        end
+        return
+    end
+
     if not HalloweenPortalManager.IsInHalloweenDimension() then
         if PriorityManager:Acquire("Auto Phantom Express", 10.0) then
             HalloweenPortalManager.EnterDimension(5.0)
@@ -6867,6 +6792,10 @@ end)
 WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     local char = LocalPlayer.Character
     if not char then return end
+
+    -- Train & Town Dimension Independence:
+    -- When player is aboard Phantom Express or in Forgotten Town, dimension supervisor must NOT interfere
+    if isInTrainEvent() then return end
 
     local inHalloween = HalloweenPortalManager.IsInHalloweenDimension()
     local topTask = PriorityManager:GetTopWantedTask()
@@ -7161,9 +7090,6 @@ halloweenCategory:CreateToggle("Auto Phantom Express", "Board train, hunt ghosts
     getgenv().AutoPhantomExpress = state
     currentSettings.AutoPhantomExpress = state
     saveStuff()
-    if PhantomExpressManager and PhantomExpressManager.HUD then
-        PhantomExpressManager.HUD.Enabled = state
-    end
     if not state and PhantomExpressManager and PhantomExpressManager.Abort then
         PhantomExpressManager:Abort()
     end

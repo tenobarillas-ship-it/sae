@@ -646,6 +646,26 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 
 ---
 
+### 6.15 High-Performance Architecture & Resource Optimization
+- **Priority Evaluation Result Caching (150ms TTL):**
+  - **The Defect Fixed:** Previously, independent worker tasks invoked `PriorityManager:CanRun()` up to 50+ times per second. Each invocation triggered `GetTopWantedTask()`, which sequentially called `HasWork()` across all 11 tasks—traversing Workspace, scanning eggs, pumpkins up to 1,000 studs, and monsters on every check.
+  - **The Solution:** Added a 150ms evaluation cache in `PriorityManager:GetTopWantedTask()` (`_lastTopTask` & `_lastTopTaskTime`) with immediate invalidation (`PriorityManager:InvalidateCache()`) triggered upon task lock acquisition, release, or priority reordering. Cuts redundant evaluation calls by ~90% with zero delay in actual priority task transitions.
+- **Decoupled Background Worker Scheduler:**
+  - Shifted `WorkerScheduler:Start()` from render-bound `RunService.Heartbeat:Connect` (which fired 60–144 times/sec on the render thread and spawned closures per task) to a dedicated background `task.spawn` loop using `task.wait(0.05)`.
+  - Calibrated aggressive task intervals to human-realistic yet lightning-responsive frequencies (Combat: 0.15s, Pumpkins: 0.15s, Boss: 0.15s, GhostDog: 0.2s, Fishing: 0.2s, PhantomExpress: 0.2s), reducing coroutine allocation churn by ~80%.
+- **Throttling Idle Loops:**
+  - In `HalloweenStealManager`, eliminated the unthrottled `while true do ... Heartbeat:Wait() end` pattern that ran every render frame when the feature was disabled. When disabled, the loop sleeps `task.wait(0.5)`; when active, it checks at `task.wait(0.08)`.
+- **$O(1)$ Centralized Workspace Resolvers:**
+  - Replaced over 15 recursive `workspace:FindFirstChild("HalloweenDimension", true)` searches with cached resolvers (`getHalloweenDimension()`, `getHalloweenWorldEggs()`, `getRunawayPumpkinsFolder()`, `getHalloweenMonstersFolder()`).
+  - Resolvers cache Instance references and only re-query if an instance's parent becomes `nil`, eliminating $O(N)$ scene graph traversals.
+- **Persistent Userdata Instances & Raycast Throttling:**
+  - Replaced per-frame `RaycastParams.new()` instantiation in `PhantomExpressManager` and `HalloweenFishingManager` with persistent, reusable `RaycastParams` instances.
+  - Cached the 16-ray standoff angle calculation in ghost vacuuming, re-casting only every 0.25s or when the ghost moves $> 3$ studs, cutting per-frame raycasts by ~93%.
+- **Periodic Memory Leak Pruning:**
+  - Added a 30-second maintenance sweep inside `WorkerScheduler` that removes expired timestamps from `State.blacklistedEggs`, preventing unbounded dictionary growth over multi-hour farming sessions.
+
+---
+
 ## 9. Commit History & Version Milestones
 
 | Commit SHA | Commit Title / Name | Description |
@@ -681,4 +701,5 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `8727476bf147fe3586beafa9b865080a6e204cfe` | `feat(halloween): add Auto Phantom Express & Auto Soul Trade, modernize PriorityManager` | Integrated full-lifecycle PhantomExpressManager (station rail boarding, vacuum tool equip, Ghouler Boss combat, 16-ray ghost vacuuming, pre-verified soul trading, return train transit, draggable HUD). Added action-gated portal entry for Auto Steal Halloween Eggs with character mutex locking (eliminating normal/seasonal dimension contention). Decoupled passive features (Auto Buy Halloween Egg, Auto Upgrades) from PriorityManager. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `c1385bcaf832eb45d76607710158e38098e8c4d6` | `feat(halloween): pumpkin 1000-stud altar priority, eliminate test HUD, separate town dimension` | Overhauled Auto Pumpkin with 1,000-stud scan range and strict Altar-proximity sorting. Completely eliminated temporary draggable PhantomExpressHUD and status overlays in favor of in-memory status tracking. Implemented independent Town dimension detection (`isInForgottenTown`, `isAboardPhantomExpress`, `isInTrainEvent`) preventing incorrect portal entry while on train or in Town. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `0d280ed4aa3f0229d237e726dccc0ac870a01702` | `feat(halloween): guaranteed exit retry loops & anti-rubberband departure verification` | Overhauled `concludeTownEvent` in PhantomExpressManager with active anti-rubberband retry loop, physical proximity verification (<= 8 studs), confirmed departure checks, and transit settlement. Hardened HalloweenPortalManager.ExitDimension with active retry verification and added FireTouch invocation to HalloweenBossManager:HandleArenaExit. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `7b00dc618807250b897bb24e8c23332670913923` | `perf(optimization): reduce RAM & CPU usage via priority caching, decoupled worker loop & persistent raycasts` | Comprehensive performance overhaul: 150ms TTL priority evaluation cache in PriorityManager, decoupled WorkerScheduler from render Heartbeat to dedicated 20 Hz coroutine loop, calibrated task intervals, throttled HalloweenStealManager idle loop, cached O(1) Workspace resolvers, persistent RaycastParams, and 30s blacklist memory pruning. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 

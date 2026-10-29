@@ -1599,101 +1599,150 @@ function HalloweenPortalManager.EnterDimension(timeout)
     end
 end
 
+HalloweenPortalManager.IsExiting = false
+
 function HalloweenPortalManager.ExitDimension(timeout)
-    timeout = timeout or 12.0
+    -- Train & Town Dimension Independence:
+    -- Never attempt portal exit while aboard Phantom Express or inside Forgotten Town
+    if isInTrainEvent() then
+        return false
+    end
     if not HalloweenPortalManager.IsInHalloweenDimension() then
         return true
     end
 
+    if HalloweenPortalManager.IsExiting then
+        local waitDeadline = os.clock() + (timeout or 12.0)
+        while os.clock() < waitDeadline and HalloweenPortalManager.IsInHalloweenDimension() do
+            Services.RunService.Heartbeat:Wait()
+        end
+        return not HalloweenPortalManager.IsInHalloweenDimension()
+    end
+
+    HalloweenPortalManager.IsExiting = true
+    timeout = timeout or 12.0
     local exitStartTime = os.clock()
     local attempts = 0
 
-    -- Active Retry Loop: Guaranteed Exit despite rubberbanding
-    while (os.clock() - exitStartTime) < timeout and HalloweenPortalManager.IsInHalloweenDimension() do
-        attempts = attempts + 1
-        local _, root, hum = getAliveRig()
-        if not root or not hum then return false end
+    local success, result = pcall(function()
+        -- Active Retry Loop: Guaranteed Exit despite rubberbanding
+        while (os.clock() - exitStartTime) < timeout and HalloweenPortalManager.IsInHalloweenDimension() do
+            attempts = attempts + 1
+            local char, root, hum = getAliveRig()
+            if not char or not root or not hum then break end
 
-        local exitPart = nil
-        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-        if dim then
-            local portalHome = dim:FindFirstChild("PortalHome", true)
-            if portalHome then
-                exitPart = portalHome:FindFirstChild("Portal") or portalHome:FindFirstChildWhichIsA("BasePart")
-            end
-            if not exitPart then
-                local questBuilding = dim:FindFirstChild("Quest Building", true)
-                if questBuilding then
-                    exitPart = questBuilding:FindFirstChild("Portal") or questBuilding:FindFirstChildWhichIsA("BasePart")
+            local exitPart = nil
+            local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+            if dim then
+                local portalHome = dim:FindFirstChild("PortalHome", true)
+                if portalHome then
+                    exitPart = portalHome:FindFirstChild("Portal") or portalHome:FindFirstChildWhichIsA("BasePart")
                 end
-            end
-            if not exitPart then
-                for _, desc in ipairs(dim:GetDescendants()) do
-                    if desc:IsA("BasePart") and desc.Name == "Portal" then
-                        exitPart = desc
-                        break
+                if not exitPart then
+                    local questBuilding = dim:FindFirstChild("Quest Building", true)
+                    if questBuilding then
+                        exitPart = questBuilding:FindFirstChild("Portal") or questBuilding:FindFirstChildWhichIsA("BasePart")
+                    end
+                end
+                if not exitPart then
+                    for _, desc in ipairs(dim:GetDescendants()) do
+                        if desc:IsA("BasePart") and desc.Name == "Portal" then
+                            exitPart = desc
+                            break
+                        end
                     end
                 end
             end
-        end
 
-        if not exitPart then return false end
+            if not exitPart then break end
 
-        local targetPos = exitPart.Position + Vector3.new(0, 1.0, 0)
-        local speed = 240
-        local stopDist = 3.0
+            -- Rig State Interception (Auto Pumpkin movement standard: applyGodMode, no PlatformStand/AutoRotate corruption)
+            applyGodMode(char)
+            setCollisions(false)
 
-        setCollisions(false)
-        hum.PlatformStand = true
-        hum.AutoRotate = false
+            local targetPos = exitPart.Position + Vector3.new(0, 1.0, 0)
+            local speed = 260
+            local stopDist = 3.5
 
-        local glideStart = os.clock()
-        while (os.clock() - glideStart) < 4.0 do
-            if not HalloweenPortalManager.IsInHalloweenDimension() then break end
-            local _, cRoot, cHum = getAliveRig()
-            if not cRoot or not cHum or cHum.Health <= 0 then break end
+            local dist = (targetPos - root.Position).Magnitude
+            local glideDeadline = os.clock() + (dist / speed) + 3.0
 
-            local diff = targetPos - cRoot.Position
-            if diff.Magnitude <= stopDist then break end
-
-            local dt = Services.RunService.Heartbeat:Wait()
-            local dir = diff.Unit
-            local step = math.min(speed * dt, diff.Magnitude)
-
-            cRoot.AssemblyLinearVelocity = dir * speed
-            cRoot.CFrame = CFrame.new(cRoot.Position + (dir * step), cRoot.Position + (dir * 10))
-        end
-
-        local _, fRoot, fHum = getAliveRig()
-        if fRoot and exitPart and exitPart.Parent then
-            fRoot.AssemblyLinearVelocity = Vector3.new(0, -0.5, 0)
-            pcall(function()
-                if UniversalCompat and UniversalCompat.FireTouch then
-                    UniversalCompat.FireTouch(fRoot, exitPart, 0)
-                    task.wait(0.04)
-                    UniversalCompat.FireTouch(fRoot, exitPart, 1)
+            -- Heartbeat Linear Glide Loop (Natural upright locomotion)
+            while (targetPos - root.Position).Magnitude > stopDist do
+                if not HalloweenPortalManager.IsInHalloweenDimension() or os.clock() > glideDeadline then
+                    break
                 end
-            end)
+
+                local dt = Services.RunService.Heartbeat:Wait()
+                local _, cRoot, cHum = getAliveRig()
+                if not cRoot or not cHum or cHum.Health <= 0 then break end
+
+                local diff = targetPos - cRoot.Position
+                local dir = diff.Unit
+                local step = math.min(speed * dt, diff.Magnitude)
+
+                cRoot.AssemblyLinearVelocity = dir * speed
+                cRoot.CFrame = CFrame.new(cRoot.Position + (dir * step), cRoot.Position + (dir * 10))
+            end
+
+            -- Active Contact Latch Phase (Centers character inside exit portal hitbox with zero velocity)
+            local _, fRoot = getAliveRig()
+            if fRoot and exitPart and exitPart.Parent and HalloweenPortalManager.IsInHalloweenDimension() then
+                fRoot.CFrame = CFrame.new(exitPart.Position)
+                fRoot.AssemblyLinearVelocity = Vector3.zero
+                fRoot.AssemblyAngularVelocity = Vector3.zero
+
+                pcall(function()
+                    if UniversalCompat and UniversalCompat.FireTouch then
+                        UniversalCompat.FireTouch(fRoot, exitPart, 0)
+                        task.wait(0.04)
+                        UniversalCompat.FireTouch(fRoot, exitPart, 1)
+                    end
+                end)
+
+                -- Settle latch: hold centered inside exit portal volume while awaiting server transition
+                local latchStart = os.clock()
+                while (os.clock() - latchStart) < 0.65 and HalloweenPortalManager.IsInHalloweenDimension() do
+                    local _, curRoot = getAliveRig()
+                    if curRoot and exitPart and exitPart.Parent then
+                        curRoot.CFrame = CFrame.new(exitPart.Position)
+                        curRoot.AssemblyLinearVelocity = Vector3.zero
+                    end
+                    Services.RunService.Heartbeat:Wait()
+                end
+            end
+
+            -- Clean release
+            local _, endRoot = getAliveRig()
+            if endRoot then
+                endRoot.AssemblyLinearVelocity = Vector3.zero
+                endRoot.AssemblyAngularVelocity = Vector3.zero
+            end
+            setCollisions(true)
+
+            -- Verification window: wait up to 2.5s to confirm exit replication
+            local confirmDeadline = os.clock() + 2.5
+            while os.clock() < confirmDeadline and HalloweenPortalManager.IsInHalloweenDimension() do
+                Services.RunService.Heartbeat:Wait()
+            end
         end
 
-        if fHum then
-            fHum.PlatformStand = false
-            fHum.AutoRotate = true
-        end
-        if fRoot then
-            fRoot.AssemblyLinearVelocity = Vector3.zero
-            fRoot.AssemblyAngularVelocity = Vector3.zero
-        end
-        setCollisions(true)
+        return not HalloweenPortalManager.IsInHalloweenDimension()
+    end)
 
-        -- Verification window: wait up to 2.5s to confirm exit
-        local confirmDeadline = os.clock() + 2.5
-        while os.clock() < confirmDeadline and HalloweenPortalManager.IsInHalloweenDimension() do
-            Services.RunService.Heartbeat:Wait()
-        end
+    setCollisions(true)
+    local _, finalRoot = getAliveRig()
+    if finalRoot then
+        finalRoot.AssemblyLinearVelocity = Vector3.zero
+        finalRoot.AssemblyAngularVelocity = Vector3.zero
     end
+    HalloweenPortalManager.IsExiting = false
 
-    return not HalloweenPortalManager.IsInHalloweenDimension()
+    if success then
+        return result == true
+    else
+        return not HalloweenPortalManager.IsInHalloweenDimension()
+    end
 end
 
 -- [ HALLOWEEN CANONICAL AREA MANAGER ]
@@ -5563,10 +5612,8 @@ function PriorityManager:GetTaskDimension(taskName)
     elseif resolved == "Auto Boss" or resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Auto Steal Halloween Eggs" 
        or resolved == "Auto Ghost Dog" or resolved == "Auto Fishing" then
         return "Halloween"
-    elseif resolved == "Auto Steal" or resolved == "Enchanted / Bloom Event" then
+    elseif resolved == "Auto Steal" or resolved == "Enchanted / Bloom Event" or resolved == "Auto Treadmill" then
         return "Normal"
-    elseif resolved == "Auto Treadmill" then
-        return "Any"
     end
     return "Any"
 end
@@ -6984,11 +7031,20 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
             hopOffTreadmill()
             HalloweenPortalManager.EnterDimension(5.0)
             return
+        elseif targetDim == "Normal" and inHalloween then
+            hopOffTreadmill()
+            HalloweenPortalManager.ExitDimension(12.0)
+            return
         end
     end
 
-    -- 1. Auto Steal & Steal Panel Execution (Strictly Normal Dimension)
-    if not inHalloween and isStealEnabled() and not State.isStealingActive and not isMapClosed() and PriorityManager:CanRun("Steal") then
+    -- If player is inside Halloween dimension, main world Steal & Treadmill must NOT run!
+    if inHalloween then
+        return
+    end
+
+    -- 1. Auto Steal & Steal Panel Execution
+    if isStealEnabled() and not State.isStealingActive and not isMapClosed() and PriorityManager:CanRun("Steal") then
         local currentTargetEgg = getBestEgg()
         if currentTargetEgg then
             local targetUid = currentTargetEgg.Uid
@@ -7083,30 +7139,48 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
         end
     end
 
-    -- 2. Treadmill Idle Execution (Dual Dimension Support)
+    -- 2. Treadmill Idle Execution (Normal Dimension on Plot Treadmill)
     local isStealBusy = State.isStealingActive or isHoldingEgg()
     local canTreadmill = getgenv().config.autoTreadmill and not isStealBusy and PriorityManager:CanRun("Treadmill")
 
     if canTreadmill and getAliveRig() then
-        if inHalloween then
-            -- HALLOWEEN DIMENSION: In-place remote wear-still without void plot tweening
-            local _, cRoot, cHum = getAliveRig()
-            if cRoot and cHum then
-                if not cRoot.Anchored then
+        ShieldManager:UndoSwap()
+        findMyPlot()
+        local _, cRoot, cHum = getAliveRig()
+        if cRoot and cHum then
+            if State.myTreadmill then
+                local tPos = State.myTreadmill.Position + Vector3.new(0, 3, 0)
+                local dist = (cRoot.Position - tPos).Magnitude
+                if dist > 4 then
                     cHum.PlatformStand = false
                     cHum.Sit = false
-                    cRoot.AssemblyLinearVelocity = Vector3.zero
-                    cRoot.AssemblyAngularVelocity = Vector3.zero
-                    if Remotes.AskWearStill and PriorityManager:CanRun("Treadmill") then
+                    local speed = cHum.WalkSpeed
+                    if not speed or speed <= 0 then speed = 16 end
+                    local travelDuration = math.clamp(dist / math.max(speed, 16), 0.3, 3)
+                    local tw = Services.TweenService:Create(cRoot, TweenInfo.new(travelDuration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                        CFrame = CFrame.new(tPos) * cRoot.CFrame.Rotation
+                    })
+                    tw:Play()
+                    tw.Completed:Wait()
+                end
+
+                local _, postRoot, postHum = getAliveRig()
+                if postRoot and not postRoot.Anchored then
+                    if postHum then
+                        postHum.PlatformStand = false
+                        postHum.Sit = false
+                    end
+                    if Remotes.AskWearStill and not isStealBusy and PriorityManager:CanRun("Treadmill") then
                         pcall(function() Remotes.AskWearStill:InvokeServer() end)
                     end
                     task.wait(0.35)
                     local _, verifyRoot = getAliveRig()
                     if verifyRoot and not verifyRoot.Anchored then
                         State.treadmillFailCount = State.treadmillFailCount + 1
-                        if State.treadmillFailCount >= 4 and Remotes.AskDoff then
+                        if State.treadmillFailCount >= 8 then
+                            resetFlaggedCharacter()
+                        elseif State.treadmillFailCount == 4 and Remotes.AskDoff then
                             pcall(function() Remotes.AskDoff:InvokeServer() end)
-                            State.treadmillFailCount = 0
                         end
                     else
                         State.treadmillFailCount = 0
@@ -7114,56 +7188,8 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                 else
                     State.treadmillFailCount = 0
                 end
-            end
-        else
-            -- NORMAL DIMENSION: Mount plot treadmill (existing verified logic)
-            ShieldManager:UndoSwap()
-            findMyPlot()
-            local _, cRoot, cHum = getAliveRig()
-            if cRoot and cHum then
-                if State.myTreadmill then
-                    local tPos = State.myTreadmill.Position + Vector3.new(0, 3, 0)
-                    local dist = (cRoot.Position - tPos).Magnitude
-                    if dist > 4 then
-                        cHum.PlatformStand = false
-                        cHum.Sit = false
-                        local speed = cHum.WalkSpeed
-                        if not speed or speed <= 0 then speed = 16 end
-                        local travelDuration = math.clamp(dist / math.max(speed, 16), 0.3, 3)
-                        local tw = Services.TweenService:Create(cRoot, TweenInfo.new(travelDuration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-                            CFrame = CFrame.new(tPos) * cRoot.CFrame.Rotation
-                        })
-                        tw:Play()
-                        tw.Completed:Wait()
-                    end
-
-                    local _, postRoot, postHum = getAliveRig()
-                    if postRoot and not postRoot.Anchored then
-                        if postHum then
-                            postHum.PlatformStand = false
-                            postHum.Sit = false
-                        end
-                        if Remotes.AskWearStill and not isStealBusy and PriorityManager:CanRun("Treadmill") then
-                            pcall(function() Remotes.AskWearStill:InvokeServer() end)
-                        end
-                        task.wait(0.35)
-                        local _, verifyRoot = getAliveRig()
-                        if verifyRoot and not verifyRoot.Anchored then
-                            State.treadmillFailCount = State.treadmillFailCount + 1
-                            if State.treadmillFailCount >= 8 then
-                                resetFlaggedCharacter()
-                            elseif State.treadmillFailCount == 4 and Remotes.AskDoff then
-                                pcall(function() Remotes.AskDoff:InvokeServer() end)
-                            end
-                        else
-                            State.treadmillFailCount = 0
-                        end
-                    else
-                        State.treadmillFailCount = 0
-                    end
-                else
-                    State.treadmillFailCount = 0
-                end
+            else
+                State.treadmillFailCount = 0
             end
         end
     else

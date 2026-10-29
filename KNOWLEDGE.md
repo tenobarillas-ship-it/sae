@@ -385,14 +385,17 @@ sequenceDiagram
 ---
 
 ### 6.5 Halloween Dimension & World Automations
-- **Dual-Dimension Auto Treadmill Idle Execution:**
-  - **The Defect Fixed:** Previously, `WorkerScheduler:Register("StealAndTreadmill")` executed `if inHalloween then return end` before reaching Section 2 (Treadmill Idle Execution), and `PriorityManager` hardcoded `Auto Treadmill` as `Normal` dimension with `and not isMapClosed()` gating. Consequently, when in the Halloween Dimension with events idle or map barriers closed, Auto Treadmill refused to execute.
-  - **The Solution:**
-    1. Reclassified `Auto Treadmill` dimension to `"Any"` so the Dimension Supervisor never triggers portal transit for treadmill training.
-    2. Removed `isMapClosed()` gating from `PriorityManager:IsTaskEnabled` and `HasWork` so closed event maps naturally default to idle treadmill training.
-    3. Gated Normal Auto Steal strictly behind `not inHalloween` while allowing Treadmill Idle Execution to proceed in both dimensions.
-    4. In Halloween Dimension, executes in-place remote training (`RF/Treadmill/AskWearStill`) directly where the character stands, completely eliminating cross-dimension void plot tweening and portal exits.
-    5. Added universal `hopOffTreadmill()` dismount inside `PriorityManager:Acquire()` so whenever any seasonal event task activates, the character is immediately unanchored.
+- **Bidirectional Dimension Supervisor & Portal Routing:**
+  - **The Architecture Rule:** The Halloween Dimension only hosts seasonal event features. Main world features (`Auto Treadmill`, `Auto Steal`, `Enchanted / Bloom Event`) belong strictly to the `Normal` dimension where the player's base plot and field eggs reside.
+  - **Autonomous Cross-Dimension Routing in `StealAndTreadmill`:**
+    - If `topTask` dimension is `"Halloween"` and player is in Normal dimension (`not inHalloween`): calls `hopOffTreadmill()` and invokes `HalloweenPortalManager.EnterDimension(5.0)`.
+    - If `topTask` dimension is `"Normal"` (`Auto Treadmill` or `Auto Steal`) and player is in Halloween dimension (`inHalloween`): calls `hopOffTreadmill()` and invokes `HalloweenPortalManager.ExitDimension(12.0)` to return to the base plot.
+    - `if inHalloween then return end` barrier strictly isolates Normal Dimension Auto Steal and Plot Treadmill until arrival in the Normal world.
+  - **Modernized `HalloweenPortalManager.ExitDimension()`:**
+    - Replaced legacy movement overrides (`hum.PlatformStand = true`, `hum.AutoRotate = false`) with the standardized Auto Pumpkin movement architecture.
+    - Applies centralized `applyGodMode(char)` to suppress ragdoll and trip states cleanly while preserving natural upright locomotion.
+    - Uses dynamic distance-based timeout: `os.clock() + (dist / speed) + 3.0s`.
+    - Implements **Inside-Hitbox Contact Latching**: centers `cRoot.CFrame = CFrame.new(exitPart.Position)` with zero velocity, fires `UniversalCompat.FireTouch`, and maintains contact across a 0.65s latch window until server departure replication is confirmed.
 
 - **Heartbeat Linear Glide Portal Transportation (`EnterDimension` & `ExitDimension`):**
   - Replaces ordinary `TweenService` with a physics-safe Heartbeat linear glide at 240 studs/s directly to `HalloweenDimensionPortal.Hitbox` (and exit portal).
@@ -567,7 +570,7 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 10. **`Auto Buy Halloween Egg`** (Dimension: `Halloween` — exempt from map-closed gating)
 11. **`Enchanted / Bloom Event`** (Dimension: `Normal`)
 12. **`Auto Upgrades`** (Dimension: `Any` — independent background upgrades)
-13. **`Auto Treadmill`** (Dimension: `Any` — idle training fallback, dual-dimension in-place mounting)
+13. **`Auto Treadmill`** (Dimension: `Normal` — idle training fallback on base plot treadmill)
 
 > [!NOTE]
 > `PriorityManager:Initialize()` inserts tasks missing from a saved `TaskPriorities` list at their **canonical index** (rather than dropping to the bottom), ensuring that new seasonal features naturally slot into their designated ranks upon script startup.
@@ -716,4 +719,5 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `7b00dc618807250b897bb24e8c23332670913923` | `perf(optimization): reduce RAM & CPU usage via priority caching, decoupled worker loop & persistent raycasts` | Comprehensive performance overhaul: 150ms TTL priority evaluation cache in PriorityManager, decoupled WorkerScheduler from render Heartbeat to dedicated 20 Hz coroutine loop, calibrated task intervals, throttled HalloweenStealManager idle loop, cached O(1) Workspace resolvers, persistent RaycastParams, and 30s blacklist memory pruning. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `f24aef7904467767b683c9fc6f3b22c218416752` | `fix(portal): unify portal travel with Auto Pumpkin movement architecture & contact latch` | Aligned HalloweenPortalManager.EnterDimension with Auto Pumpkin: removed illegal hum.PlatformStand = true and hum.AutoRotate = false, integrated applyGodMode rig protection, added dynamic distance-based timeout (dist/speed + 4.0s), and implemented active contact latching directly inside hitbox.Position with zero velocity. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `7dddc124502318f7dfd5fcc1fff472c088586a7b` | `fix(treadmill): enable in-place Auto Treadmill idle training in Halloween Dimension` | Removed hard inHalloween return in StealAndTreadmill worker, reclassified Auto Treadmill dimension to "Any", eliminated map-closed gating in PriorityManager, implemented in-place remote wear-still in Halloween Dimension without void plot tweening or portal exits, and integrated universal auto-dismount in PriorityManager:Acquire. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `fc9bb55b3851f1af9db129c141fc93ace6a3e184` | `feat(dimension): bidirectional supervisor routing & exit portal transit for Normal tasks` | Wired autonomous ExitDimension routing for Normal tasks (Auto Treadmill, Auto Steal) when in Halloween Dimension. Modernized HalloweenPortalManager.ExitDimension with Auto Pumpkin movement architecture, eliminating PlatformStand corruption and adding inside-hitbox contact latching. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 

@@ -1527,97 +1527,97 @@ function HalloweenPortalManager.EnterDimension(timeout)
 end
 
 function HalloweenPortalManager.ExitDimension(timeout)
-    timeout = timeout or 6.0
+    timeout = timeout or 12.0
     if not HalloweenPortalManager.IsInHalloweenDimension() then
         return true
     end
 
-    local _, root, hum = getAliveRig()
-    if not root or not hum then return false end
+    local exitStartTime = os.clock()
+    local attempts = 0
 
-    local exitPart = nil
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    if dim then
-        local portalHome = dim:FindFirstChild("PortalHome", true)
-        if portalHome then
-            exitPart = portalHome:FindFirstChild("Portal") or portalHome:FindFirstChildWhichIsA("BasePart")
-        end
-        if not exitPart then
-            local questBuilding = dim:FindFirstChild("Quest Building", true)
-            if questBuilding then
-                exitPart = questBuilding:FindFirstChild("Portal") or questBuilding:FindFirstChildWhichIsA("BasePart")
+    -- Active Retry Loop: Guaranteed Exit despite rubberbanding
+    while (os.clock() - exitStartTime) < timeout and HalloweenPortalManager.IsInHalloweenDimension() do
+        attempts = attempts + 1
+        local _, root, hum = getAliveRig()
+        if not root or not hum then return false end
+
+        local exitPart = nil
+        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+        if dim then
+            local portalHome = dim:FindFirstChild("PortalHome", true)
+            if portalHome then
+                exitPart = portalHome:FindFirstChild("Portal") or portalHome:FindFirstChildWhichIsA("BasePart")
             end
-        end
-        if not exitPart then
-            for _, desc in ipairs(dim:GetDescendants()) do
-                if desc:IsA("BasePart") and desc.Name == "Portal" then
-                    exitPart = desc
-                    break
+            if not exitPart then
+                local questBuilding = dim:FindFirstChild("Quest Building", true)
+                if questBuilding then
+                    exitPart = questBuilding:FindFirstChild("Portal") or questBuilding:FindFirstChildWhichIsA("BasePart")
+                end
+            end
+            if not exitPart then
+                for _, desc in ipairs(dim:GetDescendants()) do
+                    if desc:IsA("BasePart") and desc.Name == "Portal" then
+                        exitPart = desc
+                        break
+                    end
                 end
             end
         end
-    end
 
-    if not exitPart then return false end
+        if not exitPart then return false end
 
-    -- Heartbeat Linear Glide to exit portal
-    local targetPos = exitPart.Position + Vector3.new(0, 1.0, 0)
-    local speed = 240
-    local stopDist = 3.0
+        local targetPos = exitPart.Position + Vector3.new(0, 1.0, 0)
+        local speed = 240
+        local stopDist = 3.0
 
-    setCollisions(false)
-    hum.PlatformStand = true
-    hum.AutoRotate = false
+        setCollisions(false)
+        hum.PlatformStand = true
+        hum.AutoRotate = false
 
-    local glideStart = os.clock()
-    while (os.clock() - glideStart) < timeout do
-        if not HalloweenPortalManager.IsInHalloweenDimension() then
-            break
+        local glideStart = os.clock()
+        while (os.clock() - glideStart) < 4.0 do
+            if not HalloweenPortalManager.IsInHalloweenDimension() then break end
+            local _, cRoot, cHum = getAliveRig()
+            if not cRoot or not cHum or cHum.Health <= 0 then break end
+
+            local diff = targetPos - cRoot.Position
+            if diff.Magnitude <= stopDist then break end
+
+            local dt = Services.RunService.Heartbeat:Wait()
+            local dir = diff.Unit
+            local step = math.min(speed * dt, diff.Magnitude)
+
+            cRoot.AssemblyLinearVelocity = dir * speed
+            cRoot.CFrame = CFrame.new(cRoot.Position + (dir * step), cRoot.Position + (dir * 10))
         end
 
-        local _, cRoot, cHum = getAliveRig()
-        if not cRoot or not cHum or cHum.Health <= 0 then
-            break
+        local _, fRoot, fHum = getAliveRig()
+        if fRoot and exitPart and exitPart.Parent then
+            fRoot.AssemblyLinearVelocity = Vector3.new(0, -0.5, 0)
+            pcall(function()
+                if UniversalCompat and UniversalCompat.FireTouch then
+                    UniversalCompat.FireTouch(fRoot, exitPart, 0)
+                    task.wait(0.04)
+                    UniversalCompat.FireTouch(fRoot, exitPart, 1)
+                end
+            end)
         end
 
-        local diff = targetPos - cRoot.Position
-        if diff.Magnitude <= stopDist then
-            break
+        if fHum then
+            fHum.PlatformStand = false
+            fHum.AutoRotate = true
         end
+        if fRoot then
+            fRoot.AssemblyLinearVelocity = Vector3.zero
+            fRoot.AssemblyAngularVelocity = Vector3.zero
+        end
+        setCollisions(true)
 
-        local dt = Services.RunService.Heartbeat:Wait()
-        local dir = diff.Unit
-        local step = math.min(speed * dt, diff.Magnitude)
-
-        cRoot.AssemblyLinearVelocity = dir * speed
-        cRoot.CFrame = CFrame.new(cRoot.Position + (dir * step), cRoot.Position + (dir * 10))
-    end
-
-    local _, fRoot, fHum = getAliveRig()
-    if fRoot and exitPart and exitPart.Parent then
-        fRoot.AssemblyLinearVelocity = Vector3.new(0, -0.5, 0)
-        pcall(function()
-            if UniversalCompat and UniversalCompat.FireTouch then
-                UniversalCompat.FireTouch(fRoot, exitPart, 0)
-                task.wait(0.04)
-                UniversalCompat.FireTouch(fRoot, exitPart, 1)
-            end
-        end)
-    end
-
-    if fHum then
-        fHum.PlatformStand = false
-        fHum.AutoRotate = true
-    end
-    if fRoot then
-        fRoot.AssemblyLinearVelocity = Vector3.zero
-        fRoot.AssemblyAngularVelocity = Vector3.zero
-    end
-    setCollisions(true)
-
-    local deadline = os.clock() + 3.0
-    while os.clock() < deadline and HalloweenPortalManager.IsInHalloweenDimension() do
-        Services.RunService.Heartbeat:Wait()
+        -- Verification window: wait up to 2.5s to confirm exit
+        local confirmDeadline = os.clock() + 2.5
+        while os.clock() < confirmDeadline and HalloweenPortalManager.IsInHalloweenDimension() do
+            Services.RunService.Heartbeat:Wait()
+        end
     end
 
     return not HalloweenPortalManager.IsInHalloweenDimension()
@@ -3585,6 +3585,16 @@ function HalloweenBossManager:HandleArenaExit(arena)
 
     if hitbox then
         self:GlideTo(hitbox.Position, 2.0)
+        pcall(function()
+            if UniversalCompat and UniversalCompat.FireTouch then
+                local _, root = getAliveRig()
+                if root then
+                    UniversalCompat.FireTouch(root, hitbox, 0)
+                    task.wait(0.04)
+                    UniversalCompat.FireTouch(root, hitbox, 1)
+                end
+            end
+        end)
         task.wait(0.5)
         return true
     end
@@ -5133,25 +5143,73 @@ do
 
         updateHUD("Exiting Town", nil, "Moving to Return Rail")
 
-        local returnPrompt = findTrainPrompt("Name", "TrainReturn")
-        if returnPrompt and returnPrompt.Parent then
-            local returnPos = projectOnRail(returnPrompt, "ReturnRailStart", "ReturnRailEnd")
-            glideTo(returnPos + Vector3.new(0, 2.5, 0), CONFIG.TravelSpeed, 3)
-            task.wait(0.2)
+        local exitStartTime = os.clock()
+        local maxExitDuration = 35.0
+        local retryCount = 0
 
-            firePrompt(returnPrompt)
+        -- Active Retry Loop: Guaranteed Exit despite rubberbanding
+        while (os.clock() - exitStartTime) < maxExitDuration and isInForgottenTown() do
+            if not getgenv().config.autoPhantomExpress then break end
+
+            retryCount = retryCount + 1
+            updateHUD("Exiting Town", string.format("Return Attempt #%d", retryCount), "Verifying Return Rail")
+
+            -- Step A: Re-acquire Return Prompt and target coordinates
+            local returnPrompt = findTrainPrompt("Name", "TrainReturn")
+            local returnPos = nil
+            if returnPrompt and returnPrompt.Parent then
+                returnPos = projectOnRail(returnPrompt, "ReturnRailStart", "ReturnRailEnd")
+            end
+
+            -- Step B: Glide to Return Rail
+            if returnPos then
+                glideTo(returnPos + Vector3.new(0, 2.5, 0), CONFIG.TravelSpeed, 3.0)
+            end
+
+            -- Step C: Anti-rubberband position verification
+            local _, curRoot = getAliveRig()
+            local atRail = false
+            if curRoot and returnPos then
+                atRail = (curRoot.Position - (returnPos + Vector3.new(0, 2.5, 0))).Magnitude <= 8.0
+            end
+
+            if atRail or not returnPos then
+                -- Step D: Trigger prompt and invoke return remote
+                if returnPrompt and returnPrompt.Parent and returnPrompt.Enabled then
+                    firePrompt(returnPrompt)
+                end
+
+                callTrainAction("Return")
+
+                -- Step E: Verification window (wait up to 3.0s to confirm departure)
+                local verifyDeadline = os.clock() + 3.0
+                while os.clock() < verifyDeadline and isInForgottenTown() do
+                    local phase = getTrainPhase()
+                    if phase == "Returning" or phase == "Respawning" or phase == "Station" then
+                        break
+                    end
+                    Services.RunService.Heartbeat:Wait()
+                end
+            else
+                -- Rubberbanded away from rail! Brief pause before re-approaching
+                task.wait(0.3)
+            end
         end
 
-        callTrainAction("Return")
-
-        local deadline = os.clock() + 15
-        while os.clock() < deadline and isInForgottenTown() do
+        -- Step F: Wait for return train ride to complete transit
+        local transitDeadline = os.clock() + 25.0
+        while os.clock() < transitDeadline and isPlayerOnTrain() do
+            local phase = getTrainPhase()
+            updateHUD("Returning to Station", "Riding train back...", "Phase: " .. tostring(phase))
             Services.RunService.Heartbeat:Wait()
         end
 
         local char, root, hum = getAliveRig()
         if hum then pcall(function() hum:UnequipTools() end) end
-        if root then root.AssemblyLinearVelocity = Vector3.zero end
+        if root then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end
         
         State.TownSettled = false
         updateHUD("Returned to Station", nil, "Cycle Finished")

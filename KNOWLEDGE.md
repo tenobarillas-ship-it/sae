@@ -30,6 +30,8 @@
 ### 1.1 Repositories & Distribution
 - **Main Automation Script:** [`tenobarillas-ship-it/sae`](https://github.com/tenobarillas-ship-it/sae)
   - Primary script entry: `qualcom` (Luau script executed via standard Roblox `loadstring`).
+  - Living knowledge base: `KNOWLEDGE.md`.
+  - Engineering feedback & operating guidelines: `feedback.md`.
   - Standalone loader:
     ```lua
     loadstring(game:HttpGet("https://raw.githubusercontent.com/tenobarillas-ship-it/sae/main/qualcom"))()
@@ -638,3 +640,4 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `517702ac1f3bbe3baee16ec7132cf4938d7e0b77` | `feat(halloween): add Target Area and Min Rarity filters to Auto Steal Halloween Eggs` | Added user-configurable Target Areas multi-dropdown and Min Rarity dropdown to Auto Steal Halloween Eggs. Integrates reference spatial boundary thresholds (Graveyard <= 550, Manor >= 1200, Swamps between) with HalloweenAreaManager and DynamicRarityResolver, selecting rarest/highest value candidates first. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `6802c7189eb3eba1a24a78751e7abc3074e5754a` | `fix(halloween): action-gated egg steal portal entry, auto boss dimension gateway & remove forced auto-exit` | Fixed Auto Halloween Egg Steal to only enter portal when an egg action is needed (carrying egg or matching egg exists). Fixed Auto Boss to check for Halloween Dimension arrival before gliding to BossPortal. Removed forced ExitDimension call in Dimension Supervisor so turning off features never forcefully ejects the player. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `fd690bac084b746f8984a19831bb0c22e6f4a983` | `refactor(halloween): completely remove Auto Phantom Express, Auto Vacuum Ghouler & Auto Soul Trade In` | Completely excised Auto Phantom Express, Auto Vacuum Ghouler Boss, and Auto Soul Trade In (modules, settings, UI toggles, worker registrations, and PriorityManager branches) from codebase per user request. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `6733e8e3d8dff81d8022cf95852fcaeecfdd8b44` | `docs: add feedback.md with user corrections, preferences and lessons` | Generated comprehensive `feedback.md` consolidating all extracted user corrections, preferences, anticheat rules, and architectural guidelines across development history. |

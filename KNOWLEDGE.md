@@ -1,4 +1,3 @@
-| `c1385bcaf832eb45d76607710158e38098e8c4d6` | `feat(halloween): pumpkin 1000-stud altar priority, eliminate test HUD, separate town dimension` | Overhauled Auto Pumpkin with 1,000-stud scan range and strict Altar-proximity sorting. Completely eliminated temporary draggable PhantomExpressHUD and status overlays in favor of in-memory status tracking. Implemented independent Town dimension detection (`isInForgottenTown`, `isAboardPhantomExpress`, `isInTrainEvent`) preventing incorrect portal entry while on train or in Town. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 # SYNTAXIS HUB (`qualcom`) - PROJECT KNOWLEDGE BASE
 
 > **Notice:** This document is the living knowledge repository for the Syntaxis Hub project. It contains all architectural decisions, reverse-engineered game mechanics, remote endpoints, algorithm designs, executor compatibility rules, priority systems, and known issues. **Every time new knowledge is discovered, implemented, or refactored, this document must be updated.**
@@ -610,6 +609,43 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 
 ---
 
+### 6.13 Town Dimension Isolation & Auto Pumpkin Altar Proximity Architecture
+- **Town & Train Independence from Halloween Portal:**
+  - When the player is aboard the Phantom Express (`Phase` in `"Boarded"`, `"Departing"`, `"Returning"`, `"Respawning"`) or has arrived in the Forgotten Town (`Phase == "Town"` or `char:GetAttribute("TrainEventInForgottenTown") == true`), the character is in a distinct remote dimension far outside `HALLOWEEN_DIM_CENTER`.
+  - In order to prevent the script from falsely assuming the player has exited Halloween and trying to enter the Halloween portal:
+    1. `HalloweenPortalManager.EnterDimension()` has a hard guard: `if isInTrainEvent() then return false end`.
+    2. `HalloweenPortalManager.IsInHalloweenDimension()` returns `false` if `isInTrainEvent()` to prevent Halloween features from attempting cross-dimension tasks while in Town.
+    3. `PriorityManager:GetTaskDimension("Auto Phantom Express")` and `Auto Soul Trade` dynamically return `"Town"` when `isInTrainEvent()` is true.
+    4. `WorkerScheduler:Register("PhantomExpress")` executes directly when `isInTrainEvent()` is true, completely bypassing any portal check.
+    5. `WorkerScheduler:Register("StealAndTreadmill")` (Dimension Supervisor) exits immediately if `isInTrainEvent()`.
+- **Pure In-Memory Status Tracking (Zero HUD/UI Overlays):**
+  - Removed all temporary GUI instances (`PhantomExpressHUD`, ScreenGui, frames, buttons, drag handlers).
+  - Status is maintained purely in memory via `State.CurrentStatus` and `State.CurrentDetail`, accessible programmatically via `PhantomExpressManager:GetStatus()`.
+  - All controls remain strictly inside the main GUI `halloweenCategory` toggles.
+- **Auto Pumpkin 1,000-Stud Altar Proximity Overhaul:**
+  - `HalloweenPumpkinManager.Config.ScanRadius = 1000.0`.
+  - Scans across the entire area (up to 1,000 studs from Altar or Player) for runaway pumpkins in `Workspace.HalloweenDimension.RunawayPumpkins`.
+  - Strictly prioritizes the pumpkin with minimum distance to the altar: `(pumpkin.Position - AltarDepositPos).Magnitude < minAltarDist`.
+  - Retains sticky target lock while the target is alive, prompt enabled, and within `ScanRadius + 150` studs of the altar.
+
+### 6.14 Guaranteed Exit & Anti-Rubberband Departure Architecture
+- **Active Exit Verification vs Single-Attempt Failure:**
+  - **The Defect Fixed:** Previously, `concludeTownEvent()` performed a single `glideTo`, fired `TrainReturn` proximity prompt once, called `callTrainAction("Return")` once, and entered a passive 15-second loop. If server anticheat or network lag rubberbanded the character away from the return rail, the prompt was out of activation range and the remote failed; after 15 seconds, the script exited the cycle while leaving the character stranded in Forgotten Town.
+  - **Active Retry Loop:**
+    1. Re-projects rail target and glides to `ReturnRail` with Heartbeat linear velocity.
+    2. Measures physical distance to the return rail: `(root.Position - returnPos).Magnitude <= 8.0`. If rubberbanded backwards, immediately re-aligns before firing.
+    3. Triggers prompt and invokes `"Return"` remote.
+    4. Enters an active 3.0s departure verification window checking `isInForgottenTown()` and train phases (`"Returning"`, `"Respawning"`, `"Station"`).
+    5. If departure is not verified, continuously loops and retries until verified or fail-safe timeout (35s).
+- **Return Train Transit Settlement:**
+  - Once `isInForgottenTown()` becomes false, monitors `isPlayerOnTrain()` while the train rides back through the void to the Halloween station.
+  - Only resets `State.TownSettled = false`, un-equips tools, and zeroes velocity after the player arrives on the station platform.
+- **Secondary Exit Hardening:**
+  - `HalloweenPortalManager.ExitDimension`: Upgraded to an active retry loop (up to 12s) that glides, verifies distance, fires touch interests, and confirms `not IsInHalloweenDimension()`.
+  - `HalloweenBossManager:HandleArenaExit`: Fires `UniversalCompat.FireTouch` on `hitbox` in addition to gliding, ensuring instant arena exit registration.
+
+---
+
 ## 9. Commit History & Version Milestones
 
 | Commit SHA | Commit Title / Name | Description |
@@ -643,21 +679,6 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `fd690bac084b746f8984a19831bb0c22e6f4a983` | `refactor(halloween): completely remove Auto Phantom Express, Auto Vacuum Ghouler & Auto Soul Trade In` | Completely excised Auto Phantom Express, Auto Vacuum Ghouler Boss, and Auto Soul Trade In (modules, settings, UI toggles, worker registrations, and PriorityManager branches) from codebase per user request. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `6733e8e3d8dff81d8022cf95852fcaeecfdd8b44` | `docs: add feedback.md with user corrections, preferences and lessons` | Generated comprehensive `feedback.md` consolidating all extracted user corrections, preferences, anticheat rules, and architectural guidelines across development history. |
 | `8727476bf147fe3586beafa9b865080a6e204cfe` | `feat(halloween): add Auto Phantom Express & Auto Soul Trade, modernize PriorityManager` | Integrated full-lifecycle PhantomExpressManager (station rail boarding, vacuum tool equip, Ghouler Boss combat, 16-ray ghost vacuuming, pre-verified soul trading, return train transit, draggable HUD). Added action-gated portal entry for Auto Steal Halloween Eggs with character mutex locking (eliminating normal/seasonal dimension contention). Decoupled passive features (Auto Buy Halloween Egg, Auto Upgrades) from PriorityManager. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
-### 6.13 Town Dimension Isolation & Auto Pumpkin Altar Proximity Architecture
-- **Town & Train Independence from Halloween Portal:**
-  - When the player is aboard the Phantom Express (`Phase` in `"Boarded"`, `"Departing"`, `"Returning"`, `"Respawning"`) or has arrived in the Forgotten Town (`Phase == "Town"` or `char:GetAttribute("TrainEventInForgottenTown") == true`), the character is in a distinct remote dimension far outside `HALLOWEEN_DIM_CENTER`.
-  - In order to prevent the script from falsely assuming the player has exited Halloween and trying to enter the Halloween portal:
-    1. `HalloweenPortalManager.EnterDimension()` has a hard guard: `if isInTrainEvent() then return false end`.
-    2. `HalloweenPortalManager.IsInHalloweenDimension()` returns `false` if `isInTrainEvent()` to prevent Halloween features from attempting cross-dimension tasks while in Town.
-    3. `PriorityManager:GetTaskDimension("Auto Phantom Express")` and `Auto Soul Trade` dynamically return `"Town"` when `isInTrainEvent()` is true.
-    4. `WorkerScheduler:Register("PhantomExpress")` executes directly when `isInTrainEvent()` is true, completely bypassing any portal check.
-    5. `WorkerScheduler:Register("StealAndTreadmill")` (Dimension Supervisor) exits immediately if `isInTrainEvent()`.
-- **Pure In-Memory Status Tracking (Zero HUD/UI Overlays):**
-  - Removed all temporary GUI instances (`PhantomExpressHUD`, ScreenGui, frames, buttons, drag handlers).
-  - Status is maintained purely in memory via `State.CurrentStatus` and `State.CurrentDetail`, accessible programmatically via `PhantomExpressManager:GetStatus()`.
-  - All controls remain strictly inside the main GUI `halloweenCategory` toggles.
-- **Auto Pumpkin 1,000-Stud Altar Proximity Overhaul:**
-  - `HalloweenPumpkinManager.Config.ScanRadius = 1000.0`.
-  - Scans across the entire area (up to 1,000 studs from Altar or Player) for runaway pumpkins in `Workspace.HalloweenDimension.RunawayPumpkins`.
-  - Strictly prioritizes the pumpkin with minimum distance to the altar: `(pumpkin.Position - AltarDepositPos).Magnitude < minAltarDist`.
-  - Retains sticky target lock while the target is alive, prompt enabled, and within `ScanRadius + 150` studs of the altar.
+| `c1385bcaf832eb45d76607710158e38098e8c4d6` | `feat(halloween): pumpkin 1000-stud altar priority, eliminate test HUD, separate town dimension` | Overhauled Auto Pumpkin with 1,000-stud scan range and strict Altar-proximity sorting. Completely eliminated temporary draggable PhantomExpressHUD and status overlays in favor of in-memory status tracking. Implemented independent Town dimension detection (`isInForgottenTown`, `isAboardPhantomExpress`, `isInTrainEvent`) preventing incorrect portal entry while on train or in Town. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `0d280ed4aa3f0229d237e726dccc0ac870a01702` | `feat(halloween): guaranteed exit retry loops & anti-rubberband departure verification` | Overhauled `concludeTownEvent` in PhantomExpressManager with active anti-rubberband retry loop, physical proximity verification (<= 8 studs), confirmed departure checks, and transit settlement. Hardened HalloweenPortalManager.ExitDimension with active retry verification and added FireTouch invocation to HalloweenBossManager:HandleArenaExit. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+
